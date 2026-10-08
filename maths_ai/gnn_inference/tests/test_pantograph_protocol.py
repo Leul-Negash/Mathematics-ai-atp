@@ -1,4 +1,4 @@
-"""Pure final-contract tests; these do not launch Lean or import PyPantograph."""
+"""Pure revision-2 contract tests; no Lean process or PyPantograph import."""
 
 from __future__ import annotations
 
@@ -48,6 +48,8 @@ FIXTURES = Path(__file__).parent / "fixtures" / "pantograph"
 BASELINE = json.loads((FIXTURES / "baseline" / "baseline.json").read_text())
 CAPTURES = {entry["label"]: entry for entry in BASELINE["interactions"]}
 FUTURE = json.loads((FIXTURES / "future_contract.json").read_text())
+UPSTREAM = json.loads((FIXTURES / "upstream_pr1" / "capture.json").read_text())
+UPSTREAM_CAPTURES = {entry["label"]: entry for entry in UPSTREAM["interactions"]}
 
 
 def success(name="identity_intro"):
@@ -293,7 +295,7 @@ def test_every_baseline_tactic_response_is_rejected(label):
         {"messages": None},
         {"validation": None},
         {"fragment": "tactic"},
-        {"hasSorry": False},
+        {"hasSorry": None},
     ],
 )
 def test_mixed_and_unknown_tactic_variants_are_rejected(change):
@@ -303,9 +305,7 @@ def test_mixed_and_unknown_tactic_variants_are_rejected(change):
         decode_response("goal.tactic", payload)
 
 
-@pytest.mark.parametrize(
-    "field", ["version", "scope", "checked", "hasSorry", "hasUnsafe"]
-)
+@pytest.mark.parametrize("field", ["version", "scope", "checked"])
 def test_validation_fields_are_required(field):
     payload = success()
     del payload["validation"][field]
@@ -321,8 +321,6 @@ def test_validation_fields_are_required(field):
         ("scope", "root-proof"),
         ("checked", False),
         ("checked", 1),
-        ("hasSorry", None),
-        ("hasUnsafe", 0),
     ],
 )
 def test_validation_evidence_is_strict(field, value):
@@ -348,25 +346,47 @@ def test_message_positions_and_warning_preservation():
     message = result.messages[0]
     assert (message.pos.line, message.pos.column) == (2, 0)
     assert (message.end_pos.line, message.end_pos.column) == (2, 4)
-    assert message.file_name == "<Pantograph>" and message.kind == "example"
+    assert message.kind == "example" and message.pos.is_available
     assert message.severity == "warning"
     payload = success()
-    payload["messages"] = [{"severity": "error", "data": "logged error"}]
+    payload["messages"] = [
+        {
+            "kind": "[anonymous]",
+            "severity": "error",
+            "data": "logged error",
+            "pos": {"line": 0, "column": 0},
+        }
+    ]
     with pytest.raises(PantographProtocolError):
         decode_response("goal.tactic", payload)
-    assert decode_messages([{"severity": "information", "data": "info"}])[0].pos is None
+    info = decode_messages(
+        [
+            {
+                "kind": "[anonymous]",
+                "severity": "information",
+                "data": "info",
+                "pos": {"line": 0, "column": 0},
+            }
+        ]
+    )[0]
+    assert (info.pos.line, info.pos.column) == (0, 0)
+    assert not info.pos.is_available
 
 
 @pytest.mark.parametrize(
-    "message",
+    "change",
     [
         {"severity": "info", "data": "bad"},
-        {"severity": "warning"},
         {"severity": "error", "data": 0},
         {"severity": "warning", "data": "bad", "pos": None},
-        {"severity": "warning", "data": "bad", "pos": {"line": 0, "column": 0}},
+        {"severity": "warning", "data": "bad", "pos": {"line": 0, "column": 1}},
         {"severity": "warning", "data": "bad", "pos": {"line": True, "column": 0}},
-        {"severity": "warning", "data": "bad", "endPos": {"line": 1, "column": 0}},
+        {
+            "severity": "warning",
+            "data": "bad",
+            "pos": {"line": 0, "column": 0},
+            "endPos": {"line": 1, "column": 0},
+        },
         {
             "severity": "warning",
             "data": "bad",
@@ -375,7 +395,14 @@ def test_message_positions_and_warning_preservation():
         },
     ],
 )
-def test_message_schema_is_strict(message):
+def test_message_schema_is_strict(change):
+    message = {
+        "kind": "[anonymous]",
+        "severity": "warning",
+        "data": "text",
+        "pos": {"line": 1, "column": 0},
+    }
+    message.update(change)
     with pytest.raises(PantographProtocolError):
         decode_messages([message])
 
@@ -383,7 +410,7 @@ def test_message_schema_is_strict(message):
 @pytest.mark.parametrize("variant", ["parseError", "tacticErrors"])
 @pytest.mark.parametrize("bad", [None, False, 0, {}, [], ""])
 def test_failure_payloads_are_not_empty_or_wrong_type(variant, bad):
-    payload = {variant: bad, "messages": []}
+    payload = {variant: bad, "messages": [], "hasSorry": False, "hasUnsafe": False}
     # Nonempty strings only for parseError; nonempty string arrays for tacticErrors.
     with pytest.raises(PantographProtocolError):
         decode_response("goal.tactic", payload)
@@ -396,8 +423,10 @@ def test_goals_keep_order_case_tags_and_conversion_metadata():
     assert [goal.case_tag for goal in result.goals] == ["left", "right"]
     goal_payload = deepcopy(wire[0])
     goal_payload["isConversion"] = True
+    goal_payload["fragment"] = "conv"
     decoded = decode_execution_goal(goal_payload)
     assert decoded.is_conversion is True
+    assert decoded.fragment == "conv"
     assert decoded.goal.case_tag == "left"
     assert "left" not in decoded.goal.hypotheses
 
@@ -412,6 +441,7 @@ def test_locals_preserve_instances_lets_raw_views_and_fresh_canonical_copies():
     assert let_goal.locals[1].value.pp == "n"
     assert let_goal.locals[1].value.model_sexp == "(:fv FV0)"
     projection = execution_goal_to_translator(let_goal)
+    assert projection["fragment"] == let_goal.fragment == "tactic"
     assert projection["target"]["sexp"] == let_goal.target.sexp
     assert projection["target"]["sexp"] != projection["target"]["model_sexp"]
     copied = let_goal.goal
@@ -530,7 +560,8 @@ def test_immutable_containers_and_state_conversion():
 @pytest.mark.parametrize(
     "label", ["identity_intro", "instance_intro", "let_intro", "conjunction_split"]
 )
-def test_exact_canonical_fingerprints_and_graph_features(label):
+@pytest.mark.parametrize("source", ["authored", "upstream"])
+def test_exact_canonical_fingerprints_and_graph_features(label, source):
     from maths_ai.gnn_inference.atp_lean_gnn.graph import (
         dag_fingerprint,
         model_goal_to_dag,
@@ -539,9 +570,16 @@ def test_exact_canonical_fingerprints_and_graph_features(label):
     expected = json.loads((FIXTURES / "canonical_graph_expectations.json").read_text())[
         "goals"
     ][label]
-    result = decode_response("goal.tactic", success(label))
-    assert len(result.goals) == len(expected)
-    for execution, golden in zip(result.goals, expected):
+    goals = (
+        decode_response("goal.tactic", success(label)).goals
+        if source == "authored"
+        else tuple(
+            decode_execution_goal(goal)
+            for goal in UPSTREAM_CAPTURES[label]["response"]["goals"]
+        )
+    )
+    assert len(goals) == len(expected)
+    for execution, golden in zip(goals, expected):
         goal = execution.goal
         assert goal.model_dump() == golden["canonical"]
         assert goal.state_fingerprint() == golden["state_fingerprint"]
@@ -556,6 +594,7 @@ def test_exact_canonical_fingerprints_and_graph_features(label):
 def test_baseline_evidence_is_not_final_contract_evidence():
     assert BASELINE["kind"] == "unmodified-custom-repl-baseline"
     assert FUTURE["kind"] == "authored-future-contract"
+    assert FUTURE["contract_revision"] == 2
     assert BASELINE["readiness_line"] == "ready."
     for entry in BASELINE["interactions"]:
         assert json.loads(entry["response_line"]) == entry["response"]
@@ -582,6 +621,22 @@ def test_frozen_contract_descriptor_matches_the_codec():
         COMMAND_ERROR_CATEGORIES
     )
     assert contract["complete_theorem_certification"] is False
+    assert contract["contract_revision"] == FUTURE["contract_revision"] == 2
+    assert contract["transition_validation"] == success()["validation"]
+    assert set(contract["tactic_responses"]["success"]["required"]) == set(success())
+    for variant, fixture in [
+        ("parse_failure", "parse_failure"),
+        ("tactic_failure", "tactic_failure"),
+    ]:
+        assert set(contract["tactic_responses"][variant]["required"]) == set(
+            FUTURE[fixture]
+        )
+    message = FUTURE["parse_failure"]["messages"][0]
+    assert set(message) == set(contract["message_schema"]["required"])
+    assert set(FUTURE["warning_success"]["messages"][0]) == set(
+        contract["message_schema"]["required"] + contract["message_schema"]["optional"]
+    )
+    assert set(success()["goals"][0]) == set(contract["goal_schema"]["required"])
 
 
 def test_goal_names_and_omitted_case_names_are_not_interchangeable():
@@ -631,3 +686,195 @@ def test_capture_utility_refuses_overwriting_evidence(tmp_path):
     assert result.returncode == 2
     assert "existing evidence is never overwritten" in result.stderr
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("flag", ["hasSorry", "hasUnsafe"])
+@pytest.mark.parametrize("bad", [None, 0, 1, "false", [], {}])
+def test_top_level_proof_flags_require_booleans(flag, bad):
+    payload = success()
+    payload[flag] = bad
+    with pytest.raises(PantographProtocolError):
+        decode_response("goal.tactic", payload)
+
+
+@pytest.mark.parametrize("flag", ["hasSorry", "hasUnsafe"])
+def test_proof_flags_are_required_at_top_level_without_nested_duplicates(flag):
+    payload = success()
+    del payload[flag]
+    with pytest.raises(PantographProtocolError):
+        decode_response("goal.tactic", payload)
+    payload["validation"][flag] = False
+    with pytest.raises(PantographProtocolError):
+        decode_response("goal.tactic", payload)
+    payload[flag] = False
+    with pytest.raises(PantographProtocolError):
+        decode_response("goal.tactic", payload)
+
+
+@pytest.mark.parametrize("variant", ["parse_failure", "tactic_failure"])
+@pytest.mark.parametrize("flag", ["hasSorry", "hasUnsafe"])
+@pytest.mark.parametrize("bad", [True, None, 0, "false"])
+def test_failed_operations_require_false_boolean_proof_flags(variant, flag, bad):
+    payload = deepcopy(FUTURE[variant])
+    payload[flag] = bad
+    with pytest.raises(PantographProtocolError):
+        decode_response("goal.tactic", payload)
+
+
+@pytest.mark.parametrize("variant", ["parse_failure", "tactic_failure"])
+@pytest.mark.parametrize("flag", ["hasSorry", "hasUnsafe"])
+def test_failed_operations_require_both_proof_flags(variant, flag):
+    payload = deepcopy(FUTURE[variant])
+    del payload[flag]
+    with pytest.raises(PantographProtocolError):
+        decode_response("goal.tactic", payload)
+
+
+@pytest.mark.parametrize("field", ["kind", "severity", "pos", "data"])
+def test_all_merged_message_fields_are_required(field):
+    message = deepcopy(FUTURE["parse_failure"]["messages"][0])
+    del message[field]
+    with pytest.raises(PantographProtocolError):
+        decode_messages([message])
+
+
+@pytest.mark.parametrize("field", ["kind", "data", "pos", "endPos"])
+def test_null_message_fields_are_not_supported(field):
+    message = deepcopy(FUTURE["warning_success"]["messages"][0])
+    message[field] = None
+    with pytest.raises(PantographProtocolError):
+        decode_messages([message])
+
+
+def test_removed_message_file_name_is_not_a_compatibility_field():
+    message = deepcopy(FUTURE["warning_success"]["messages"][0])
+    message["fileName"] = "<Pantograph>"
+    with pytest.raises(PantographProtocolError):
+        decode_messages([message])
+
+
+@pytest.mark.parametrize(
+    "position",
+    [
+        {"line": 0, "column": 2},
+        {"line": -1, "column": 0},
+        {"line": 1, "column": -1},
+        {"line": False, "column": 0},
+        {"line": 1, "column": True},
+        {"line": 1.0, "column": 0},
+        {"line": 1, "column": "0"},
+    ],
+)
+def test_message_position_rejects_malformed_coordinates(position):
+    message = deepcopy(FUTURE["parse_failure"]["messages"][0])
+    message["pos"] = position
+    with pytest.raises(PantographProtocolError):
+        decode_messages([message])
+
+
+@pytest.mark.parametrize(
+    "end",
+    [{"line": 0, "column": 0}, {"line": 1, "column": 0}, {"line": 2, "column": 1}],
+)
+def test_message_end_requires_known_ordered_start(end):
+    message = deepcopy(FUTURE["warning_success"]["messages"][0])
+    message["pos"] = {"line": 2, "column": 2}
+    message["endPos"] = end
+    with pytest.raises(PantographProtocolError):
+        decode_messages([message])
+
+
+def test_equal_known_message_start_and_end_are_valid():
+    message = deepcopy(FUTURE["warning_success"]["messages"][0])
+    message["endPos"] = deepcopy(message["pos"])
+    decoded = decode_messages([message])[0]
+    assert decoded.pos == decoded.end_pos
+    assert decoded.pos.is_available
+    with pytest.raises(FrozenInstanceError):
+        decoded.pos.line = 0
+
+
+@pytest.mark.parametrize("field", ["fragment", "isConversion"])
+def test_goal_mode_fields_are_required(field):
+    payload = success()["goals"][0]
+    del payload[field]
+    with pytest.raises(PantographProtocolError):
+        decode_execution_goal(payload)
+
+
+@pytest.mark.parametrize("fragment", [None, False, 0, "unknown", "", "conversion"])
+def test_goal_fragments_are_strict(fragment):
+    payload = success()["goals"][0]
+    payload["fragment"] = fragment
+    with pytest.raises(PantographProtocolError):
+        decode_execution_goal(payload)
+
+
+@pytest.mark.parametrize(
+    "fragment,is_conversion",
+    [("tactic", True), ("calc", True), ("conv", False), ("conv", 1)],
+)
+def test_fragment_and_conversion_must_agree(fragment, is_conversion):
+    payload = success()["goals"][0]
+    payload.update(fragment=fragment, isConversion=is_conversion)
+    with pytest.raises(PantographProtocolError):
+        decode_execution_goal(payload)
+
+
+@pytest.mark.parametrize("fragment", ["tactic", "conv", "calc"])
+def test_fragment_is_immutable_execution_metadata_not_a_graph_feature(fragment):
+    payload = success()["goals"][0]
+    expected = decode_execution_goal(payload).goal.model_dump()
+    payload.update(fragment=fragment, isConversion=(fragment == "conv"))
+    goal = decode_execution_goal(payload)
+    assert goal.fragment == fragment
+    assert execution_goal_to_translator(goal)["fragment"] == fragment
+    assert goal.goal.model_dump() == expected
+    with pytest.raises(FrozenInstanceError):
+        goal.fragment = "other"
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        entry["label"]
+        for entry in UPSTREAM["interactions"]
+        if "nextStateId" in entry["response"]
+    ],
+)
+def test_upstream_success_requires_the_missing_companion_metadata(label):
+    with pytest.raises(PantographProtocolError) as exc:
+        decode_response("goal.tactic", UPSTREAM_CAPTURES[label]["response"])
+    assert "validation" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "label,expected",
+    [("parse_failure", TacticParseFailure), ("tactic_failure", TacticFailure)],
+)
+def test_merged_failure_messages_decode_without_fabricating_proof_evidence(
+    label, expected
+):
+    result = decode_response("goal.tactic", UPSTREAM_CAPTURES[label]["response"])
+    assert isinstance(result, expected)
+    assert result.messages[0].kind == "[anonymous]"
+    assert not result.messages[0].pos.is_available
+    assert not hasattr(result, "validation")
+    assert not hasattr(result, "next_state_id")
+
+
+def test_historical_revision1_fixture_is_preserved_but_not_accepted():
+    historical = json.loads(
+        (FIXTURES / "historical_revision1" / "future_contract.json").read_text()
+    )
+    for payload in historical["successes"].values():
+        with pytest.raises(PantographProtocolError):
+            decode_response("goal.tactic", payload)
+    for name in [
+        "parse_failure",
+        "tactic_failure",
+        "logged_error_failure",
+        "warning_success",
+    ]:
+        with pytest.raises(PantographProtocolError):
+            decode_response("goal.tactic", historical[name])

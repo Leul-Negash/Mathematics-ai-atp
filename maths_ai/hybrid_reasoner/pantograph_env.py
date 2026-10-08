@@ -28,10 +28,10 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
-from pantograph.server import Server
-from pantograph.utils import _get_proc_cwd
+if TYPE_CHECKING:
+    from pantograph.server import Server
 
 _LAKEFILES = ("lakefile.lean", "lakefile.toml")
 
@@ -67,6 +67,11 @@ class PantographEnv:
     imports: tuple[str, ...] = ("Init",)
     options: Mapping[str, Any] = field(default_factory=dict)
     timeout: int = 120
+    server_start_timeout_s: float = 120.0
+    worker_shutdown_timeout_s: float = 10.0
+    response_line_limit: int = 8 * 1024 * 1024
+    stderr_tail_limit: int = 64 * 1024
+    build_manifest: Path | None = None
 
     # ------------------------------------------------------------------
     # Verification — cheap, synchronous, runs no Lean
@@ -148,12 +153,16 @@ class PantographEnv:
             if len(repl.parents) >= 4:
                 return repl.parents[3] / "lean-toolchain"
             return repl.parent / "lean-toolchain"
+        from pantograph.utils import _get_proc_cwd
+
         return Path(_get_proc_cwd()) / "lean-toolchain"
 
     def _stdbuf_path(self) -> Path:
         """Resolve the line-buffering launcher required by a custom REPL."""
         if self.pantograph_repl is None:
-            raise RuntimeError("stdbuf resolution requires a configured pantograph_repl.")
+            raise RuntimeError(
+                "stdbuf resolution requires a configured pantograph_repl."
+            )
         executable = shutil.which("stdbuf")
         if executable is None:
             raise RuntimeError(
@@ -189,6 +198,8 @@ class PantographEnv:
         consults ``start``, so the deferred spawn still receives a fully resolved
         ``LEAN_PATH``.
         """
+        from pantograph.server import Server
+
         stdbuf_path = self._stdbuf_path() if self.pantograph_repl is not None else None
         server = await Server.create(
             imports=list(self.imports),

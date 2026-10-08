@@ -71,7 +71,7 @@ class SourceRootTests(unittest.TestCase):
     def test_lakefile_toml_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "lakefile.toml").write_text("name = \"proj\"\n")
+            (root / "lakefile.toml").write_text('name = "proj"\n')
             (root / "lean-toolchain").write_text("leanprover/lean4:v4.29.1\n")
             PantographEnv(source_root=root, pantograph_repl=None).verify()
 
@@ -208,7 +208,9 @@ class _DeferredServer:
 
 
 class ServerConstructionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_custom_repl_uses_line_buffered_command_and_preserves_server_args(self):
+    async def test_custom_repl_uses_line_buffered_command_and_preserves_server_args(
+        self,
+    ):
         server = _DeferredServer(args=["Init", "Mathlib", "--pp.universes"])
         create = AsyncMock(return_value=server)
         env = PantographEnv(
@@ -220,7 +222,7 @@ class ServerConstructionTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch(
-                "maths_ai.hybrid_reasoner.pantograph_env.Server.create",
+                "pantograph.server.Server.create",
                 new=create,
             ),
             patch(
@@ -260,12 +262,10 @@ class ServerConstructionTests(unittest.IsolatedAsyncioTestCase):
         create = AsyncMock(return_value=server)
         with (
             patch(
-                "maths_ai.hybrid_reasoner.pantograph_env.Server.create",
+                "pantograph.server.Server.create",
                 new=create,
             ),
-            patch(
-                "maths_ai.hybrid_reasoner.pantograph_env.shutil.which"
-            ) as which,
+            patch("maths_ai.hybrid_reasoner.pantograph_env.shutil.which") as which,
         ):
             returned = await PantographEnv().create_server()
 
@@ -281,7 +281,7 @@ class ServerConstructionTests(unittest.IsolatedAsyncioTestCase):
         env = PantographEnv(pantograph_repl=Path("/external/repl"))
         with (
             patch(
-                "maths_ai.hybrid_reasoner.pantograph_env.Server.create",
+                "pantograph.server.Server.create",
                 new=create,
             ),
             patch(
@@ -306,7 +306,7 @@ class ServerConstructionTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch(
-                "maths_ai.hybrid_reasoner.pantograph_env.Server.create",
+                "pantograph.server.Server.create",
                 new=create,
             ),
             patch(
@@ -314,7 +314,9 @@ class ServerConstructionTests(unittest.IsolatedAsyncioTestCase):
                 return_value="/usr/bin/stdbuf",
             ),
         ):
-            with self.assertRaisesRegex(RuntimeError, "Pantograph startup failed") as caught:
+            with self.assertRaisesRegex(
+                RuntimeError, "Pantograph startup failed"
+            ) as caught:
                 await env.create_server()
 
         self.assertTrue(server.closed)
@@ -329,7 +331,7 @@ class ServerConstructionTests(unittest.IsolatedAsyncioTestCase):
         env = PantographEnv(pantograph_repl=Path("/external/repl"))
         with (
             patch(
-                "maths_ai.hybrid_reasoner.pantograph_env.Server.create",
+                "pantograph.server.Server.create",
                 new=create,
             ),
             patch(

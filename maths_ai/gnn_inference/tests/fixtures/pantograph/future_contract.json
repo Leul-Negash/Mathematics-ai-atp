@@ -1,6 +1,6 @@
 {
   "kind": "authored-future-contract",
-  "note": "Goal/model payloads copied unchanged from baseline capture. Descriptor, validation and structured messages are authored expectations, not live results.",
+  "note": "Authored revision-2 companion contract, not live validation evidence. Canonical model-bearing fields retain the captured baseline; fragment and top-level flags follow upstream PR #1. Descriptor, validation completion metadata and real-log scenarios remain authored expectations.",
   "descriptor": {
     "protocol": "maths-ai-pantograph",
     "protocolVersion": 1,
@@ -54,17 +54,18 @@
             "modelSexp": "(:fv FV0)"
           },
           "name": "_uniq.12",
-          "isConversion": false
+          "isConversion": false,
+          "fragment": "tactic"
         }
       ],
       "validation": {
         "version": 1,
         "scope": "transition-expressions",
-        "checked": true,
-        "hasSorry": false,
-        "hasUnsafe": false
+        "checked": true
       },
-      "messages": []
+      "messages": [],
+      "hasSorry": false,
+      "hasUnsafe": false
     },
     "conjunction_split": {
       "nextStateId": 5,
@@ -79,7 +80,8 @@
             "modelSexp": "(:c True)"
           },
           "name": "_uniq.22",
-          "isConversion": false
+          "isConversion": false,
+          "fragment": "tactic"
         },
         {
           "vars": [],
@@ -91,17 +93,18 @@
             "modelSexp": "(:c True)"
           },
           "name": "_uniq.23",
-          "isConversion": false
+          "isConversion": false,
+          "fragment": "tactic"
         }
       ],
       "validation": {
         "version": 1,
         "scope": "transition-expressions",
-        "checked": true,
-        "hasSorry": false,
-        "hasUnsafe": false
+        "checked": true
       },
-      "messages": []
+      "messages": [],
+      "hasSorry": false,
+      "hasUnsafe": false
     },
     "nonzero_index": {
       "nextStateId": 6,
@@ -116,17 +119,18 @@
             "modelSexp": "(:c True)"
           },
           "name": "_uniq.22",
-          "isConversion": false
+          "isConversion": false,
+          "fragment": "tactic"
         }
       ],
       "validation": {
         "version": 1,
         "scope": "transition-expressions",
-        "checked": true,
-        "hasSorry": false,
-        "hasUnsafe": false
+        "checked": true
       },
-      "messages": []
+      "messages": [],
+      "hasSorry": false,
+      "hasUnsafe": false
     },
     "instance_intro": {
       "nextStateId": 10,
@@ -186,17 +190,18 @@
             "modelSexp": "(:app (:c Eq) (:arg :implicit-type 0 (:fv FV0)) (:arg :explicit 1 (:fv FV2)) (:arg :explicit 2 (:fv FV2)))"
           },
           "name": "_uniq.81",
-          "isConversion": false
+          "isConversion": false,
+          "fragment": "tactic"
         }
       ],
       "validation": {
         "version": 1,
         "scope": "transition-expressions",
-        "checked": true,
-        "hasSorry": false,
-        "hasUnsafe": false
+        "checked": true
       },
-      "messages": []
+      "messages": [],
+      "hasSorry": false,
+      "hasUnsafe": false
     },
     "let_intro": {
       "nextStateId": 12,
@@ -247,17 +252,18 @@
             "modelSexp": "(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:fv FV1)) (:arg :explicit 2 (:fv FV1)))"
           },
           "name": "_uniq.101",
-          "isConversion": false
+          "isConversion": false,
+          "fragment": "tactic"
         }
       ],
       "validation": {
         "version": 1,
         "scope": "transition-expressions",
-        "checked": true,
-        "hasSorry": false,
-        "hasUnsafe": false
+        "checked": true
       },
-      "messages": []
+      "messages": [],
+      "hasSorry": false,
+      "hasUnsafe": false
     },
     "valid_truth": {
       "nextStateId": 16,
@@ -265,11 +271,11 @@
       "validation": {
         "version": 1,
         "scope": "transition-expressions",
-        "checked": true,
-        "hasSorry": false,
-        "hasUnsafe": false
+        "checked": true
       },
-      "messages": []
+      "messages": [],
+      "hasSorry": false,
+      "hasUnsafe": false
     },
     "admission": {
       "nextStateId": 14,
@@ -277,16 +283,21 @@
       "validation": {
         "version": 1,
         "scope": "transition-expressions",
-        "checked": true,
-        "hasSorry": true,
-        "hasUnsafe": false
+        "checked": true
       },
       "messages": [
         {
           "severity": "warning",
-          "data": "declaration uses 'sorry'"
+          "data": "declaration uses 'sorry'",
+          "kind": "[anonymous]",
+          "pos": {
+            "line": 0,
+            "column": 0
+          }
         }
-      ]
+      ],
+      "hasSorry": true,
+      "hasUnsafe": false
     },
     "unsafe": {
       "nextStateId": 16,
@@ -294,16 +305,28 @@
       "validation": {
         "version": 1,
         "scope": "transition-expressions",
-        "checked": true,
-        "hasSorry": false,
-        "hasUnsafe": true
+        "checked": true
       },
-      "messages": []
+      "messages": [],
+      "hasSorry": false,
+      "hasUnsafe": true
     }
   },
   "parse_failure": {
     "parseError": "<pantograph>:1:1: unexpected end of input; expected '{'",
-    "messages": []
+    "messages": [
+      {
+        "kind": "[anonymous]",
+        "severity": "error",
+        "pos": {
+          "line": 0,
+          "column": 0
+        },
+        "data": "<pantograph>:1:1: unexpected end of input; expected '{'"
+      }
+    ],
+    "hasSorry": false,
+    "hasUnsafe": false
   },
   "tactic_failure": {
     "tacticErrors": [
@@ -312,9 +335,16 @@
     "messages": [
       {
         "severity": "error",
-        "data": "type mismatch\n  True.intro\nhas type\n  True : Prop\nbut is expected to have type\n  p : Prop"
+        "data": "type mismatch\n  True.intro\nhas type\n  True : Prop\nbut is expected to have type\n  p : Prop",
+        "kind": "[anonymous]",
+        "pos": {
+          "line": 0,
+          "column": 0
+        }
       }
-    ]
+    ],
+    "hasSorry": false,
+    "hasUnsafe": false
   },
   "logged_error_failure": {
     "tacticErrors": [
@@ -323,9 +353,16 @@
     "messages": [
       {
         "severity": "error",
-        "data": "capture error"
+        "data": "capture error",
+        "kind": "[anonymous]",
+        "pos": {
+          "line": 0,
+          "column": 0
+        }
       }
-    ]
+    ],
+    "hasSorry": false,
+    "hasUnsafe": false
   },
   "warning_success": {
     "nextStateId": 16,
@@ -333,9 +370,7 @@
     "validation": {
       "version": 1,
       "scope": "transition-expressions",
-      "checked": true,
-      "hasSorry": false,
-      "hasUnsafe": false
+      "checked": true
     },
     "messages": [
       {
@@ -349,9 +384,11 @@
           "line": 2,
           "column": 4
         },
-        "fileName": "<Pantograph>",
         "kind": "example"
       }
-    ]
-  }
+    ],
+    "hasSorry": false,
+    "hasUnsafe": false
+  },
+  "contract_revision": 2
 }

@@ -51,6 +51,7 @@ BINDER_ROLES = frozenset(
         ":let",
     }
 )
+GOAL_FRAGMENTS = frozenset({"tactic", "conv", "calc"})
 SUPPORTED_COMMANDS = frozenset(
     {
         "protocol.describe",
@@ -188,6 +189,7 @@ class ExecutionGoal:
     goal_name: str
     case_tag: str | None
     is_conversion: bool
+    fragment: str
     target: WireExpression
     locals: tuple[ExecutionLocal, ...]
 
@@ -202,15 +204,19 @@ class MessagePosition:
     line: int
     column: int
 
+    @property
+    def is_available(self) -> bool:
+        """The merged wire's (0, 0) sentinel is not a source location."""
+        return self.line != 0
+
 
 @dataclass(frozen=True)
 class ExecutionMessage:
     severity: str
     data: str
-    pos: MessagePosition | None = None
+    kind: str
+    pos: MessagePosition
     end_pos: MessagePosition | None = None
-    file_name: str | None = None
-    kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -475,7 +481,13 @@ def decode_expression(payload: Any) -> WireExpression:
 
 def decode_execution_goal(payload: Any) -> ExecutionGoal:
     obj = _object(payload, "goal")
-    _fields(obj, {"name", "isConversion", "target", "vars"}, {"userName"})
+    _fields(obj, {"name", "isConversion", "fragment", "target", "vars"}, {"userName"})
+    fragment = _string(obj["fragment"], "fragment")
+    if fragment not in GOAL_FRAGMENTS:
+        raise PantographProtocolError(f"Unsupported goal fragment {fragment!r}.")
+    is_conversion = _bool(obj["isConversion"], "isConversion")
+    if is_conversion != (fragment == "conv"):
+        raise PantographProtocolError("Goal fragment and isConversion disagree.")
     target = decode_expression(obj["target"])
     locals_ = []
     for item in _array(obj["vars"], "vars"):
@@ -528,7 +540,8 @@ def decode_execution_goal(payload: Any) -> ExecutionGoal:
     return ExecutionGoal(
         _string(obj["name"], "goal name", nonempty=True),
         _string(obj["userName"], "goal userName") if "userName" in obj else None,
-        _bool(obj["isConversion"], "isConversion"),
+        is_conversion,
+        fragment,
         target,
         tuple(locals_),
     )
@@ -563,6 +576,7 @@ def execution_goal_to_translator(goal: ExecutionGoal) -> dict[str, Any]:
         "goal_name": goal.goal_name,
         "case_tag": goal.case_tag,
         "is_conversion": goal.is_conversion,
+        "fragment": goal.fragment,
         "target": expression(goal.target),
         "locals": [
             {
@@ -586,21 +600,26 @@ def decode_messages(payload: Any) -> tuple[ExecutionMessage, ...]:
         obj = _object(value, "message position")
         _fields(obj, {"line", "column"})
         line = _nat(obj["line"], "line")
-        if line == 0:
-            raise PantographProtocolError("Message lines are one-based.")
-        return MessagePosition(line, _nat(obj["column"], "column"))
+        column = _nat(obj["column"], "column")
+        if line == 0 and column != 0:
+            raise PantographProtocolError(
+                "An unavailable message position must be exactly (0, 0)."
+            )
+        return MessagePosition(line, column)
 
     result = []
     for item in _array(payload, "messages"):
         obj = _object(item, "message")
-        _fields(obj, {"severity", "data"}, {"pos", "endPos", "fileName", "kind"})
+        _fields(obj, {"kind", "severity", "pos", "data"}, {"endPos"})
         severity = _string(obj["severity"], "severity")
         if severity not in {"information", "warning", "error"}:
             raise PantographProtocolError(f"Unknown message severity {severity!r}.")
-        pos = position(obj["pos"]) if "pos" in obj else None
+        pos = position(obj["pos"])
         end = position(obj["endPos"]) if "endPos" in obj else None
         if end is not None and (
-            pos is None or (end.line, end.column) < (pos.line, pos.column)
+            not pos.is_available
+            or not end.is_available
+            or (end.line, end.column) < (pos.line, pos.column)
         ):
             raise PantographProtocolError(
                 "Message endPos requires an ordered start position."
@@ -609,18 +628,20 @@ def decode_messages(payload: Any) -> tuple[ExecutionMessage, ...]:
             ExecutionMessage(
                 severity,
                 _string(obj["data"], "message data"),
+                _string(obj["kind"], "kind"),
                 pos,
                 end,
-                _string(obj["fileName"], "fileName") if "fileName" in obj else None,
-                _string(obj["kind"], "kind") if "kind" in obj else None,
             )
         )
     return tuple(result)
 
 
-def decode_transition_validation(payload: Any) -> TransitionValidation:
+def decode_transition_validation(
+    payload: Any, *, has_sorry: bool, has_unsafe: bool
+) -> TransitionValidation:
+    """Combine check metadata with the merged response's top-level proof flags."""
     obj = _object(payload, "validation")
-    _fields(obj, {"version", "scope", "checked", "hasSorry", "hasUnsafe"})
+    _fields(obj, {"version", "scope", "checked"})
     version = _nat(obj["version"], "validation version")
     scope = _string(obj["scope"], "validation scope")
     checked = _bool(obj["checked"], "validation checked")
@@ -632,8 +653,8 @@ def decode_transition_validation(payload: Any) -> TransitionValidation:
         version,
         scope,
         checked,
-        _bool(obj["hasSorry"], "hasSorry"),
-        _bool(obj["hasUnsafe"], "hasUnsafe"),
+        _bool(has_sorry, "hasSorry"),
+        _bool(has_unsafe, "hasUnsafe"),
     )
 
 
@@ -677,7 +698,17 @@ def decode_response(command: str, payload: Any) -> Response:
                 )
             variant = variants[0]
             if variant == "nextStateId":
-                _fields(obj, {"nextStateId", "goals", "validation", "messages"})
+                _fields(
+                    obj,
+                    {
+                        "nextStateId",
+                        "goals",
+                        "validation",
+                        "messages",
+                        "hasSorry",
+                        "hasUnsafe",
+                    },
+                )
                 goals = tuple(
                     decode_execution_goal(item)
                     for item in _array(obj["goals"], "goals")
@@ -694,10 +725,20 @@ def decode_response(command: str, payload: Any) -> Response:
                 return TacticSuccess(
                     _nat(obj["nextStateId"], "nextStateId"),
                     goals,
-                    decode_transition_validation(obj["validation"]),
+                    decode_transition_validation(
+                        obj["validation"],
+                        has_sorry=obj["hasSorry"],
+                        has_unsafe=obj["hasUnsafe"],
+                    ),
                     messages,
                 )
-            _fields(obj, {variant, "messages"})
+            _fields(obj, {variant, "messages", "hasSorry", "hasUnsafe"})
+            has_sorry = _bool(obj["hasSorry"], "hasSorry")
+            has_unsafe = _bool(obj["hasUnsafe"], "hasUnsafe")
+            if has_sorry or has_unsafe:
+                raise PantographProtocolError(
+                    "Failed tactic operations must carry false proof flags."
+                )
             messages = decode_messages(obj["messages"])
             if variant == "parseError":
                 return TacticParseFailure(
