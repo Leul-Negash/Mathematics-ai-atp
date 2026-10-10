@@ -6,8 +6,10 @@ shipped for contract revision 1. [contract.json](contract.json) now specifies
 revision 2. The codec, authored `future_contract.json`, and tests were subsequently
 refreshed together to revision 2 on 2026-10-08. The Stage 1 exit gate passed;
 Stage 2 transport/lifecycle is also implemented; its exit gate passed on October 8.
-Stage 3 may begin. Production factories, dependencies, and Lean
-sources remain unchanged. Do not launch the proposed client for RL.
+Stage 3 typed operations/state scopes are implemented and its fake-server exit
+gate passed on October 8. Stage 4 is implemented and its exit gate passed on 2026-10-10. The companion
+patch extends the merged Lean sources. Production factories and dependencies
+remain unchanged. Do not launch the proposed client for RL.
 
 ## Current verified source basis
 
@@ -147,9 +149,9 @@ Run offline evidence and existing codec tests from the repository root:
 These tests freeze observed upstream behavior, source identity, revision-2 codec
 acceptance/rejection, and unchanged model-bearing fields. They do not claim
 companion validation is implemented. Stage 1's exit gate passed; the next
-implementation gate is now Stage 3 scopes/typed operations. Stages 3–8 remain
-unimplemented; production
-migration requires Stage 4 validation and Stage 5 live verification.
+implementation gate is Stage 5 actual-client verification. Stage 4 passed its
+companion Lean gate on 2026-10-10; Stages 5–8 remain pending. Production
+migration still requires Stage 5 live verification.
 
 October 8 refresh verification: 243 pure codec tests, 45 upstream evidence
 assertions, and 28 existing environment/model tests passed (316 combined).
@@ -190,9 +192,9 @@ permissions, valid imports/options, GNU `stdbuf`, and a nonempty resolved
 A non-checkout executable requires an explicit build manifest with matching
 `toolchain` and `repl_sha256`. Stage 7 supplies fuller build provenance.
 
-The client currently supports contract startup, `stat`, context management, and
-awaited close. Generic transactions remain private; typed goal operations and
-lexical scopes are Stage 3. Stage 2's READY means transport contract checks
+Stage 2 delivered contract startup, `stat`, context management, and
+awaited close. Generic transactions remain private; Stage 3 now supplies typed
+goal operations and lexical scopes. Stage 2's READY means transport contract checks
 passed, not that the later model-capability probe has run.
 
 There is one stdout reader and one request lock. Request deadlines cover waiting,
@@ -214,5 +216,96 @@ The threaded cross-loop check ran outside the sandbox; the sandboxed stalled run
 was interrupted and is not counted as a pass.
 
 Stage 2 does not implement the Lean companion, model probe, or production caller
-migration. Stage 3 may begin; later release gates remain unchanged. Nothing was
+migration. Its handoff authorized Stage 3, now completed below; later release gates remain unchanged. Nothing was
 staged or committed, and the user configuration/downloaded environment was preserved.
+
+## Stage 3 typed operations and state ownership handoff
+
+`PantographClient.state_scope()` returns an async context manager exposing
+`start_goal(expression)`, `apply_tactic(state, tactic, goal_index=0)`, and
+`release(state)`. `StartedGoal` has one selectable initial goal but no fabricated
+goal list. `TacticState` preserves decoded goals, messages, and validation.
+The codec/types from Stage 1 required no schema changes for this stage.
+
+Every allocation is registered in its scope synchronously under the transaction
+lock. Input validation runs under that same lock before writing: correct loop,
+session, active scope, exact issued state object, liveness, and selectable goal
+index. Copied/altered execution wrappers are not issued states; canonical goal
+copies may still outlive the scope. Empty materialized goals cannot be selected,
+and normal tactic operations reject conversion/calc fragments.
+
+Successful branches do not consume their input state. Early same-owner release
+is idempotent, including concurrent calls. Scope exit batches remaining live IDs
+and waits for one retained cleanup task on normal exit, exception, or repeated
+cancellation. The batch includes results of requests already in flight when exit
+begins. Closing prevents queued new allocations. Handles are invalidated on
+process retirement, and retired scopes join close without issuing deletion.
+
+Admission/unsafe results are registered and deleted before
+`PantographTacticRejected` is raised. Deletion failure or cancellation retires and
+reaps the process instead; infrastructure errors are not hidden as tactic failure.
+Malformed evidence after a server allocation also retires the process. No state
+destructor, garbage-collection cleanup, reset command, or in-place restart exists.
+
+Verification on October 8: all 37 tests in
+[test_pantograph_state_scopes.py](../tests/test_pantograph_state_scopes.py) passed.
+They use actual diagnostic subprocesses, check fake allocation counts returning
+to baseline and child reaping, and reject foreign/released/altered handles before
+I/O. Coverage includes lock races, in-flight scope exit, duplicate release,
+unmaterialized/empty states, rejection cleanup, validation/registration failures,
+repeated cancellation, and replacement processes reusing numeric state zero.
+The full GNN suite had 665 passed, 1 skipped, 5 subtests passed, and the unchanged
+worker-count expectation failure recorded above. Threaded loop checks ran outside
+the sandbox. Formatting and `git diff --check` passed.
+
+The fake models independent snapshots. Parent deletion preserving descendants and
+sibling alternatives must still be verified against real Lean in Stage 5.
+Stage 4 may now implement the companion extension over the verified PR #1 base.
+Production still uses PyPantograph; no downloaded REPL, Mathlib, dependency, or
+user configuration was changed, and no new RL/deployment validation was performed.
+
+
+## Stage 4 companion Lean contract handoff — 2026-10-10
+
+Implemented on `client_centric_repo` in `/home/nolawi/pantograph_fork` over the
+exact merged PR #1 base. The tracked
+[companion patch](repository_client_contract.patch) and
+[provenance descriptor](repository_client_contract.provenance.json) contain the
+Lean implementation, migrated tests, reusable capture utility and checked-boundary
+documentation. No source files were staged or committed.
+
+The descriptor and successful transition metadata now match contract revision 2.
+Shared goal operations capture real messages, reject logged errors, and restore
+the caller's meta/elaborator/environment/message/trace/info/cache state. Full
+selected-mode sequences consume their complete input. Synthetic elaboration runs
+inside the transaction; unresolved reachable obligations remain goals. The scanner
+follows assignments, delayed pending assignments, local types/values and relevant
+introduced constant/projection dependencies. Missing or cyclic evidence produces
+a named validation error. Each state preserves its original trust environment,
+including across multiple transitions. Serialization restores its caller.
+
+Merged omitted-index, nonzero selection, sibling resumption, calc, structured
+operations and conversion repairs remain. The model serializer's normalized
+expression strings, local indices, binder metadata and graph schema are preserved.
+
+Verification: `lake build repl Test.ContractFixtures` and `lake test` passed,
+with 299 Lean assertions including 37 new Stage 4 assertions. Existing Python
+codec/reconciliation/model/environment regressions passed all 316 tests.
+[Raw final-contract captures](../tests/fixtures/pantograph/stage4_companion/capture.json)
+record 61 Mathlib exchanges accepted by the existing revision-2 decoder. All four
+canonical object/graph goldens match exactly, including local internal names.
+Initial and final allocated-state counts are zero, and the subprocess was reaped.
+The final capture ran outside the sandbox; an earlier sandboxed shutdown timeout
+is excluded from passed evidence. Patch application to the clean merged base was
+verified, and all applied source hashes match the implementation checkout.
+
+The build reused a separately copied archive dependency/build cache and rebuilt
+changed targets. Stage 7 fresh release reproduction remains pending. Imported
+Mathlib is the trust basis; its archive lacks Git metadata, so the deployment pin
+remains an expected pin rather than a locally verified HEAD.
+
+Stage 4 is complete. Stage 5 must verify the actual owned client, model probe and
+state lifetimes against this artifact. Stages 6–8, production migration, fresh
+release reproduction and RL/deployment validation remain pending. Transition
+checks do not certify an assembled original theorem proof. No downloaded source,
+reference executable, production dependency or user RL configuration was changed.

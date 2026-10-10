@@ -50,6 +50,9 @@ def setup(tmp_path, monkeypatch):
     report = tmp_path / "events.jsonl"
     monkeypatch.setenv("PATH", str(tools) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("PANTOGRAPH_FAKE_REPORT", str(report))
+    monkeypatch.setenv(
+        "PANTOGRAPH_FAKE_CONTRACT", str(FAKE.with_name("future_contract.json"))
+    )
     monkeypatch.setenv("PANTOGRAPH_FAKE_SCENARIO", "normal")
     monkeypatch.setenv("PANTOGRAPH_FAKE_RESOLVER", "normal")
     env = PantographEnv(

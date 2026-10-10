@@ -1,7 +1,7 @@
 """Owned serialized Pantograph transport and cancellation-safe process lifetime.
 
-Stage 2 implements contract startup, stat, and private transactions. Typed goal
-operations and lexical allocation owners are the subsequent Stage 3 deliverable.
+Typed goal operations use lexical state scopes. Generic transactions remain
+private, and each session owns its subprocess until awaited shutdown completes.
 """
 
 from __future__ import annotations
@@ -25,10 +25,16 @@ from .pantograph_protocol import (
     PantographRequestTimeout,
     PantographStartupError,
     PantographStateError,
+    PantographTacticRejected,
     PantographStats,
     PantographTransportError,
     Response,
     SessionOptions,
+    StartedGoal,
+    StateHandle,
+    TacticFailure,
+    TacticParseFailure,
+    TacticState,
     TacticSuccess,
     decode_json_response,
     decode_response,
@@ -278,6 +284,7 @@ class PantographClient:
         self._failure: Exception | None = None
         self._stderr = self._owner.stderr
         self._allocated_ids: set[int] = set()
+        self._scopes: set[PantographStateScope] = set()
         self.effective_options: SessionOptions | None = None
 
     @classmethod
@@ -398,6 +405,19 @@ class PantographClient:
     async def stat(self) -> PantographStats:
         return await self._exchange("stat", {})
 
+    def state_scope(self) -> "PantographStateScope":
+        self._check_loop()
+        if not self.is_usable:
+            raise PantographStateError(
+                "Cannot create a scope on an unavailable client."
+            )
+        return PantographStateScope(self)
+
+    def _invalidate_states(self) -> None:
+        self._allocated_ids.clear()
+        for scope in self._scopes:
+            scope._live_ids.clear()
+
     async def __aenter__(self) -> "PantographClient":
         self._check_loop()
         if not self.is_usable:
@@ -471,7 +491,7 @@ class PantographClient:
         if self._failure is None:
             self._failure = error
         self._phase = SessionPhase.FAILED
-        self._allocated_ids.clear()
+        self._invalidate_states()
         for future in (self._ready, self._reply):
             if future is not None and not future.done():
                 future.set_exception(self._failure)
@@ -479,6 +499,7 @@ class PantographClient:
 
     def _begin_close(self) -> asyncio.Task:
         if self._close_task is None:
+            self._invalidate_states()
             self._phase = SessionPhase.CLOSING
             self._close_task = self._loop.create_task(
                 self._shutdown(), name="pantograph-client-close"
@@ -520,6 +541,7 @@ class PantographClient:
         deadline: float | None = None,
         starting: bool = False,
         record: Callable[[Response], None] | None = None,
+        prepare: Callable[[], Mapping[str, Any] | None] | None = None,
     ) -> Response:
         """Private transaction; synchronous bookkeeping precedes lock release."""
         self._check_loop()
@@ -536,7 +558,7 @@ class PantographClient:
             else deadline
         )
         body = deepcopy(dict(payload))
-        request = encode_request(command, body)
+        request = encode_request(command, body) if prepare is None else None
         acquired = False
         wrote = False
         try:
@@ -551,6 +573,14 @@ class PantographClient:
                     )
                 if self._loop.time() >= deadline:
                     raise TimeoutError
+                if prepare is not None:
+                    prepared = prepare()
+                    if prepared is None:
+                        return CommandAcknowledgement(command)
+                    body = deepcopy(dict(prepared))
+                    request = encode_request(command, body)
+                    if self._loop.time() >= deadline:
+                        raise TimeoutError
                 self._reply = self._loop.create_future()
                 self._reply.add_done_callback(_observe)
                 process = self._owner.process
@@ -637,3 +667,217 @@ class PantographClient:
             if acquired:
                 self._reply = None
                 self._lock.release()
+
+
+class PantographStateScope:
+    """One lexical owner for starts and all alternative tactic allocations."""
+
+    def __init__(self, client: PantographClient):
+        self._client = client
+        self.scope_id = uuid4().hex
+        self._entered = False
+        self._closing = False
+        self._closed = False
+        self._close_task: asyncio.Task | None = None
+        # Keep exact immutable objects until exit so copied or altered states
+        # cannot change selection bounds or claim another allocation's ownership.
+        self._states: dict[int, StartedGoal | TacticState] = {}
+        self._live_ids: set[int] = set()
+        self._released: set[int] = set()
+
+    def _check_active(self) -> None:
+        self._client._check_loop()
+        if not self._entered or self._closing or self._closed:
+            raise PantographStateError("State operations require an active scope.")
+        if not self._client.is_usable:
+            raise PantographStateError("Scope session is unavailable.")
+
+    async def __aenter__(self) -> "PantographStateScope":
+        self._client._check_loop()
+        if self._entered or not self._client.is_usable:
+            raise PantographStateError(
+                "A state scope can be entered only once on a usable client."
+            )
+        self._entered = True
+        self._client._scopes.add(self)
+        return self
+
+    async def __aexit__(self, _kind, original, _traceback) -> None:
+        try:
+            await self.aclose()
+        except BaseException as exc:
+            if isinstance(original, asyncio.CancelledError):
+                if exc is not original:
+                    original.add_note(f"Scope cleanup also failed: {exc}")
+                raise original
+            raise
+
+    def _validate_state(self, state: StartedGoal | TacticState) -> bool:
+        self._check_active()
+        if not isinstance(state, (StartedGoal, TacticState)):
+            raise PantographStateError("Expected an owned start or tactic state.")
+        handle = state.handle
+        if (
+            handle.session_id != self._client.session_id
+            or handle.scope_id != self.scope_id
+        ):
+            raise PantographStateError("State belongs to another session or scope.")
+        if self._states.get(id(state)) is not state:
+            raise PantographStateError("State was not issued by this scope.")
+        return id(state) not in self._released and handle.state_id in self._live_ids
+
+    def _register(
+        self, response: GoalStartResult | TacticSuccess
+    ) -> StartedGoal | TacticState:
+        state_id = (
+            response.state_id
+            if isinstance(response, GoalStartResult)
+            else response.next_state_id
+        )
+        handle = StateHandle(self._client.session_id, self.scope_id, state_id)
+        state = (
+            StartedGoal(handle, response.root)
+            if isinstance(response, GoalStartResult)
+            else TacticState(
+                handle, response.goals, response.validation, response.messages
+            )
+        )
+        self._states[id(state)] = state
+        self._live_ids.add(state_id)
+        return state
+
+    async def start_goal(self, expression: str) -> StartedGoal:
+        self._check_active()
+        allocated = []
+
+        def prepare():
+            self._check_active()
+            return {"expr": expression}
+
+        def record(response):
+            allocated.append(self._register(response))
+
+        await self._client._exchange("goal.start", {}, prepare=prepare, record=record)
+        return allocated[0]
+
+    async def apply_tactic(
+        self, state: StartedGoal | TacticState, tactic: str, *, goal_index: int = 0
+    ) -> TacticState:
+        self._check_active()
+        allocated = []
+
+        def prepare():
+            if not self._validate_state(state):
+                raise PantographStateError("Cannot apply a tactic to a released state.")
+            count = 1 if isinstance(state, StartedGoal) else len(state.goals)
+            if type(goal_index) is not int or not 0 <= goal_index < count:
+                raise PantographStateError(
+                    "Goal index is outside the state's selectable goals."
+                )
+            if (
+                isinstance(state, TacticState)
+                and state.goals[goal_index].fragment != "tactic"
+            ):
+                raise PantographStateError(
+                    "Normal tactic operations require a tactic fragment."
+                )
+            return {
+                "stateId": state.handle.state_id,
+                "goalId": goal_index,
+                "tactic": tactic,
+            }
+
+        def record(response):
+            if isinstance(response, TacticSuccess):
+                allocated.append(self._register(response))
+
+        response = await self._client._exchange(
+            "goal.tactic", {}, prepare=prepare, record=record
+        )
+        if isinstance(response, (TacticParseFailure, TacticFailure)):
+            detail = (
+                response.parse_error
+                if isinstance(response, TacticParseFailure)
+                else "\n".join(response.tactic_errors)
+            )
+            raise PantographTacticRejected(
+                detail, command="goal.tactic", payload=response
+            )
+        result = allocated[0]
+        if result.validation.is_rejection:
+            # Allocation is registered before this first cancellation point.
+            # Deletion failure takes precedence over a domain rejection.
+            try:
+                await self.release(result)
+            except BaseException as exc:
+                await self._retire_after_cleanup_error(exc)
+                raise
+            raise PantographTacticRejected(
+                "Tactic produced an admission or unsafe dependency.",
+                command="goal.tactic",
+                payload=response,
+            )
+        return result
+
+    async def release(self, state: StartedGoal | TacticState) -> None:
+        self._check_active()
+
+        def prepare():
+            if not self._validate_state(state):
+                return None
+            return {"stateIds": [state.handle.state_id]}
+
+        def record(_response):
+            self._live_ids.discard(state.handle.state_id)
+            self._released.add(id(state))
+
+        await self._client._exchange("goal.delete", {}, prepare=prepare, record=record)
+
+    async def _retire_after_cleanup_error(self, original: BaseException) -> None:
+        error = (
+            original
+            if isinstance(original, Exception)
+            else PantographTransportError("State cleanup cancelled.")
+        )
+        self._client._fail(error)
+        await self._client._close_after_error(original)
+
+    async def aclose(self) -> None:
+        self._client._check_loop()
+        if not self._entered:
+            raise PantographStateError("Cannot close a scope that was not entered.")
+        if self._close_task is None:
+            self._closing = True
+            self._close_task = self._client._loop.create_task(
+                self._cleanup(), name="pantograph-scope-close"
+            )
+            self._close_task.add_done_callback(_observe)
+        await _join_cleanup(self._close_task)
+
+    async def _cleanup(self) -> None:
+        try:
+            if self._client.is_usable:
+
+                def prepare():
+                    return (
+                        {"stateIds": sorted(self._live_ids)} if self._live_ids else None
+                    )
+
+                def record(_response):
+                    self._released.update(self._states)
+                    self._live_ids.clear()
+
+                await self._client._exchange(
+                    "goal.delete", {}, prepare=prepare, record=record
+                )
+            else:
+                await self._client.aclose()
+        except BaseException as exc:
+            await self._retire_after_cleanup_error(exc)
+            raise
+        finally:
+            self._live_ids.clear()
+            self._states.clear()
+            self._released.clear()
+            self._client._scopes.discard(self)
+            self._closed = True

@@ -2,6 +2,7 @@
 """Real diagnostic child for owned transport tests; never used by application code."""
 
 import json
+from copy import deepcopy
 import os
 from pathlib import Path
 import signal
@@ -89,7 +90,7 @@ def main():
     for line in sys.stdin:
         command, raw = line.split(" ", 1)
         args = json.loads(raw)
-        event("request", command=command)
+        event("request", command=command, args=args)
         if command == "protocol.describe":
             result = {
                 "protocol": "maths-ai-pantograph",
@@ -146,13 +147,56 @@ def main():
             if args["expr"] == "reject":
                 result = {"error": "elab", "desc": "bad expression"}
             else:
+                if scenario == "reuse_released_zero" and not states:
+                    next_id = 0
                 states.add(next_id)
                 result = {"stateId": next_id, "root": "g" + str(next_id)}
                 if scenario != "duplicate_allocation":
                     next_id += 1
         elif command == "goal.delete":
+            if scenario == "delete_delay":
+                time.sleep(0.25)
+            if scenario == "delete_error":
+                send({"error": "command", "desc": "deletion unavailable"})
+                continue
             states.difference_update(args["stateIds"])
             result = {}
+        elif command == "goal.tactic":
+            if args["stateId"] not in states:
+                result = {"error": "invalid", "desc": "unknown state"}
+            else:
+                fixtures = json.loads(
+                    Path(os.environ["PANTOGRAPH_FAKE_CONTRACT"]).read_text()
+                )
+                tactic = args["tactic"]
+                if tactic in (
+                    "parse_failure",
+                    "tactic_failure",
+                    "logged_error_failure",
+                ):
+                    result = fixtures[tactic]
+                elif tactic == "validation_error":
+                    result = {"error": "validation", "desc": "inspection unavailable"}
+                else:
+                    key = {
+                        "skip": "identity_intro",
+                        "split": "conjunction_split",
+                        "trivial": "valid_truth",
+                        "sorry": "admission",
+                        "missing_validation": "identity_intro",
+                        "conv": "identity_intro",
+                    }.get(tactic, tactic)
+                    result = deepcopy(fixtures["successes"][key])
+                    result["nextStateId"] = next_id
+                    states.add(next_id)
+                    next_id += 1
+                    if tactic == "missing_validation":
+                        result.pop("validation")
+                    if tactic == "conv":
+                        result["goals"][0]["fragment"] = "conv"
+                        result["goals"][0]["isConversion"] = True
+                    if scenario == "tactic_delay":
+                        time.sleep(0.25)
         else:
             result = {"error": "command", "desc": "Unsupported diagnostic command"}
         send(result, scenario == "split")
