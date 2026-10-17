@@ -8,14 +8,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 import torch
-from pantograph.server import ServerError
+from maths_ai.hybrid_reasoner.pantograph_protocol import (
+    PantographGoalRejected,
+    PantographTransportError,
+)
+from maths_ai.gnn_inference.tests.model_helpers import ScopedFakeClient
 from torch.optim import AdamW
 
 from maths_ai.data_models.proof_components import LeanGoalSeed, STV
 from maths_ai.hybrid_reasoner.hypergraph import TacticOutcome
 from maths_ai.pln_inference.model import PLNResult
 
-from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import ActorCriticWithArgsClassifier
+from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import (
+    ActorCriticWithArgsClassifier,
+)
 from maths_ai.gnn_inference.atp_lean_gnn.checkpointing import checkpoint_payload
 from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
 from maths_ai.gnn_inference.atp_lean_gnn.graph_contract import MODEL_SEXPR_GRAPH_SPEC
@@ -48,14 +54,14 @@ class _FakeGoalState:
         self.goals = [pantograph_goal(structured_goal(GOAL_EXPR, HYPS))]
 
 
-class _FakeServer:
+class _FakeServer(ScopedFakeClient):
     def __init__(self):
-        self.proc = object()
+        pass
 
-    async def goal_start_async(self, expression):
+    async def _start_goal(self, expression):
         return _FakeGoalState()
 
-    async def goal_tactic_async(self, state, tactic):
+    async def _apply_tactic(self, state, tactic):
         return _FakeGoalState()
 
 
@@ -77,10 +83,10 @@ class _RejectExecutor:
 
 class _UnelaboratedServer(_FakeServer):
     def __init__(self):
-        self.proc = object()
+        pass
 
-    async def goal_start_async(self, expression):
-        raise ServerError("cannot elaborate reconstructed goal")
+    async def _start_goal(self, expression):
+        raise PantographGoalRejected("cannot elaborate reconstructed goal")
 
 
 class _UnelaboratedExecutor:
@@ -93,7 +99,9 @@ class _UnelaboratedExecutor:
 
 class _StubPLN:
     async def evaluate_async(self, expression, hypotheses=None, **kwargs):
-        return PLNResult(stv=STV(strength=0.1, confidence=1.0), status="ok", is_fallback=False)
+        return PLNResult(
+            stv=STV(strength=0.1, confidence=1.0), status="ok", is_fallback=False
+        )
 
 
 class _RaisingReasoner:
@@ -117,7 +125,7 @@ class _RaisingReasoner:
 class _DeadServerReasoner:
     """prove() raises on every call except a listed set of call indices.
 
-    Reproduces the failure the log snippet recorded: `goal_start_async` raised for
+    Reproduces the failure the log snippet recorded: `_start_goal` raised for
     every theorem, so `collect_round` returned no results at all and there was
     nothing to take a gradient step on. Distinct from `_RejectExecutor`, whose
     searches DO complete — their rejections are failure records, which are
@@ -151,6 +159,7 @@ def _build_node_vocab():
 
 def _make_model(node_vocab):
     from maths_ai.gnn_inference.tests.model_helpers import actor_critic
+
     return actor_critic(len(node_vocab), len(TACTIC_VOCAB))
 
 
@@ -238,7 +247,9 @@ def _write_config(tmp: Path, **overrides) -> RLTrainingConfig:
 
 
 def _pool(n_items: int = 6, eval_size: int = 0) -> TheoremPool:
-    return TheoremPool(_items(n_items), eval_pool_size=eval_size, curriculum_size=4, seed=0)
+    return TheoremPool(
+        _items(n_items), eval_pool_size=eval_size, curriculum_size=4, seed=0
+    )
 
 
 def _qed_factory(model, node_vocab, tactic_vocab, cfg):
@@ -250,7 +261,9 @@ def _reject_factory(model, node_vocab, tactic_vocab, cfg):
 
 
 def _unelaborated_factory(model, node_vocab, tactic_vocab, cfg):
-    return _make_reasoner(model, node_vocab, _UnelaboratedExecutor(), top_k=cfg.top_k_tactics)
+    return _make_reasoner(
+        model, node_vocab, _UnelaboratedExecutor(), top_k=cfg.top_k_tactics
+    )
 
 
 def _dead_server_factory(succeed_on: set[int] | None = None):
@@ -261,7 +274,9 @@ def _dead_server_factory(succeed_on: set[int] | None = None):
     """
 
     def factory(model, node_vocab, tactic_vocab, cfg):
-        inner = _make_reasoner(model, node_vocab, _QEDExecutor(), top_k=cfg.top_k_tactics)
+        inner = _make_reasoner(
+            model, node_vocab, _QEDExecutor(), top_k=cfg.top_k_tactics
+        )
         return _DeadServerReasoner(inner, succeed_on=succeed_on)
 
     return factory
@@ -331,13 +346,18 @@ class PoolTests(unittest.TestCase):
                 for r in rows:
                     f.write(json.dumps(r) + "\n")
             cfg = _write_config(
-                tmp, data_source="file", theorem_file=theorem_file,
-                max_state_chars=400, eval_pool_size=0,
+                tmp,
+                data_source="file",
+                theorem_file=theorem_file,
+                max_state_chars=400,
+                eval_pool_size=0,
             )
             pool = build_theorem_pool(cfg)
             total = len(pool.train_items) + len(pool.eval_items)
             self.assertEqual(total, 2)  # oversized row dropped
-            self.assertEqual(pool.train_items[0].goal.expression, "p → p")  # size-sorted
+            self.assertEqual(
+                pool.train_items[0].goal.expression, "p → p"
+            )  # size-sorted
             self.assertEqual(pool.train_items[0].tactic_label, "intro")
 
     def test_metavariable_rows_are_dropped_from_the_pool(self):
@@ -350,27 +370,38 @@ class PoolTests(unittest.TestCase):
             rows = [
                 {"goal": "p → p", "hypotheses": ["p : Prop"], "tactic": "intro"},
                 {"goal": "?m.4519 = ?m.4519", "hypotheses": []},  # hole in the target
-                {"goal": "p → p", "hypotheses": ["h : ?m.2235"], "tactic": "intro"},  # hole in a hyp
+                {
+                    "goal": "p → p",
+                    "hypotheses": ["h : ?m.2235"],
+                    "tactic": "intro",
+                },  # hole in a hyp
                 {"goal": "q ∨ p", "hypotheses": ["p : Prop", "q : Prop", "h : p ∨ q"]},
             ]
             with open(theorem_file, "w") as f:
                 for r in rows:
                     f.write(json.dumps(r) + "\n")
             cfg = _write_config(
-                tmp, data_source="file", theorem_file=theorem_file,
-                max_state_chars=400, eval_pool_size=0,
+                tmp,
+                data_source="file",
+                theorem_file=theorem_file,
+                max_state_chars=400,
+                eval_pool_size=0,
             )
             pool = build_theorem_pool(cfg)
             total = len(pool.train_items) + len(pool.eval_items)
             self.assertEqual(total, 2)  # both metavariable rows dropped
-            self.assertEqual(pool.train_items[0].goal.expression, "p → p")  # size-sorted
+            self.assertEqual(
+                pool.train_items[0].goal.expression, "p → p"
+            )  # size-sorted
 
     def test_universe_placeholders_are_not_term_metavariables(self):
         goal = LeanGoalSeed(
             expression="x = x",
             hypotheses=["α : Type ?u.319125", "x : α"],
         )
-        from maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver import _has_metavariable
+        from maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver import (
+            _has_metavariable,
+        )
 
         self.assertFalse(_has_metavariable(goal))
 
@@ -391,7 +422,9 @@ class PoolTests(unittest.TestCase):
 class BCAnnealTests(unittest.TestCase):
     def test_anneal_endpoints_and_monotonicity(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = _write_config(Path(tmp), bc_anneal_start=0.5, bc_anneal_end=0.1, bc_anneal_rounds=10)
+            cfg = _write_config(
+                Path(tmp), bc_anneal_start=0.5, bc_anneal_end=0.1, bc_anneal_rounds=10
+            )
         self.assertAlmostEqual(bc_weight_at_round(0, cfg), 0.5)
         self.assertAlmostEqual(bc_weight_at_round(10, cfg), 0.1)
         self.assertAlmostEqual(bc_weight_at_round(100, cfg), 0.1)
@@ -414,7 +447,10 @@ class RoundLoopTests(unittest.TestCase):
             run_dir = run_dirs[0]
             self.assertTrue((run_dir / "last.pt").exists())
             self.assertTrue((run_dir / "config.json").exists())
-            rows = [json.loads(l) for l in (run_dir / "metrics.jsonl").read_text().splitlines()]
+            rows = [
+                json.loads(l)
+                for l in (run_dir / "metrics.jsonl").read_text().splitlines()
+            ]
             self.assertEqual(len(rows), 2)
             self.assertGreater(rows[0]["num_transitions"] + rows[0]["num_failures"], 0)
             self.assertEqual([row["model_generation"] for row in rows], [1.0, 2.0])
@@ -428,12 +464,18 @@ class RoundLoopTests(unittest.TestCase):
             torch.manual_seed(0)
             before = _make_model(node_vocab)
             before.load_state_dict(
-                torch.load(cfg.warmstart_checkpoint, weights_only=False)["model_state_dict"]
+                torch.load(cfg.warmstart_checkpoint, weights_only=False)[
+                    "model_state_dict"
+                ]
             )
             torch.manual_seed(0)
-            asyncio.run(run_rl_training(cfg, reasoner_factory=_qed_factory, pool=_pool()))
+            asyncio.run(
+                run_rl_training(cfg, reasoner_factory=_qed_factory, pool=_pool())
+            )
             run_dir = next((tmp / "runs").iterdir())
-            after_sd = torch.load(run_dir / "last.pt", weights_only=False)["model_state_dict"]
+            after_sd = torch.load(run_dir / "last.pt", weights_only=False)[
+                "model_state_dict"
+            ]
             changed = any(
                 not torch.equal(before.state_dict()[k], after_sd[k]) for k in after_sd
             )
@@ -445,9 +487,7 @@ class RoundLoopTests(unittest.TestCase):
         model = _make_model(node_vocab)
         inner = _make_reasoner(model, node_vocab, _QEDExecutor(), top_k=2)
         reasoner = _RaisingReasoner(inner, raise_on={1})  # second theorem dies
-        results, stats = asyncio.run(
-            collect_round(reasoner, _items(3), timeout_s=10.0)
-        )
+        results, stats = asyncio.run(collect_round(reasoner, _items(3), timeout_s=10.0))
         self.assertEqual(stats["attempted"], 3.0)
         self.assertEqual(stats["collected"], 2.0)
         self.assertEqual(stats["searches_failed"], 1.0)
@@ -458,17 +498,25 @@ class RoundLoopTests(unittest.TestCase):
             tmp = Path(tmp)
             cfg = _write_config(tmp, num_rounds=2)
             torch.manual_seed(0)
-            asyncio.run(run_rl_training(cfg, reasoner_factory=_qed_factory, pool=_pool()))
+            asyncio.run(
+                run_rl_training(cfg, reasoner_factory=_qed_factory, pool=_pool())
+            )
             run_dir = next((tmp / "runs").iterdir())
 
             cfg.num_rounds = 3
             torch.manual_seed(0)
             asyncio.run(
                 run_rl_training(
-                    cfg, resume_run_dir=run_dir, reasoner_factory=_qed_factory, pool=_pool()
+                    cfg,
+                    resume_run_dir=run_dir,
+                    reasoner_factory=_qed_factory,
+                    pool=_pool(),
                 )
             )
-            rows = [json.loads(l) for l in (run_dir / "metrics.jsonl").read_text().splitlines()]
+            rows = [
+                json.loads(l)
+                for l in (run_dir / "metrics.jsonl").read_text().splitlines()
+            ]
             train_rows = [r for r in rows if "num_transitions" in r]
             self.assertEqual([r["round"] for r in train_rows], [0, 1, 2])
             state = torch.load(run_dir / "last.pt", weights_only=False)
@@ -505,7 +553,9 @@ class EvalTests(unittest.TestCase):
             cfg = _write_config(tmp, num_rounds=1, eval_every=1)
             pool = TheoremPool(_items(20), eval_pool_size=2, curriculum_size=4, seed=0)
             torch.manual_seed(0)
-            asyncio.run(run_rl_training(cfg, reasoner_factory=_reject_factory, pool=pool))
+            asyncio.run(
+                run_rl_training(cfg, reasoner_factory=_reject_factory, pool=pool)
+            )
             run_dir = next((tmp / "runs").iterdir())
             # Reject executor proves nothing ⇒ proof rate 0.0 > -1 initial: best.pt IS
             # written once (first eval), but records rate 0.
@@ -523,9 +573,16 @@ class DeadRoundTests(unittest.TestCase):
             tmp = Path(tmp)
             cfg = _write_config(tmp, num_rounds=2, bc_anneal_rounds=10)
             torch.manual_seed(0)
-            asyncio.run(run_rl_training(cfg, reasoner_factory=_dead_server_factory(), pool=_pool()))
+            asyncio.run(
+                run_rl_training(
+                    cfg, reasoner_factory=_dead_server_factory(), pool=_pool()
+                )
+            )
             run_dir = next((tmp / "runs").iterdir())
-            rows = [json.loads(l) for l in (run_dir / "metrics.jsonl").read_text().splitlines()]
+            rows = [
+                json.loads(l)
+                for l in (run_dir / "metrics.jsonl").read_text().splitlines()
+            ]
             self.assertEqual([r["bc_weight"] for r in rows], [0.5, 0.5])
             self.assertEqual([r["anneal_rounds_done"] for r in rows], [0, 0])
             self.assertEqual([r["model_generation"] for r in rows], [0.0, 0.0])
@@ -543,7 +600,10 @@ class DeadRoundTests(unittest.TestCase):
                 )
             )
             run_dir = next((tmp / "runs").iterdir())
-            rows = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+            rows = [
+                json.loads(line)
+                for line in (run_dir / "metrics.jsonl").read_text().splitlines()
+            ]
             self.assertEqual([row["collected"] for row in rows], [0.0, 0.0])
             self.assertEqual([row["searches_failed"] for row in rows], [2.0, 2.0])
             self.assertEqual([row["optimizer_step"] for row in rows], [0.0, 0.0])
@@ -554,9 +614,14 @@ class DeadRoundTests(unittest.TestCase):
             tmp = Path(tmp)
             cfg = _write_config(tmp, num_rounds=2, bc_anneal_rounds=10)
             torch.manual_seed(0)
-            asyncio.run(run_rl_training(cfg, reasoner_factory=_qed_factory, pool=_pool()))
+            asyncio.run(
+                run_rl_training(cfg, reasoner_factory=_qed_factory, pool=_pool())
+            )
             run_dir = next((tmp / "runs").iterdir())
-            rows = [json.loads(l) for l in (run_dir / "metrics.jsonl").read_text().splitlines()]
+            rows = [
+                json.loads(l)
+                for l in (run_dir / "metrics.jsonl").read_text().splitlines()
+            ]
             self.assertEqual([r["anneal_rounds_done"] for r in rows], [1, 2])
             self.assertLess(rows[1]["bc_weight"], rows[0]["bc_weight"])
 
@@ -567,7 +632,11 @@ class DeadRoundTests(unittest.TestCase):
             tmp = Path(tmp)
             cfg = _write_config(tmp, num_rounds=50, max_dead_rounds=3)
             with self.assertRaisesRegex(RuntimeError, "source-root"):
-                asyncio.run(run_rl_training(cfg, reasoner_factory=_dead_server_factory(), pool=_pool()))
+                asyncio.run(
+                    run_rl_training(
+                        cfg, reasoner_factory=_dead_server_factory(), pool=_pool()
+                    )
+                )
 
     def test_interleaved_gradient_round_resets_the_dead_counter(self):
         """One successful round between dead ones must restart the countdown."""
@@ -580,14 +649,19 @@ class DeadRoundTests(unittest.TestCase):
             factory = _dead_server_factory(succeed_on={4, 5, 10, 11})
             asyncio.run(run_rl_training(cfg, reasoner_factory=factory, pool=_pool()))
             run_dir = next((tmp / "runs").iterdir())
-            rows = [json.loads(l) for l in (run_dir / "metrics.jsonl").read_text().splitlines()]
+            rows = [
+                json.loads(l)
+                for l in (run_dir / "metrics.jsonl").read_text().splitlines()
+            ]
             # Which rounds took a gradient step, not how many transitions each
             # harvested — the count depends on the sampler, the gating does not.
             self.assertEqual(
                 [r["num_transitions"] > 0 for r in rows],
                 [False, False, True, False, False, True],
             )
-            self.assertEqual([r["anneal_rounds_done"] for r in rows], [0, 0, 1, 1, 1, 2])
+            self.assertEqual(
+                [r["anneal_rounds_done"] for r in rows], [0, 0, 1, 1, 1, 2]
+            )
 
     def test_round_line_reports_both_failure_counts(self):
         """Issue 3: the round line must print both `rej` (tactics refused inside
@@ -598,9 +672,14 @@ class DeadRoundTests(unittest.TestCase):
             tmp = Path(tmp)
             cfg = _write_config(tmp, num_rounds=1, bc_anneal_rounds=10)
             torch.manual_seed(0)
-            asyncio.run(run_rl_training(cfg, reasoner_factory=_reject_factory, pool=_pool()))
+            asyncio.run(
+                run_rl_training(cfg, reasoner_factory=_reject_factory, pool=_pool())
+            )
             run_dir = next((tmp / "runs").iterdir())
-            rows = [json.loads(l) for l in (run_dir / "metrics.jsonl").read_text().splitlines()]
+            rows = [
+                json.loads(l)
+                for l in (run_dir / "metrics.jsonl").read_text().splitlines()
+            ]
             # `num_failures` counts rejections inside searches; `searches_failed`
             # counts whole searches that raised. Both must be present in metrics.
             self.assertIn("num_failures", rows[0])
@@ -646,7 +725,9 @@ class PantographEnvResolverTests(unittest.TestCase):
     def test_env_fields_survive_config_roundtrip_as_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            cfg = _write_config(tmp, source_root=tmp / "mathlib", pantograph_repl=tmp / "repl")
+            cfg = _write_config(
+                tmp, source_root=tmp / "mathlib", pantograph_repl=tmp / "repl"
+            )
             path = tmp / "cfg.json"
             with open(path, "w") as f:
                 json.dump(cfg.to_dict(), f)
@@ -675,13 +756,17 @@ class PLNKillSwitchConfigTests(unittest.TestCase):
 
         def _recording_factory(model, node_vocab, tactic_vocab, cfg):
             received.append(cfg.use_pln)
-            return _make_reasoner(model, node_vocab, _QEDExecutor(), top_k=cfg.top_k_tactics)
+            return _make_reasoner(
+                model, node_vocab, _QEDExecutor(), top_k=cfg.top_k_tactics
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             cfg = _write_config(tmp, use_pln=False, num_rounds=1)
             torch.manual_seed(0)
-            asyncio.run(run_rl_training(cfg, reasoner_factory=_recording_factory, pool=_pool()))
+            asyncio.run(
+                run_rl_training(cfg, reasoner_factory=_recording_factory, pool=_pool())
+            )
         self.assertEqual(received, [False])
 
     def test_eval_only_does_not_construct_pln(self):
@@ -735,7 +820,7 @@ class PLNKillSwitchConfigTests(unittest.TestCase):
                     return_value=_EvalEnv(),
                 ),
                 patch(
-                    "maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver.create_model_sexpr_server",
+                    "maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver.create_model_sexpr_client",
                     new=lambda env: env.create_server(),
                 ),
                 patch(

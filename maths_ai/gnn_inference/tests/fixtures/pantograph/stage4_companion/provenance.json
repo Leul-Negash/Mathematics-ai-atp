@@ -1,0 +1,28 @@
+{
+  "base_commit": "0dd5d2225e2d093f66a4b6231c1aa35004f2c8f3",
+  "toolchain": "leanprover/lean4:v4.10.0-rc1",
+  "lean_version": "Lean (version 4.10.0-rc1, x86_64-unknown-linux-gnu, commit 3b58e0649156, Release)",
+  "repl_path": "/home/nolawi/pantograph_fork/.lake/build/bin/repl",
+  "repl_sha256": "fd507703303d05fb2ad97b8b11962a06d649741bfafb3b3a93b65dc9fda5a198",
+  "imports": [
+    "Mathlib",
+    "Test.ContractFixtures"
+  ],
+  "lean_path": "/home/nolawi/pantograph_fork/.lake/packages/LSpec/.lake/build/lib:/home/nolawi/pantograph_fork/.lake/build/lib:/home/nolawi/.elan/toolchains/leanprover--lean4---v4.10.0-rc1/lib/lean:/home/nolawi/new-maths/maths_ai/sexpr_environment/sexpr_environment/mathlib4/.lake/packages/batteries/.lake/build/lib:/home/nolawi/new-maths/maths_ai/sexpr_environment/sexpr_environment/mathlib4/.lake/packages/Qq/.lake/build/lib:/home/nolawi/new-maths/maths_ai/sexpr_environment/sexpr_environment/mathlib4/.lake/packages/aesop/.lake/build/lib:/home/nolawi/new-maths/maths_ai/sexpr_environment/sexpr_environment/mathlib4/.lake/packages/proofwidgets/.lake/build/lib:/home/nolawi/new-maths/maths_ai/sexpr_environment/sexpr_environment/mathlib4/.lake/packages/Cli/.lake/build/lib:/home/nolawi/new-maths/maths_ai/sexpr_environment/sexpr_environment/mathlib4/.lake/packages/importGraph/.lake/build/lib:/home/nolawi/new-maths/maths_ai/sexpr_environment/sexpr_environment/mathlib4/.lake/build/lib:/home/nolawi/.elan/toolchains/leanprover--lean4---v4.10.0-rc1/lib/lean",
+  "mathlib_expected_pin": "29dcec074de168ac2bf835a77ef68bbe069194c5",
+  "mathlib_pin_verification": "archive has no Git metadata; expected deployment pin",
+  "build_cache": "copied reference archive cache; changed targets rebuilt",
+  "python_executable": "/home/nolawi/new-maths/.venv/bin/python",
+  "decoder": "existing revision-2 application codec",
+  "exchanges": 61,
+  "graph_checks": [
+    "identity_intro",
+    "conjunction_split",
+    "instance_intro",
+    "let_intro"
+  ],
+  "initial_state_count": 0,
+  "final_state_count": 0,
+  "subprocess_reaped": true,
+  "complete_theorem_certification": false
+}

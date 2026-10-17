@@ -27,7 +27,12 @@ from torch.optim import AdamW
 
 from maths_ai.data_models.proof_components import LeanGoalSeed
 from maths_ai.hybrid_reasoner.pantograph_env import PantographEnv
-from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_server
+from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
+from maths_ai.hybrid_reasoner.pantograph_protocol import (
+    PantographProtocolError,
+    PantographStateError,
+    PantographTransportError,
+)
 
 from .actor_critic import ActorCriticWithArgsClassifier
 from .checkpointing import build_model_from_checkpoint, checkpoint_payload
@@ -74,7 +79,9 @@ class RLTrainingConfig:
     curriculum_start_size: int = 200
     curriculum_growth_factor: float = 1.5
     curriculum_solve_threshold: float = 0.3
-    curriculum_window_rounds: int = 10  # solve rate measured over this many recent rounds
+    curriculum_window_rounds: int = (
+        10  # solve rate measured over this many recent rounds
+    )
 
     # BC anchor anneal (linear).
     bc_anneal_start: float = 0.5
@@ -139,8 +146,12 @@ class RLTrainingConfig:
     server_timeout_s: int = 120
 
     _PATH_FIELDS = (
-        "warmstart_checkpoint", "prepared_root", "theorem_file", "run_root",
-        "source_root", "pantograph_repl",
+        "warmstart_checkpoint",
+        "prepared_root",
+        "theorem_file",
+        "run_root",
+        "source_root",
+        "pantograph_repl",
     )
 
     @classmethod
@@ -212,6 +223,8 @@ def pantograph_env(cfg: RLTrainingConfig) -> PantographEnv:
         pantograph_repl=cfg.pantograph_repl,
         imports=imports,
         timeout=cfg.server_timeout_s,
+        server_start_timeout_s=cfg.server_start_timeout_s,
+        worker_shutdown_timeout_s=cfg.worker_shutdown_timeout_s,
     )
 
 
@@ -237,6 +250,7 @@ _METAVARIABLE_RE = re.compile(r"\?m\.\d+|\?[a-zA-Z_][a-zA-Z0-9_]*\b")
 
 def _has_metavariable(goal: LeanGoalSeed) -> bool:
     """True when the goal or any hypothesis mentions an unassigned metavariable."""
+
     def has_term_metavariable(text: str) -> bool:
         # ``?u.N`` is a universe placeholder emitted by the extractor for a
         # declaration's type level, not an unresolved term metavariable.
@@ -264,7 +278,14 @@ class TheoremPool:
     served, is fixed for the whole run, and never enters a training batch.
     """
 
-    def __init__(self, items: list[TheoremItem], *, eval_pool_size: int, curriculum_size: int, seed: int) -> None:
+    def __init__(
+        self,
+        items: list[TheoremItem],
+        *,
+        eval_pool_size: int,
+        curriculum_size: int,
+        seed: int,
+    ) -> None:
         self._rng = random.Random(seed)
         items = sorted(items, key=lambda t: t.size)
         # Deterministic held-out split: every k-th item of the size-sorted pool, so the
@@ -278,7 +299,11 @@ class TheoremPool:
         else:
             self.eval_items = []
             self.train_items = list(items)
-        self.curriculum_size = min(max(curriculum_size, 1), len(self.train_items)) if self.train_items else 0
+        self.curriculum_size = (
+            min(max(curriculum_size, 1), len(self.train_items))
+            if self.train_items
+            else 0
+        )
 
     def sample_batch(self, batch_size: int) -> list[TheoremItem]:
         window = self.train_items[: self.curriculum_size]
@@ -287,7 +312,9 @@ class TheoremPool:
         return self._rng.sample(window, min(batch_size, len(window)))
 
     def grow(self, factor: float) -> None:
-        self.curriculum_size = min(int(self.curriculum_size * factor) or 1, len(self.train_items))
+        self.curriculum_size = min(
+            int(self.curriculum_size * factor) or 1, len(self.train_items)
+        )
 
 
 def build_theorem_pool(cfg: RLTrainingConfig) -> TheoremPool:
@@ -314,7 +341,11 @@ def build_theorem_pool(cfg: RLTrainingConfig) -> TheoremPool:
                 if _has_metavariable(goal):
                     dropped += 1
                     continue
-                items.append(TheoremItem(goal=goal, tactic_label=row.get("tactic", ""), size=size))
+                items.append(
+                    TheoremItem(
+                        goal=goal, tactic_label=row.get("tactic", ""), size=size
+                    )
+                )
                 if len(items) >= cfg.max_pool_size:
                     break
     elif cfg.data_source == "dataset":
@@ -340,11 +371,17 @@ def build_theorem_pool(cfg: RLTrainingConfig) -> TheoremPool:
             if _has_metavariable(goal):
                 dropped += 1
                 continue
-            items.append(TheoremItem(goal=goal, tactic_label=row.tactic or "", size=len(state_str)))
+            items.append(
+                TheoremItem(
+                    goal=goal, tactic_label=row.tactic or "", size=len(state_str)
+                )
+            )
             if len(items) >= cfg.max_pool_size:
                 break
     else:
-        raise ValueError(f"Unknown data_source '{cfg.data_source}' (use 'dataset' or 'file')")
+        raise ValueError(
+            f"Unknown data_source '{cfg.data_source}' (use 'dataset' or 'file')"
+        )
 
     console_print(f"Theorem pool: {len(items)} usable states, {dropped} dropped.")
     return TheoremPool(
@@ -409,7 +446,9 @@ async def collect_round(
     for item in batch:
         try:
             result = await asyncio.wait_for(
-                reasoner.prove(item.goal.expression, hypotheses=item.goal.hypotheses, greedy=greedy),
+                reasoner.prove(
+                    item.goal.expression, hypotheses=item.goal.hypotheses, greedy=greedy
+                ),
                 timeout=timeout_s,
             )
             results.append(result)
@@ -418,7 +457,13 @@ async def collect_round(
         except asyncio.TimeoutError:
             failed += 1
             console_print(f"  [collect] timeout on: {item.goal.expression[:60]}")
-        except Exception as exc:  # noqa: BLE001 — a single search may not kill the run
+        except (
+            PantographProtocolError,
+            PantographStateError,
+            PantographTransportError,
+        ):
+            raise
+        except Exception as exc:
             failed += 1
             console_print(f"  [collect] error on: {item.goal.expression[:60]} — {exc}")
     stats = {
@@ -540,7 +585,7 @@ async def _create_live_reasoner_pool(
     from maths_ai.hybrid_reasoner.joint_inference import PantographExecutor
 
     async def server_factory(_worker_id: int):
-        return await create_model_sexpr_server(env)
+        return await create_model_sexpr_client(env)
 
     def reasoner_factory(worker_id, device, replica, server):
         del worker_id
@@ -554,7 +599,6 @@ async def _create_live_reasoner_pool(
             max_depth=cfg.max_depth,
             max_nodes=cfg.max_nodes,
             use_pln=cfg.use_pln,
-            env=env,
         )
 
     async def search_factory(reasoner, theorem, greedy):
@@ -621,7 +665,9 @@ async def _run_rl_training_impl(
     node_vocab, tactic_vocab = metadata.node_vocab, metadata.tactic_vocab
 
     # The checkpoint manifest owns the complete actor-critic architecture.
-    checkpoint = torch.load(cfg.warmstart_checkpoint, map_location=device, weights_only=False)
+    checkpoint = torch.load(
+        cfg.warmstart_checkpoint, map_location=device, weights_only=False
+    )
     model, warmstart_manifest, warmstart_spec = build_model_from_checkpoint(
         checkpoint,
         node_vocab=node_vocab,
@@ -636,7 +682,9 @@ async def _run_rl_training_impl(
     console_print(f"Warm start (strict): {cfg.warmstart_checkpoint}")
     console_print(f"Canonical model parameters: {model_parameter_bytes} bytes")
 
-    optimizer = AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
+    optimizer = AdamW(
+        model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+    )
 
     # Run dir / resume.
     start_round = 0
@@ -657,16 +705,22 @@ async def _run_rl_training_impl(
             expected_model_kind="actor_critic_with_args",
         )
         if resumed_spec != warmstart_spec:
-            raise ValueError("Resume checkpoint model specification differs from the warm start.")
+            raise ValueError(
+                "Resume checkpoint model specification differs from the warm start."
+            )
         model = resumed_model.to(device)
-        optimizer = AdamW(model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay)
+        optimizer = AdamW(
+            model.parameters(), lr=cfg.learning_rate, weight_decay=cfg.weight_decay
+        )
         optimizer.load_state_dict(state["optimizer_state_dict"])
         torch.set_rng_state(state["torch_rng_state"].cpu())
         start_round = int(state["round"]) + 1
         best_proof_rate = float(state.get("best_proof_rate", -1.0))
         curriculum_size_override = int(state.get("curriculum_size", 0)) or None
         anneal_rounds_done = int(state.get("anneal_rounds_done", 0)) or 0
-        console_print(f"Resumed {run_dir} at round {start_round} (best proof rate {best_proof_rate:.3f})")
+        console_print(
+            f"Resumed {run_dir} at round {start_round} (best proof rate {best_proof_rate:.3f})"
+        )
     else:
         run_dir = _create_run_dir(cfg.run_root)
         with open(run_dir / "config.json", "w") as f:
@@ -809,7 +863,9 @@ async def _run_rl_training_impl(
         ):
             pool.grow(cfg.curriculum_growth_factor)
             recent_solve_rates.clear()
-            console_print(f"  Curriculum widened to {pool.curriculum_size} (solve rate {window_rate:.2f})")
+            console_print(
+                f"  Curriculum widened to {pool.curriculum_size} (solve rate {window_rate:.2f})"
+            )
 
         row = {
             "round": round_idx,
@@ -839,13 +895,23 @@ async def _run_rl_training_impl(
 
         if (round_idx + 1) % cfg.checkpoint_every == 0:
             save_checkpoint(
-                model, optimizer, round_idx, pool.curriculum_size, best_proof_rate,
-                run_dir / "last.pt", anneal_rounds_done=anneal_rounds_done,
-                node_vocab=node_vocab, tactic_vocab=tactic_vocab,
+                model,
+                optimizer,
+                round_idx,
+                pool.curriculum_size,
+                best_proof_rate,
+                run_dir / "last.pt",
+                anneal_rounds_done=anneal_rounds_done,
+                node_vocab=node_vocab,
+                tactic_vocab=tactic_vocab,
                 graph_representation=metadata.graph_representation,
             )
 
-        if cfg.eval_every > 0 and (round_idx + 1) % cfg.eval_every == 0 and pool.eval_items:
+        if (
+            cfg.eval_every > 0
+            and (round_idx + 1) % cfg.eval_every == 0
+            and pool.eval_items
+        ):
             eval_stats = await evaluate_proof_rate(
                 reasoner,
                 pool.eval_items,
@@ -859,18 +925,30 @@ async def _run_rl_training_impl(
             if eval_stats["proof_rate"] > best_proof_rate:
                 best_proof_rate = eval_stats["proof_rate"]
                 save_checkpoint(
-                    model, optimizer, round_idx, pool.curriculum_size, best_proof_rate,
-                    run_dir / "best.pt", anneal_rounds_done=anneal_rounds_done,
-                    node_vocab=node_vocab, tactic_vocab=tactic_vocab,
+                    model,
+                    optimizer,
+                    round_idx,
+                    pool.curriculum_size,
+                    best_proof_rate,
+                    run_dir / "best.pt",
+                    anneal_rounds_done=anneal_rounds_done,
+                    node_vocab=node_vocab,
+                    tactic_vocab=tactic_vocab,
                     graph_representation=metadata.graph_representation,
                 )
                 console_print(f"  New best proof rate {best_proof_rate:.3f} → best.pt")
 
     # Final checkpoint so the run is always resumable from its end state.
     save_checkpoint(
-        model, optimizer, cfg.num_rounds - 1, pool.curriculum_size, best_proof_rate,
-        run_dir / "last.pt", anneal_rounds_done=anneal_rounds_done,
-        node_vocab=node_vocab, tactic_vocab=tactic_vocab,
+        model,
+        optimizer,
+        cfg.num_rounds - 1,
+        pool.curriculum_size,
+        best_proof_rate,
+        run_dir / "last.pt",
+        anneal_rounds_done=anneal_rounds_done,
+        node_vocab=node_vocab,
+        tactic_vocab=tactic_vocab,
         graph_representation=metadata.graph_representation,
     )
     return last_metrics
@@ -884,30 +962,63 @@ async def _run_rl_training_impl(
 def driver_main(argv: list[str] | None = None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(description="On-policy RL training over live Lean search")
-    parser.add_argument("--config", type=str, required=True, help="Path to the RL training JSON config")
+    parser = argparse.ArgumentParser(
+        description="On-policy RL training over live Lean search"
+    )
+    parser.add_argument(
+        "--config", type=str, required=True, help="Path to the RL training JSON config"
+    )
     parser.add_argument(
         "--dataset-name",
         type=str,
         default=None,
         help="Hugging Face dataset identifier used for dataset-mode theorem streaming",
     )
-    parser.add_argument("--resume", type=str, default=None, help="Run directory to resume (contains last.pt)")
-    parser.add_argument("--eval-only", action="store_true", help="Only run the greedy proof-rate evaluation")
-    parser.add_argument("--checkpoint", type=str, default=None,
-                        help="Checkpoint override for --eval-only (defaults to warmstart_checkpoint)")
-    parser.add_argument("--source-root", type=str, default=None,
-                        help="Lake project root whose compiled .olean artifacts the Pantograph "
-                             "REPL should see. Without it the REPL runs on core Lean only and "
-                             "cannot elaborate Mathlib notation such as ℕ.")
-    parser.add_argument("--pantograph-repl", type=str, default=None,
-                        help="Pantograph REPL binary to run instead of the bundled one. Its Lean "
-                             "toolchain must match --source-root's.")
-    parser.add_argument("--pantograph-imports", type=str, default=None,
-                        help="Comma-separated modules the server imports at startup "
-                             "(default: Init,Mathlib when --source-root is set, else Init)")
-    parser.add_argument("--server-timeout", type=int, default=None,
-                        help="Per-request Pantograph timeout in seconds")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Run directory to resume (contains last.pt)",
+    )
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Only run the greedy proof-rate evaluation",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Checkpoint override for --eval-only (defaults to warmstart_checkpoint)",
+    )
+    parser.add_argument(
+        "--source-root",
+        type=str,
+        default=None,
+        help="Lake project root whose compiled .olean artifacts the Pantograph "
+        "REPL should see. Without it the REPL runs on core Lean only and "
+        "cannot elaborate Mathlib notation such as ℕ.",
+    )
+    parser.add_argument(
+        "--pantograph-repl",
+        type=str,
+        default=None,
+        help="Pantograph REPL binary to run instead of the bundled one. Its Lean "
+        "toolchain must match --source-root's.",
+    )
+    parser.add_argument(
+        "--pantograph-imports",
+        type=str,
+        default=None,
+        help="Comma-separated modules the server imports at startup "
+        "(default: Init,Mathlib when --source-root is set, else Init)",
+    )
+    parser.add_argument(
+        "--server-timeout",
+        type=int,
+        default=None,
+        help="Per-request Pantograph timeout in seconds",
+    )
     args = parser.parse_args(argv)
 
     cfg = RLTrainingConfig.from_json(args.config)
@@ -917,7 +1028,9 @@ def driver_main(argv: list[str] | None = None) -> int:
     if args.pantograph_repl:
         cfg.pantograph_repl = Path(args.pantograph_repl)
     if args.pantograph_imports:
-        cfg.pantograph_imports = [m.strip() for m in args.pantograph_imports.split(",") if m.strip()]
+        cfg.pantograph_imports = [
+            m.strip() for m in args.pantograph_imports.split(",") if m.strip()
+        ]
     if args.server_timeout is not None:
         cfg.server_timeout_s = args.server_timeout
     if args.dataset_name:
@@ -942,7 +1055,9 @@ def driver_main(argv: list[str] | None = None) -> int:
             metadata = load_prepared_metadata(cfg.prepared_root)
             require_graph_representation(metadata.graph_representation)
             node_vocab, tactic_vocab = metadata.node_vocab, metadata.tactic_vocab
-            checkpoint = torch.load(cfg.warmstart_checkpoint, map_location=device, weights_only=False)
+            checkpoint = torch.load(
+                cfg.warmstart_checkpoint, map_location=device, weights_only=False
+            )
             model, _, _ = build_model_from_checkpoint(
                 checkpoint,
                 node_vocab=node_vocab,

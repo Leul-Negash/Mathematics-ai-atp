@@ -1,4 +1,11 @@
-# Updated Lean/PyPantograph to PeTTaChainer Translator
+# Lean/Pantograph to PeTTaChainer Translator
+
+Current generation uses the repository-owned async client. All generation
+commands below require `--source-root /path/to/compiled/mathlib4` and
+`--pantograph-repl /path/to/Pantograph/.lake/build/bin/repl`. Programmatic callers
+must await `run_demo(..., env=env, axioms_path=...)`. Output directories must be
+empty or new. See the [current client guide](../../../gnn_inference/docs/owned_pantograph_client.md)
+for complete commands; earlier examples below need those additional arguments.
 
 This document explains the updated translator that generates one `.metta` file per Lean subgoal, creates a shell runner, captures one `.log` file per subgoal, parses PeTTaChainer query results, ranks subgoals, and now preserves Lean variable names by default instead of normalizing them to `v0`, `v1`, etc.
 
@@ -1341,4 +1348,5 @@ The translator was recently modularized from a single 1,200+ line script into a 
     *   `cli.py`: CLI argument parsing & orchestration.
 
 ### Lazy Pantograph Dependency
-The import of `pantograph` is deferred to `run_demo()`. This allows ranking and parsing features (e.g. `parse_and_rank_logs`) to be used without having Lean 4 / Pantograph installed in the environment.
+No PyPantograph package is imported. Generation starts the repository-owned client
+inside an awaited context; ranking and parsing do not launch a Lean process.

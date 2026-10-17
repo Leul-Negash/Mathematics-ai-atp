@@ -5,7 +5,11 @@ import unittest
 from dataclasses import replace
 
 import torch
-from pantograph.server import ServerError
+from maths_ai.hybrid_reasoner.pantograph_protocol import (
+    PantographGoalRejected,
+    PantographTransportError,
+)
+from maths_ai.gnn_inference.tests.model_helpers import ScopedFakeClient
 from torch.optim import AdamW
 from torch_geometric.data import Batch
 
@@ -52,17 +56,16 @@ class _FakeGoalState:
         self.goals = [pantograph_goal(goal)]
 
 
-class _FakeServer:
+class _FakeServer(ScopedFakeClient):
     def __init__(self):
-        self.proc = object()
         self.goals_by_expression = {}
         self._last_expression = None
 
-    async def goal_start_async(self, expression):
+    async def _start_goal(self, expression):
         self._last_expression = expression
         return _FakeGoalState()
 
-    async def goal_tactic_async(self, state, tactic):
+    async def _apply_tactic(self, state, tactic):
         return _FakeGoalState(self.goals_by_expression.get(self._last_expression))
 
 
@@ -87,8 +90,8 @@ class _RejectExecutor:
 
 
 class _ElaborationServer(_FakeServer):
-    async def goal_start_async(self, expression):
-        raise ServerError("cannot elaborate reconstructed goal")
+    async def _start_goal(self, expression):
+        raise PantographGoalRejected("cannot elaborate reconstructed goal")
 
 
 class _ElaborationExecutor:
@@ -104,14 +107,16 @@ class _InfrastructureFailureExecutor:
         self.server = _FakeServer()
 
     async def apply(self, server, state, tactic):
-        raise BrokenPipeError("Pantograph pipe closed")
+        raise PantographTransportError("Pantograph pipe closed")
 
 
 class _StubPLN:
     """PLN stand-in: a real (non-fallback) low score, no subprocess."""
 
     async def evaluate_async(self, expression, hypotheses=None, **kwargs):
-        return PLNResult(stv=STV(strength=0.1, confidence=1.0), status="ok", is_fallback=False)
+        return PLNResult(
+            stv=STV(strength=0.1, confidence=1.0), status="ok", is_fallback=False
+        )
 
 
 TACTIC_VOCAB = {"trivial": 0, "intro": 1, "exact": 2}
@@ -159,7 +164,10 @@ class DecodeTests(unittest.TestCase):
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
         )
-        from maths_ai.gnn_inference.atp_lean_gnn.inference import _local_names_by_fv_label
+        from maths_ai.gnn_inference.atp_lean_gnn.inference import (
+            _local_names_by_fv_label,
+        )
+
         candidate, action = reasoner._decode(
             sample, dag, _local_names_by_fv_label(dag), data.graph_fingerprint
         )
@@ -183,7 +191,10 @@ class DecodeTests(unittest.TestCase):
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
         )
-        from maths_ai.gnn_inference.atp_lean_gnn.inference import _local_names_by_fv_label
+        from maths_ai.gnn_inference.atp_lean_gnn.inference import (
+            _local_names_by_fv_label,
+        )
+
         candidate, action = reasoner._decode(
             sample, dag, _local_names_by_fv_label(dag), data.graph_fingerprint
         )
@@ -204,7 +215,10 @@ class DecodeTests(unittest.TestCase):
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
         )
-        from maths_ai.gnn_inference.atp_lean_gnn.inference import _local_names_by_fv_label
+        from maths_ai.gnn_inference.atp_lean_gnn.inference import (
+            _local_names_by_fv_label,
+        )
+
         candidate, action = reasoner._decode(
             sample, dag, _local_names_by_fv_label(dag), data.graph_fingerprint
         )
@@ -225,7 +239,9 @@ class RolloutTests(unittest.TestCase):
         self.assertGreater(len(result.edge_actions), 0)
         for edge_id, action in result.edge_actions.items():
             edge = result.graph.edges[edge_id]
-            self.assertEqual(edge.tactic.tactic_name, reasoner.id_to_tactic[action.tactic_id])
+            self.assertEqual(
+                edge.tactic.tactic_name, reasoner.id_to_tactic[action.tactic_id]
+            )
 
     def test_multiplicity_accounts_for_every_draw(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
@@ -249,7 +265,8 @@ class RolloutTests(unittest.TestCase):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
         result = self._prove(reasoner)
         transitions = extract_actor_transitions(
-            result.graph, RewardConfig(step_penalty=0.0),
+            result.graph,
+            RewardConfig(step_penalty=0.0),
             edge_ids=list(result.edge_actions.keys()),
         )
         self.assertEqual(len(transitions), len(result.edge_actions))
@@ -258,19 +275,22 @@ class RolloutTests(unittest.TestCase):
 
     def test_elaboration_failure_discards_unexecuted_actions(self):
         reasoner, _model, _vocab = _make_reasoner(_ElaborationExecutor())
-        with self.assertRaises(ServerError):
+        with self.assertRaises(PantographGoalRejected):
             self._prove(reasoner)
 
     def test_infrastructure_failure_discards_unobserved_actions(self):
         reasoner, _model, _vocab = _make_reasoner(_InfrastructureFailureExecutor())
-        result = self._prove(reasoner)
-
-        self.assertEqual(result.graph.search_end_reason, SearchEndReason.EXTERNAL_ABORT)
-        self.assertEqual(result.graph.root.closure_reason, NodeClosureReason.INFRASTRUCTURE_FAILURE)
-        self.assertEqual(result.edge_actions, {})
-        self.assertEqual(result.failure_actions, [])
-        self.assertEqual(extract_actor_transitions(result.graph), [])
-        self.assertEqual(extract_critic_samples(result.graph), [])
+        with self.assertRaises(PantographTransportError) as error:
+            self._prove(reasoner)
+        graph = error.exception.graph
+        self.assertEqual(graph.search_end_reason, SearchEndReason.EXTERNAL_ABORT)
+        self.assertEqual(
+            graph.root.closure_reason, NodeClosureReason.INFRASTRUCTURE_FAILURE
+        )
+        self.assertEqual(reasoner._pending, {})
+        self.assertIsNone(reasoner._result)
+        self.assertEqual(extract_actor_transitions(graph), [])
+        self.assertEqual(extract_critic_samples(graph), [])
 
     def test_cancellation_clears_pending_actions(self):
         class _BlockingExecutor:
@@ -322,14 +342,20 @@ class OnPolicyLossTests(unittest.TestCase):
         optimizer = AdamW(model.parameters(), lr=0.01)
         before = [p.detach().clone() for p in model.parameters()]
         metrics = train_step_onpolicy(
-            model, optimizer, [result], reasoner.dag_featurize_data,
-            reward_cfg=RewardConfig(step_penalty=0.0), bc_weight=0.1,
+            model,
+            optimizer,
+            [result],
+            reasoner.dag_featurize_data,
+            reward_cfg=RewardConfig(step_penalty=0.0),
+            bc_weight=0.1,
         )
         self.assertGreater(metrics["num_transitions"], 0.0)
         self.assertTrue(all(torch.isfinite(torch.tensor(v)) for v in metrics.values()))
         after = list(model.parameters())
         changed = any(not torch.equal(b, a) for b, a in zip(before, after))
-        self.assertTrue(changed, "on-policy training step did not update any parameters")
+        self.assertTrue(
+            changed, "on-policy training step did not update any parameters"
+        )
 
     def test_failure_only_batch_is_actor_only(self):
         reasoner, model, _vocab = _make_reasoner(_RejectExecutor())
@@ -337,12 +363,19 @@ class OnPolicyLossTests(unittest.TestCase):
         self.assertGreater(len(result.failure_actions), 0)
 
         loss_result = compute_onpolicy_loss(
-            model, [], [], {}, result.failure_actions, reasoner.dag_featurize_data,
+            model,
+            [],
+            [],
+            {},
+            result.failure_actions,
+            reasoner.dag_featurize_data,
         )
         self.assertIsNotNone(loss_result)
         loss, metrics = loss_result
         self.assertTrue(torch.isfinite(loss))
-        self.assertEqual(metrics["critic_loss"], 0.0)  # a failed ACTION carries no state value
+        self.assertEqual(
+            metrics["critic_loss"], 0.0
+        )  # a failed ACTION carries no state value
         self.assertEqual(metrics["num_transitions"], 0.0)
         self.assertGreater(metrics["num_failures"], 0.0)
 
@@ -371,7 +404,8 @@ class OnPolicyLossTests(unittest.TestCase):
         reasoner, model, _vocab = _make_reasoner(_QEDExecutor())
         result = asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
         transitions = extract_actor_transitions(
-            result.graph, RewardConfig(step_penalty=0.0),
+            result.graph,
+            RewardConfig(step_penalty=0.0),
             edge_ids=list(result.edge_actions.keys()),
         )
         critic_samples = extract_critic_samples(result.graph)
@@ -381,10 +415,17 @@ class OnPolicyLossTests(unittest.TestCase):
         # advantage contrast, so re-weighting the failure by m must change the loss.
         def loss_with(m: int) -> float:
             model.eval()  # deterministic forward so only multiplicity differs
-            failures = [FailureRecord(goal=goal, action=EdgeAction(tactic_id=1, multiplicity=m))]
+            failures = [
+                FailureRecord(goal=goal, action=EdgeAction(tactic_id=1, multiplicity=m))
+            ]
             out = compute_onpolicy_loss(
-                model, transitions, critic_samples, result.edge_actions, failures,
-                reasoner.dag_featurize_data, reward_cfg=RewardConfig(step_penalty=0.0),
+                model,
+                transitions,
+                critic_samples,
+                result.edge_actions,
+                failures,
+                reasoner.dag_featurize_data,
+                reward_cfg=RewardConfig(step_penalty=0.0),
             )
             self.assertIsNotNone(out)
             return float(out[0].item())
@@ -438,6 +479,7 @@ class PLNDisabledTests(unittest.TestCase):
 
         class _TwoSubgoalThenQEDExecutor:
             """First apply: returns two subgoals; subsequent applies: QED."""
+
             def __init__(self):
                 self.server = _FakeServer()
                 self.server.goals_by_expression = {
@@ -462,10 +504,16 @@ class PLNDisabledTests(unittest.TestCase):
             for nid in result.graph.nodes
             if result.graph.nodes[nid].incoming_edge_id is not None
         ]
-        self.assertTrue(all(stv is None for stv in child_stvs),
-                        f"expected all stv=None, got {child_stvs}")
-        root_edge = next(edge for edge in result.graph.edges.values() if edge.source_id == 0)
-        child_goals = [result.graph.nodes[node_id].goal for node_id in root_edge.child_ids]
+        self.assertTrue(
+            all(stv is None for stv in child_stvs),
+            f"expected all stv=None, got {child_stvs}",
+        )
+        root_edge = next(
+            edge for edge in result.graph.edges.values() if edge.source_id == 0
+        )
+        child_goals = [
+            result.graph.nodes[node_id].goal for node_id in root_edge.child_ids
+        ]
         self.assertEqual(child_goals, [sg1, sg2, sg3])
 
     def test_no_pln_fallback_qed_on_total_rejection(self):
@@ -475,10 +523,13 @@ class PLNDisabledTests(unittest.TestCase):
 
         self.assertFalse(result.graph.is_solved())
         pln_fb_edges = [
-            e for e in result.graph.edges.values()
+            e
+            for e in result.graph.edges.values()
             if e.tactic.tactic_name == "PLN_fallback"
         ]
-        self.assertEqual(pln_fb_edges, [], "PLN_fallback edge must not exist when use_pln=False")
+        self.assertEqual(
+            pln_fb_edges, [], "PLN_fallback edge must not exist when use_pln=False"
+        )
         root = result.graph.root
         self.assertTrue(root.exhausted)
         self.assertIn("executor rejected", root.note or "")
@@ -490,20 +541,26 @@ class PLNDisabledTests(unittest.TestCase):
             edge_terminal_reward,
             RewardConfig,
         )
+
         reasoner, _, _ = self._make_no_pln(_QEDExecutor())
         result = self._prove(reasoner)
         cfg = RewardConfig(step_penalty=0.0)
         for edge in result.graph.edges.values():
             shaped = edge_shaped_reward(edge, result.graph, cfg)
             terminal = edge_terminal_reward(edge, result.graph, cfg)
-            self.assertAlmostEqual(shaped, terminal, places=6,
-                                   msg=f"edge {edge.id}: shaping should be 0 but got {shaped - terminal}")
+            self.assertAlmostEqual(
+                shaped,
+                terminal,
+                places=6,
+                msg=f"edge {edge.id}: shaping should be 0 but got {shaped - terminal}",
+            )
 
     def test_rank_subgoals_guard_raises(self):
         """Calling rank_subgoals on a use_pln=False reasoner raises RuntimeError."""
         reasoner, _, _ = self._make_no_pln(_QEDExecutor())
         goal = structured_goal(GOAL_EXPR, HYPS)
         from maths_ai.data_models.proof_components import TacticCandidate
+
         tactic = TacticCandidate(tactic_name="intro", arguments=[], probability=1.0)
         with self.assertRaises(RuntimeError):
             asyncio.run(reasoner.rank_subgoals(goal.expression, [goal], tactic))

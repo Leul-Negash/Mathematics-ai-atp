@@ -29,14 +29,15 @@ from typing import Deque, Dict, List, Optional, Protocol, Set, Tuple
 
 from maths_ai.data_models.proof_components import STV, Goal, TacticCandidate
 from maths_ai.data_models.proof_components import GoalState as GoalStateModel
-from pantograph import Server
-from pantograph.server import GoalState
+from maths_ai.hybrid_reasoner.pantograph_client import PantographStateScope
+from maths_ai.hybrid_reasoner.pantograph_protocol import TacticState
+
 
 class NodeStatus:
-    OPEN = "open"          # not yet expanded; eligible for the search frontier
+    OPEN = "open"  # not yet expanded; eligible for the search frontier
     EXPANDED = "expanded"  # has ≥1 outgoing edge, outcome still undetermined
-    SOLVED = "solved"      # ≥1 outgoing edge is fully solved (OR-success)
-    DEAD = "dead"          # structurally closed; closure_reason determines learning evidence
+    SOLVED = "solved"  # ≥1 outgoing edge is fully solved (OR-success)
+    DEAD = "dead"  # structurally closed; closure_reason determines learning evidence
 
 
 class NodeClosureReason(str, Enum):
@@ -63,8 +64,8 @@ class SearchEndReason(str, Enum):
 
 class EdgeStatus:
     PENDING = "pending"  # children still open/expanded; outcome undetermined
-    SOLVED = "solved"    # no children, or every child is SOLVED (AND-success)
-    DEAD = "dead"        # structurally blocked because some required child is DEAD
+    SOLVED = "solved"  # no children, or every child is SOLVED (AND-success)
+    DEAD = "dead"  # structurally blocked because some required child is DEAD
 
 
 def _state_key(goal: Goal) -> str:
@@ -114,7 +115,11 @@ class ProofNode:
             "depth": self.depth,
             "status": self.status,
             "gnn_probability": self.gnn_probability,
-            "stv": None if self.stv is None else {"strength": self.stv.strength, "confidence": self.stv.confidence},
+            "stv": (
+                None
+                if self.stv is None
+                else {"strength": self.stv.strength, "confidence": self.stv.confidence}
+            ),
             "combined_rank": self.combined_rank,
             "note": self.note,
             "closure_reason": self.closure_reason,
@@ -161,14 +166,15 @@ class TacticExecutor(Protocol):
 
     Turning a ``(tactic_name, arguments)`` pair into an actual Lean state
     transition needs a running Lean/Pantograph backend (cf. the translator
-    readme's ``server.goal_tactic(state, tactic=...)``); ``HybridReasoner``
+    ``scope.apply_tactic(state, tactic)``); ``HybridReasoner``
     is built against ``PantographExecutor`` for that.
     ``NullTacticExecutor`` implements the same protocol for tests/tooling
     that don't have a Lean/Pantograph backend available.
     """
 
-    async def apply(self, server: Server, state: GoalState, tactic: TacticCandidate) -> TacticOutcome:
-        ...
+    async def apply(
+        self, scope: PantographStateScope, state: TacticState, tactic: TacticCandidate
+    ) -> TacticOutcome: ...
 
 
 class NullTacticExecutor:
@@ -181,8 +187,12 @@ class NullTacticExecutor:
     failure keeps the missing piece visible instead of masking it.
     """
 
-    async def apply(self, server: Server, state: GoalState, tactic: TacticCandidate) -> TacticOutcome:
-        rendered = " ".join([tactic.tactic_name, *(arg.rstrip(":") for arg in tactic.arguments)]).strip()
+    async def apply(
+        self, scope: PantographStateScope, state: TacticState, tactic: TacticCandidate
+    ) -> TacticOutcome:
+        rendered = " ".join(
+            [tactic.tactic_name, *(arg.rstrip(":") for arg in tactic.arguments)]
+        ).strip()
         target = state.goals[0].target if state.goals else "<no goals>"
         return TacticOutcome(
             success=False,
@@ -211,7 +221,9 @@ class ProofHypergraph:
         self.edges: Dict[int, ProofHyperedge] = {}
         self.search_end_reason: Optional[SearchEndReason] = None
 
-        self.root_id = self._new_node(goal=root_goal, depth=0, gnn_probability=1.0, stv=None)
+        self.root_id = self._new_node(
+            goal=root_goal, depth=0, gnn_probability=1.0, stv=None
+        )
 
     # Construction
     def _new_node(
@@ -281,7 +293,9 @@ class ProofHypergraph:
                 child.note = "cycle: identical to an ancestor goal"
             child_ids.append(child_id)
 
-        edge = ProofHyperedge(id=edge_id, source_id=source_id, tactic=tactic, child_ids=child_ids)
+        edge = ProofHyperedge(
+            id=edge_id, source_id=source_id, tactic=tactic, child_ids=child_ids
+        )
         edge.status = self._derive_edge_status(edge)
         self.edges[edge_id] = edge
         self.nodes[source_id].outgoing_edge_ids.append(edge_id)
@@ -322,7 +336,9 @@ class ProofHypergraph:
             node.note = note
         self._propagate(node_id)
 
-    def mark_node_unelaborated(self, node_id: int, *, note: Optional[str] = None) -> None:
+    def mark_node_unelaborated(
+        self, node_id: int, *, note: Optional[str] = None
+    ) -> None:
         """Close a node structurally while retaining unknown learning evidence."""
         node = self.nodes[node_id]
         if node.status != NodeStatus.SOLVED:
@@ -333,7 +349,9 @@ class ProofHypergraph:
             node.note = note
         self._propagate(node_id)
 
-    def mark_node_infrastructure_failed(self, node_id: int, *, note: Optional[str] = None) -> None:
+    def mark_node_infrastructure_failed(
+        self, node_id: int, *, note: Optional[str] = None
+    ) -> None:
         """Close a node after backend failure without creating numeric evidence."""
         node = self.nodes[node_id]
         if node.status != NodeStatus.SOLVED:
@@ -344,9 +362,8 @@ class ProofHypergraph:
             node.note = note
         self._propagate(node_id)
 
-     
     # Queries
-     
+
     @property
     def root(self) -> ProofNode:
         return self.nodes[self.root_id]
@@ -367,7 +384,9 @@ class ProofHypergraph:
         re-sort per pop is the simpler-correct choice over indexed-heap
         bookkeeping.
         """
-        open_nodes = [node for node in self.nodes.values() if node.status == NodeStatus.OPEN]
+        open_nodes = [
+            node for node in self.nodes.values() if node.status == NodeStatus.OPEN
+        ]
         open_nodes.sort(key=lambda node: node.combined_rank, reverse=True)
         return open_nodes
 
@@ -376,7 +395,9 @@ class ProofHypergraph:
         node = self.nodes[node_id]
         while node.incoming_edge_id is not None:
             edge = self.edges[node.incoming_edge_id]
-            rendered = " ".join([edge.tactic.tactic_name, *edge.tactic.arguments]).strip()
+            rendered = " ".join(
+                [edge.tactic.tactic_name, *edge.tactic.arguments]
+            ).strip()
             path.append(rendered)
             node = self.nodes[edge.source_id]
         path.reverse()
@@ -423,9 +444,8 @@ class ProofHypergraph:
     def __len__(self) -> int:
         return len(self.nodes)
 
-     
     # Internals: bottom-up propagation (status + combined_rank)
-     
+
     def _ancestor_state_keys(self, node_id: int) -> Set[str]:
         keys: Set[str] = set()
         node = self.nodes[node_id]
@@ -456,10 +476,16 @@ class ProofHypergraph:
         """
         if not edge.child_ids:
             return edge.tactic.probability
-        return edge.tactic.probability * min(self.nodes[cid].combined_rank for cid in edge.child_ids)
+        return edge.tactic.probability * min(
+            self.nodes[cid].combined_rank for cid in edge.child_ids
+        )
 
     def _best_solved_edge(self, node_id: int) -> Optional[ProofHyperedge]:
-        solved = [self.edges[eid] for eid in self.nodes[node_id].outgoing_edge_ids if self.edges[eid].status == EdgeStatus.SOLVED]
+        solved = [
+            self.edges[eid]
+            for eid in self.nodes[node_id].outgoing_edge_ids
+            if self.edges[eid].status == EdgeStatus.SOLVED
+        ]
         if not solved:
             return None
         return max(solved, key=self._edge_value)
@@ -473,7 +499,9 @@ class ProofHypergraph:
                 node.status = NodeStatus.SOLVED
             elif edge_statuses:
                 node.status = NodeStatus.EXPANDED
-                if node.exhausted and all(status == EdgeStatus.DEAD for status in edge_statuses):
+                if node.exhausted and all(
+                    status == EdgeStatus.DEAD for status in edge_statuses
+                ):
                     node.status = NodeStatus.DEAD
             elif node.exhausted:
                 # Expanded zero edges (no candidates / executor rejected all)
@@ -486,7 +514,11 @@ class ProofHypergraph:
             if self.edges[eid].status != EdgeStatus.DEAD
         ]
         best_edge_value = max((self._edge_value(edge) for edge in viable), default=None)
-        node.combined_rank = node.local_score if best_edge_value is None else max(node.local_score, best_edge_value)
+        node.combined_rank = (
+            node.local_score
+            if best_edge_value is None
+            else max(node.local_score, best_edge_value)
+        )
 
         return (node.status, node.combined_rank) != before
 

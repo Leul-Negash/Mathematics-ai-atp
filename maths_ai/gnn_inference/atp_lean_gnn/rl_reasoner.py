@@ -32,6 +32,7 @@ from torch_geometric.data import Batch
 from maths_ai.data_models.proof_components import Goal, TacticCandidate
 from maths_ai.hybrid_reasoner.hypergraph import ProofHypergraph, ProofNode
 from maths_ai.hybrid_reasoner.joint_inference import ExpansionResult, HybridReasoner
+from maths_ai.hybrid_reasoner.pantograph_protocol import PantographStateError
 
 from .actor_critic import ActorCriticWithArgsClassifier
 from .inference import _local_names_by_fv_label, _resolve_local_node_name
@@ -45,6 +46,7 @@ class RLSearchResult:
     ``edge.id`` is unique only within one ``ProofHypergraph``, so the action stash must
     travel with its graph rather than accumulate on the reasoner across searches.
     """
+
     graph: ProofHypergraph
     edge_actions: Dict[int, EdgeAction] = field(default_factory=dict)
     failure_actions: List[FailureRecord] = field(default_factory=list)
@@ -129,14 +131,18 @@ class RLHybridReasoner(HybridReasoner):
         self.model.eval()
         with torch.no_grad():
             for _ in range(self.top_k_tactics):
-                sample = self.model.act(batch, id_to_tactic=self.id_to_tactic, greedy=self._greedy)
+                sample = self.model.act(
+                    batch, id_to_tactic=self.id_to_tactic, greedy=self._greedy
+                )
                 candidate, action = self._decode(
                     sample, dag, local_names, graph_fingerprint
                 )
                 if candidate is None:
                     self._unplayable_actions.append(action)
                     continue
-                key = _fingerprint(sub_goal, candidate.tactic_name, tuple(candidate.arguments))
+                key = _fingerprint(
+                    sub_goal, candidate.tactic_name, tuple(candidate.arguments)
+                )
                 existing = self._pending.get(key)
                 if existing is not None:
                     self._pending[key] = EdgeAction(
@@ -199,12 +205,20 @@ class RLHybridReasoner(HybridReasoner):
     # Stash migration: fingerprint → edge.id on link, failures on flush
     # ------------------------------------------------------------------
 
-    def _link(self, graph: ProofHypergraph, node: ProofNode, tactic: TacticCandidate, ranked_subgoals: list):
+    def _link(
+        self,
+        graph: ProofHypergraph,
+        node: ProofNode,
+        tactic: TacticCandidate,
+        ranked_subgoals: list,
+    ):
         edge = super()._link(graph, node, tactic, ranked_subgoals)
         key = _fingerprint(node.goal, tactic.tactic_name, tuple(tactic.arguments))
         action = self._pending.pop(key, None)
         if action is None and self._pending_goal is not None:
-            key = _fingerprint(self._pending_goal, tactic.tactic_name, tuple(tactic.arguments))
+            key = _fingerprint(
+                self._pending_goal, tactic.tactic_name, tuple(tactic.arguments)
+            )
             action = self._pending.pop(key, None)
         if action is not None and edge is not None and self._result is not None:
             self._result.edge_actions[edge.id] = action
@@ -252,11 +266,15 @@ class RLHybridReasoner(HybridReasoner):
         i.i.d. samples — used by evaluation to measure the deterministic policy. The
         stash still fills, but the caller ignores it (no gradient step follows an eval).
         """
+        if self._proving:
+            raise PantographStateError("A reasoner supports only one active search.")
         self._pending = {}
         self._unplayable_actions = []
         self._pending_goal = None
         self._greedy = greedy
-        self._result = RLSearchResult(graph=None)  # graph attached after the base search
+        self._result = RLSearchResult(
+            graph=None
+        )  # graph attached after the base search
         result = None
         try:
             graph = await super().prove(goal, hypotheses=hypotheses)
@@ -265,4 +283,5 @@ class RLHybridReasoner(HybridReasoner):
         finally:
             self._discard_pending()
             self._greedy = False
+            self._result = None
         return result

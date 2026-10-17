@@ -59,7 +59,7 @@ def _observe(task: asyncio.Future) -> None:
         task.exception()
 
 
-async def _join_cleanup(task: asyncio.Task) -> Any:
+async def await_cleanup(task: asyncio.Future) -> Any:
     """Delay caller cancellation until the retained cleanup task has finished."""
     cancellation = None
     while not task.done():
@@ -142,7 +142,7 @@ class _ProcessOwner:
                 self._shutdown(), name="pantograph-process-close"
             )
             self.close_task.add_done_callback(_observe)
-        await _join_cleanup(self.close_task)
+        await await_cleanup(self.close_task)
 
     async def _shutdown(self) -> None:
         deadline = self.loop.time() + self.shutdown_timeout_s
@@ -520,7 +520,7 @@ class PantographClient:
 
     async def aclose(self) -> None:
         self._check_loop()
-        await _join_cleanup(self._begin_close())
+        await await_cleanup(self._begin_close())
 
     async def _close_after_error(self, original: BaseException) -> None:
         try:
@@ -692,6 +692,15 @@ class PantographStateScope:
         if not self._client.is_usable:
             raise PantographStateError("Scope session is unavailable.")
 
+    @property
+    def is_usable(self) -> bool:
+        return (
+            self._entered
+            and not self._closing
+            and not self._closed
+            and self._client.is_usable
+        )
+
     async def __aenter__(self) -> "PantographStateScope":
         self._client._check_loop()
         if self._entered or not self._client.is_usable:
@@ -852,7 +861,7 @@ class PantographStateScope:
                 self._cleanup(), name="pantograph-scope-close"
             )
             self._close_task.add_done_callback(_observe)
-        await _join_cleanup(self._close_task)
+        await await_cleanup(self._close_task)
 
     async def _cleanup(self) -> None:
         try:

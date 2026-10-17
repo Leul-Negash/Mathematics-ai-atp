@@ -1,5 +1,5 @@
 {
-  "status": "revision2-companion-validated-requires-stage5-before-production",
+  "status": "revision2-client-live-verified-callers-migrated-requires-release-and-deployment-validation",
   "descriptor": {
     "protocol": "maths-ai-pantograph",
     "protocolVersion": 1,
@@ -97,8 +97,10 @@
     "stage1": "Revision-2 codec, authored fixtures and pure tests implemented; Stage 1 exit gate passed on 2026-10-08.",
     "stage2": "Owned launch, serialized transport and awaited lifecycle implemented; Stage 2 exit gate passed on 2026-10-08. No production factory switch or model probe yet.",
     "stage3": "Typed scope operations, synchronous allocation registration, owner validation and awaited batched release implemented; 37 real-child scope tests passed on 2026-10-08. Actual Lean ancestor/sibling lifetime semantics remain Stage 5 work.",
-    "production": "Existing PyPantograph factories unchanged.",
-    "companion": "Implemented; descriptor, diagnostics, rollback, completed transition checks and hidden-obligation retention verified against the patched executable. Stage 5 actual-client gate remains pending.",
+    "production": "All Python callers migrated to the owned async factory/API on 2026-10-17. Dependency removal/setup reproduction and target deployment remain Stages 7-8.",
+    "companion": "Implemented; descriptor, diagnostics, rollback, completed transition checks and hidden-obligation retention verified against the patched executable. Stage 5 actual-client gate passed.",
+    "stage5": "Actual client verified against the Stage 4 executable: graph goldens, replay, admission/unsafe rejection, state lifetimes and 100 scoped proofs with zero retained states. CPU-only evidence; not full theorem certification.",
+    "stage6": "Atomic factory, reasoner, pool, inference and translator migration implemented. Real factory/executor checks passed with two independent CPU workers. No upstream Python imports or selectable old-client route remain.",
     "stage4": "Companion Lean extension implemented on client_centric_repo over the merged PR #1 base; Stage 4 exit gate passed on 2026-10-10. 299 Lean assertions, 316 Python regressions, 61 raw Mathlib exchanges and four exact canonical graph goldens passed."
   },
   "upstream": {

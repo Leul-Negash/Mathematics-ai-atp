@@ -34,11 +34,13 @@ from maths_ai.data_models.proof_components import LeanGoalSeed, seed_replay_spec
 from maths_ai.hybrid_reasoner.joint_inference import PantographExecutor
 from maths_ai.hybrid_reasoner.pantograph_env import PantographEnv
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import (
-    create_model_sexpr_server,
-    pantograph_state_to_goals,
+    create_model_sexpr_client,
+    materialize_replay,
 )
 
-from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import ActorCriticWithArgsClassifier
+from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import (
+    ActorCriticWithArgsClassifier,
+)
 from maths_ai.gnn_inference.atp_lean_gnn.model_factory import build_actor_critic_model
 from maths_ai.gnn_inference.atp_lean_gnn.model_spec import ModelSpec
 from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
@@ -93,61 +95,77 @@ async def run_smoke(env: PantographEnv) -> None:
 
     env.verify()
     print(f"[rl_smoke] starting Pantograph server: {env.describe()}")
-    server = await create_model_sexpr_server(env)
-    replay = seed_replay_spec(LeanGoalSeed(expression=SEED_GOAL, hypotheses=SEED_HYPS))
-    seed_state = await server.goal_start_async(replay.expression)
-    seed_state = await server.goal_tactic_async(
-        seed_state, f"intro {' '.join(replay.local_names)}"
-    )
-    goals = pantograph_state_to_goals(seed_state)
-    if len(goals) != 1:
-        raise RuntimeError(f"Smoke seed serialized into {len(goals)} goals.")
-    node_vocab = build_vocab([model_goal_to_dag(goals[0])])
-    model = build_model(node_vocab)
-    executor = PantographExecutor(server)
+    async with await create_model_sexpr_client(env) as server:
+        replay = seed_replay_spec(
+            LeanGoalSeed(expression=SEED_GOAL, hypotheses=SEED_HYPS)
+        )
+        async with server.state_scope() as scope:
+            seed_state = await materialize_replay(scope, replay)
+            goals = [goal.goal for goal in seed_state.goals]
+        if len(goals) != 1:
+            raise RuntimeError(f"Smoke seed serialized into {len(goals)} goals.")
+        node_vocab = build_vocab([model_goal_to_dag(goals[0])])
+        model = build_model(node_vocab)
+        executor = PantographExecutor(server)
 
-    reasoner = RLHybridReasoner(
-        model,
-        node_vocab,
-        TACTIC_VOCAB,
-        executor=executor,
-        env=env,
-        top_k_tactics=4,
-        max_depth=4,
-        max_nodes=30,
-    )
+        reasoner = RLHybridReasoner(
+            model,
+            node_vocab,
+            TACTIC_VOCAB,
+            executor=executor,
+            top_k_tactics=4,
+            max_depth=4,
+            max_nodes=30,
+        )
 
-    print(f"[rl_smoke] collect: proving `{SEED_GOAL}` with hyps {SEED_HYPS}")
-    result = await reasoner.prove(SEED_GOAL, hypotheses=SEED_HYPS)
+        print(f"[rl_smoke] collect: proving `{SEED_GOAL}` with hyps {SEED_HYPS}")
+        result = await reasoner.prove(SEED_GOAL, hypotheses=SEED_HYPS)
 
-    graph = result.graph
-    print(
-        f"[rl_smoke] search done: solved={graph.is_solved()} nodes={len(graph.nodes)} "
-        f"edges={len(graph.edges)} on-policy edges={len(result.edge_actions)} "
-        f"failures={len(result.failure_actions)}"
-    )
-    assert result.edge_actions or result.failure_actions, (
-        "no on-policy signal collected — neither an accepted edge nor a failure record"
-    )
+        graph = result.graph
+        print(
+            f"[rl_smoke] search done: solved={graph.is_solved()} nodes={len(graph.nodes)} "
+            f"edges={len(graph.edges)} on-policy edges={len(result.edge_actions)} "
+            f"failures={len(result.failure_actions)}"
+        )
+        assert (
+            result.edge_actions or result.failure_actions
+        ), "no on-policy signal collected — neither an accepted edge nor a failure record"
 
-    optimizer = AdamW(model.parameters(), lr=1e-3)
-    metrics = train_step_onpolicy(
-        model, optimizer, [result], reasoner.dag_featurize_data,
-        reward_cfg=RewardConfig(step_penalty=0.01),
-        bc_weight=0.0,
-    )
-    print(f"[rl_smoke] train step metrics: {metrics}")
-    assert metrics.get("num_transitions", 0.0) + metrics.get("num_failures", 0.0) > 0
-    assert all(v == v for v in metrics.values()), "NaN in training metrics"
-    print("[rl_smoke] OK — collect → harvest → one on-policy gradient step completed.")
+        optimizer = AdamW(model.parameters(), lr=1e-3)
+        metrics = train_step_onpolicy(
+            model,
+            optimizer,
+            [result],
+            reasoner.dag_featurize_data,
+            reward_cfg=RewardConfig(step_penalty=0.01),
+            bc_weight=0.0,
+        )
+        print(f"[rl_smoke] train step metrics: {metrics}")
+        assert (
+            metrics.get("num_transitions", 0.0) + metrics.get("num_failures", 0.0) > 0
+        )
+        assert all(v == v for v in metrics.values()), "NaN in training metrics"
+        print(
+            "[rl_smoke] OK — collect → harvest → one on-policy gradient step completed."
+        )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Live smoke test for the on-policy RL loop")
-    parser.add_argument("--source-root", type=str, required=True,
-                        help="Pinned Mathlib Lake project root")
-    parser.add_argument("--pantograph-repl", type=str, required=True,
-                        help="Pinned model-S-expression Pantograph REPL binary")
+    parser = argparse.ArgumentParser(
+        description="Live smoke test for the on-policy RL loop"
+    )
+    parser.add_argument(
+        "--source-root",
+        type=str,
+        required=True,
+        help="Pinned Mathlib Lake project root",
+    )
+    parser.add_argument(
+        "--pantograph-repl",
+        type=str,
+        required=True,
+        help="Pinned model-S-expression Pantograph REPL binary",
+    )
     args = parser.parse_args()
 
     source_root = Path(args.source_root)

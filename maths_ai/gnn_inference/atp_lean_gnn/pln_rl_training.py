@@ -1,6 +1,6 @@
 """End-to-end PLN actor-critic RL: collect search trees (async) → train (sync).
 
-Two phases, cleanly separated by the ``asyncio.run`` boundary:
+Two phases share the caller's event loop; model updates begin after collection:
 
   * **collect** — run the hybrid reasoner's AND-OR search (async, PLN de-blocked via
     ``evaluate_async``) to produce ``ProofHypergraph`` s for a batch of theorems.
@@ -16,7 +16,6 @@ string path the GNN engine already uses (OOV → ``<UNK>``).
 
 from __future__ import annotations
 
-import asyncio
 import re
 from dataclasses import dataclass, replace
 from typing import Callable
@@ -25,7 +24,11 @@ import torch
 from torch_geometric.data import Batch, Data
 
 from .actor_critic import ActorCriticWithArgsClassifier
-from .actor_critic_loss import compute_bc_anchor_loss, compute_critic_loss, compute_entropy_bonus
+from .actor_critic_loss import (
+    compute_bc_anchor_loss,
+    compute_critic_loss,
+    compute_entropy_bonus,
+)
 from .graph import dag_fingerprint, model_goal_to_dag
 from .pyg import build_premise_mask, dag_to_pyg
 from .pln_reward import RewardConfig
@@ -101,6 +104,7 @@ class EdgeAction:
     action was applied to Lean once (dedup for the executor) but its policy-gradient term
     must be weighted by ``m`` or high-probability actions are under-weighted.
     """
+
     tactic_id: int
     arg_indices: tuple[int, ...] = ()
     multiplicity: int = 1
@@ -115,6 +119,7 @@ class FailureRecord:
     ``return = terminal_failure − step_penalty`` and NO critic regression target — the
     *state* may still be provable via another tactic; only this *action* failed.
     """
+
     goal: Goal
     action: EdgeAction
 
@@ -157,6 +162,7 @@ def make_dag_featurizer(node_vocab: dict[str, int]):
     argument strings (``_resolve_local_node_name``) requires the nodes themselves. Collect
     and train MUST featurize through the same path so the stored indices stay aligned.
     """
+
     def featurize(goal: Goal):
         dag = model_goal_to_dag(goal)
         data = dag_to_pyg(dag, node_vocab, add_reverse_edges=True)
@@ -165,7 +171,9 @@ def make_dag_featurizer(node_vocab: dict[str, int]):
             raise ValueError("RL DAG has no State root.")
         data.state_node_index = torch.tensor([dag.state_root_id], dtype=torch.long)
         data.graph_fingerprint = dag_fingerprint(dag)
-        unknown_labels = [node.label for node in dag.nodes if node.label not in node_vocab]
+        unknown_labels = [
+            node.label for node in dag.nodes if node.label not in node_vocab
+        ]
         structural_unknown = sorted(
             {label for label in unknown_labels if _is_structural_label(label)}
         )
@@ -183,7 +191,9 @@ def make_dag_featurizer(node_vocab: dict[str, int]):
         data.structural_label_count = sum(
             _is_structural_label(node.label) for node in dag.nodes
         )
-        data.semantic_label_count = int(data.num_nodes) - int(data.structural_label_count)
+        data.semantic_label_count = int(data.num_nodes) - int(
+            data.structural_label_count
+        )
         data.total_label_count = int(data.num_nodes)
         return dag, data
 
@@ -236,9 +246,11 @@ def compute_transition_loss(
         returns_t = torch.tensor(returns, dtype=torch.float32, device=device)
         raw_adv = returns_t - values.squeeze(-1).detach()
         advantages = (raw_adv - raw_adv.mean()) / (raw_adv.std(unbiased=False) + 1e-8)
-        selected_logp = torch.log_softmax(tactic_logits, dim=-1).gather(
-            1, actions.unsqueeze(1)
-        ).squeeze(1)
+        selected_logp = (
+            torch.log_softmax(tactic_logits, dim=-1)
+            .gather(1, actions.unsqueeze(1))
+            .squeeze(1)
+        )
         actor_loss = -(selected_logp * advantages).mean()
         entropy = compute_entropy_bonus(tactic_logits)
         if bc_weight != 0.0:
@@ -251,7 +263,9 @@ def compute_transition_loss(
         critic_batch = Batch.from_data_list(critic_datas).to(device)
         _nodes, _states, _logits, critic_values = model.encode(critic_batch)
         targets = torch.tensor(
-            [sample.target for sample in critic_samples], dtype=torch.float32, device=device
+            [sample.target for sample in critic_samples],
+            dtype=torch.float32,
+            device=device,
         )
         critic_loss = compute_critic_loss(critic_values, targets)
         mean_value_target = float(targets.mean().item())
@@ -329,8 +343,13 @@ def compute_onpolicy_loss(
         if action is None:
             continue
         data = featurize(t.goal)
-        if action.graph_fingerprint and data.graph_fingerprint != action.graph_fingerprint:
-            raise ValueError("Accepted action graph changed between collection and training.")
+        if (
+            action.graph_fingerprint
+            and data.graph_fingerprint != action.graph_fingerprint
+        ):
+            raise ValueError(
+                "Accepted action graph changed between collection and training."
+            )
         actor_datas.append(data)
         tactic_ids.append(action.tactic_id)
         arg_rows.append(action.arg_indices)
@@ -341,8 +360,13 @@ def compute_onpolicy_loss(
     failure_return = reward_cfg.terminal_failure - reward_cfg.step_penalty
     for f in failures:
         data = featurize(f.goal)
-        if f.action.graph_fingerprint and data.graph_fingerprint != f.action.graph_fingerprint:
-            raise ValueError("Rejected action graph changed between collection and training.")
+        if (
+            f.action.graph_fingerprint
+            and data.graph_fingerprint != f.action.graph_fingerprint
+        ):
+            raise ValueError(
+                "Rejected action graph changed between collection and training."
+            )
         actor_datas.append(data)
         tactic_ids.append(f.action.tactic_id)
         arg_rows.append(f.action.arg_indices)
@@ -389,7 +413,9 @@ def compute_onpolicy_loss(
         actor_loss = (-(mult_t * joint_logp * advantages)).sum() / mult_t.sum()
         entropy_bonus = entropy.mean()
         if bc_weight != 0.0:
-            labels = torch.where(accepted_t, tactic_ids_t, torch.full_like(tactic_ids_t, -1))
+            labels = torch.where(
+                accepted_t, tactic_ids_t, torch.full_like(tactic_ids_t, -1)
+            )
             bc_loss = compute_bc_anchor_loss(tactic_logits, labels)
         mean_return = float(returns_t.mean().item())
         mean_arg_logp = float(arg_logp.mean().item())
@@ -399,7 +425,9 @@ def compute_onpolicy_loss(
         critic_batch = Batch.from_data_list(critic_datas).to(device)
         _nodes, _states, _logits, critic_values = model.encode(critic_batch)
         critic_targets = torch.tensor(
-            [sample.target for sample in critic_samples], dtype=torch.float32, device=device
+            [sample.target for sample in critic_samples],
+            dtype=torch.float32,
+            device=device,
         )
         critic_loss = compute_critic_loss(critic_values, critic_targets)
     total = actor_loss + critic_weight * critic_loss - entropy_weight * entropy_bonus
@@ -447,7 +475,9 @@ def train_step(
     actor_transitions: list[ActorTransition] = []
     critic_samples: list[CriticSample] = []
     for graph in graphs:
-        actor_transitions.extend(extract_actor_transitions(graph, reward_cfg, harvest_cfg))
+        actor_transitions.extend(
+            extract_actor_transitions(graph, reward_cfg, harvest_cfg)
+        )
         critic_samples.extend(extract_critic_samples(graph, harvest_cfg))
 
     if not actor_transitions and not critic_samples:
@@ -460,9 +490,15 @@ def train_step(
     model.train()
     optimizer.zero_grad(set_to_none=True)
     result = compute_transition_loss(
-        model, actor_transitions, critic_samples, featurize, tactic_to_id,
-        device=device, critic_weight=critic_weight,
-        entropy_weight=entropy_weight, bc_weight=bc_weight,
+        model,
+        actor_transitions,
+        critic_samples,
+        featurize,
+        tactic_to_id,
+        device=device,
+        critic_weight=critic_weight,
+        entropy_weight=entropy_weight,
+        bc_weight=bc_weight,
     )
     if result is None:
         return {
@@ -479,21 +515,19 @@ def train_step(
 
 
 async def collect_batch(reasoner, theorems: list[dict]) -> list:
-    """Run the hybrid reasoner's AND-OR search concurrently over a batch of theorems.
+    """Run one shared reasoner sequentially over a batch of theorems.
 
     Each item is ``{"goal": str, "hypotheses": list[str]}``. Requires a live Pantograph
     server + ``petta`` binary (env-gated); PLN is de-blocked via ``evaluate_async`` so the
-    searches overlap their Lean/PLN waits. Returns the finished ``ProofHypergraph`` s.
+    independent pool workers provide cross-theorem concurrency. Returns finished graphs.
     """
-    return await asyncio.gather(
-        *(
-            reasoner.prove(item["goal"], hypotheses=item.get("hypotheses"))
-            for item in theorems
-        )
-    )
+    return [
+        await reasoner.prove(item["goal"], hypotheses=item.get("hypotheses"))
+        for item in theorems
+    ]
 
 
-def collect_and_train(
+async def collect_and_train(
     reasoner,
     model: ActorCriticWithArgsClassifier,
     optimizer: torch.optim.Optimizer,
@@ -502,8 +536,8 @@ def collect_and_train(
     tactic_to_id: dict[str, int],
     **train_kwargs,
 ) -> dict[str, float]:
-    """One round: collect search graphs under ``asyncio.run`` (async), then train (sync)."""
-    graphs = asyncio.run(collect_batch(reasoner, theorems))
+    """Await collection on the owning loop, then perform one synchronous update."""
+    graphs = await collect_batch(reasoner, theorems)
     return train_step(model, optimizer, graphs, featurize, tactic_to_id, **train_kwargs)
 
 
@@ -551,7 +585,9 @@ def train_step_onpolicy(
     offset = 0
     for result in results:
         ts = extract_actor_transitions(
-            result.graph, reward_cfg, harvest_cfg,
+            result.graph,
+            reward_cfg,
+            harvest_cfg,
             edge_ids=list(result.edge_actions.keys()),
         )
         actor_transitions.extend(replace(t, edge_id=t.edge_id + offset) for t in ts)
@@ -567,9 +603,18 @@ def train_step_onpolicy(
     model.train()
     optimizer.zero_grad(set_to_none=True)
     loss_result = compute_onpolicy_loss(
-        model, actor_transitions, critic_samples, edge_actions, failures, featurize,
-        device=device, critic_weight=critic_weight, entropy_weight=entropy_weight,
-        arg_loss_weight=arg_loss_weight, bc_weight=bc_weight, reward_cfg=reward_cfg,
+        model,
+        actor_transitions,
+        critic_samples,
+        edge_actions,
+        failures,
+        featurize,
+        device=device,
+        critic_weight=critic_weight,
+        entropy_weight=entropy_weight,
+        arg_loss_weight=arg_loss_weight,
+        bc_weight=bc_weight,
+        reward_cfg=reward_cfg,
         max_update_nodes=max_update_nodes,
         max_update_edges=max_update_edges,
     )
@@ -606,11 +651,13 @@ async def collect_batch_onpolicy(reasoner, theorems: list[dict]) -> list:
     """
     results = []
     for item in theorems:
-        results.append(await reasoner.prove(item["goal"], hypotheses=item.get("hypotheses")))
+        results.append(
+            await reasoner.prove(item["goal"], hypotheses=item.get("hypotheses"))
+        )
     return results
 
 
-def collect_and_train_onpolicy(
+async def collect_and_train_onpolicy(
     reasoner,
     model: ActorCriticWithArgsClassifier,
     optimizer: torch.optim.Optimizer,
@@ -619,5 +666,5 @@ def collect_and_train_onpolicy(
     **train_kwargs,
 ) -> dict[str, float]:
     """One on-policy round: sequential collect (async) → one gradient step (sync)."""
-    results = asyncio.run(collect_batch_onpolicy(reasoner, theorems))
+    results = await collect_batch_onpolicy(reasoner, theorems)
     return train_step_onpolicy(model, optimizer, results, featurize, **train_kwargs)

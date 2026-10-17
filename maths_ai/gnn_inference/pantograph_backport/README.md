@@ -8,8 +8,11 @@ refreshed together to revision 2 on 2026-10-08. The Stage 1 exit gate passed;
 Stage 2 transport/lifecycle is also implemented; its exit gate passed on October 8.
 Stage 3 typed operations/state scopes are implemented and its fake-server exit
 gate passed on October 8. Stage 4 is implemented and its exit gate passed on 2026-10-10. The companion
-patch extends the merged Lean sources. Production factories and dependencies
-remain unchanged. Do not launch the proposed client for RL.
+patch extends the merged Lean sources. Stages 5 and 6 passed their local/live
+gates on 2026-10-17; Python production callers now use the owned client. Dependency
+removal/reproducible setup and target deployment remain Stages 7–8. Do not treat
+the local CPU checks as approval for a long RL run. Earlier dated handoffs below
+retain their historical status; the latest handoff records the current state.
 
 ## Current verified source basis
 
@@ -309,3 +312,70 @@ state lifetimes against this artifact. Stages 6–8, production migration, fresh
 release reproduction and RL/deployment validation remain pending. Transition
 checks do not certify an assembled original theorem proof. No downloaded source,
 reference executable, production dependency or user RL configuration was changed.
+
+## Stages 5 and 6 handoff — 2026-10-17
+
+The patched fork and its delivery artifacts were readable. The executable hash,
+patch hash, and recorded Lean source hashes match the Stage 4 provenance. No
+additional resource was required, and neither the fork nor the user's downloaded
+environment was modified. The existing untracked Stage 4 exports are preserved.
+
+Stage 5 delivered the CPU-only
+[smoke utility](../scripts/pantograph_client_smoke.py),
+[shared diagnostics](../../hybrid_reasoner/pantograph_diagnostics.py), and
+[marked live tests](../tests/test_pantograph_client_live.py).
+[Final evidence](../tests/fixtures/pantograph/stage5_client/final_report.json)
+records the actual executable hash and Python source hashes, protocol/options,
+model fingerprints and exact graph checks, normalized instance/local-let round
+trips, constant/dependent-let replay, computed unsafe/admission rejection,
+diagnostics, explicit focus, ancestor deletion, independent alternatives, 100
+scoped proofs, zero final allocations, and confirmed process reaping. The initial
+`report.json` predates the added dependent-let cases. Raw Stage 4 responses remain
+under `stage4_companion/`; historical baseline and unextended PR captures remain
+unchanged. A sandboxed early probe stalled and was interrupted; only successful
+outside-sandbox runs are counted as live evidence.
+
+Stage 6 replaced the factory/parser patch with the strict owned factory and one
+startup deadline including model probes. The environment now requires explicit
+paths. Reasoners/executors own search scopes and release starts, cached roots,
+inputs, and results; searches on a shared reasoner are sequential. Typed
+infrastructure failures propagate without learning records. The pool owns worker
+replacement, joins startup/collection rollback, closes clients on their own loop,
+and joins collection before shutting down all current clients. Shutdown cannot
+miss a concurrently constructed replacement. Generation synchronization is
+forbidden while collection is active.
+
+Inference takes canonical goals and performs synchronous, gradient-free tensor
+work without creating sessions or event loops. The single-reasoner collect/train
+helpers must be awaited. Translator CLI/replay/export callers use named owned
+projections, resolve local names explicitly, and validate paths before touching
+outputs. Existing nonempty output directories are not deleted. Its package/facade
+smoke uses repository-qualified imports. The unrelated stale STV smoke input was
+updated to include the `rule-proof` marker already required by the unchanged log
+parser, with a negative assertion for unmarked output.
+
+Verification includes two required live tests with actual factory/executor use
+and two independent clients sharing one CPU model binding. Missing designated
+live-test paths fail explicitly rather than skipping. Fresh-interpreter imports
+of the migrated production modules succeed with PyPantograph blocked. Dedicated
+tests cover transport replacement, fatal contract/state propagation, constructor
+failure, cancelled startup, active-loop inference/gradient suppression, learning
+validity, scope lifetimes, and shutdown/replacement races. Translator import smoke
+and bytecode compilation pass. See the current
+[operating instructions](../docs/owned_pantograph_client.md) for notebook, smoke,
+live-test and translator commands.
+
+Final verification: the designated live module passed both tests without skips.
+The full GNN suite had **656 passed, 3 skipped, 5 subtests passed**, and the one
+pre-existing worker-count expectation failure described below. The three ordinary
+run skips include the two separately passed live checks and the unavailable CUDA
+case. All migrated-scope/factory/transport tests passed. Whitespace checks pass
+with `cr-at-eol` enabled for the translator README's existing CRLF line endings;
+the existing line-ending style was retained.
+
+Stage 7 is next: remove the unused dependency, update setup to reproduce the
+validated patch/build, and run clean-environment regressions. The pre-existing
+worker-count test expects one while both committed/preserved configuration specify
+four; it remains a separate full-suite release item. Conda/GPU/checkpoint and
+remote RL validation remain Stage 8 work. No dependencies were uninstalled, no
+training run was launched, and no files were staged or committed.
