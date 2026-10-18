@@ -11,8 +11,8 @@ from typing import Any, Awaitable, Callable, Literal
 import torch
 
 from .rl_resources import ResourcePlan
-from maths_ai.hybrid_reasoner.pantograph_client import await_cleanup
-from maths_ai.hybrid_reasoner.pantograph_protocol import (
+from pantograph_async import (
+    await_cleanup,
     PantographProtocolError,
     PantographStateError,
     PantographTransportError,

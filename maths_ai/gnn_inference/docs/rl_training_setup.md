@@ -215,24 +215,35 @@ this error; inspect the named architecture, precision, loss component, and batch
 
 ### 5.2 Lean and Pantograph
 
-PyPantograph requires a Lean 4 toolchain through `elan` and `lake`:
+The Pantograph client requires a Lean 4 toolchain through `elan` and `lake`:
 
 ```bash
 curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
 source ~/.elan/env
 ```
 
-Live RL requires the pinned model-S-expression Pantograph fork and its matching Mathlib
-environment. Provision both with:
+Live RL requires the companion model-S-expression Pantograph build and its matching
+Mathlib environment. Provision both with:
 
 ```bash
 uv run python -m maths_ai.gnn_inference.scripts.setup_sexpr_environment
 ```
 
-The command prints the exact values for `--source-root` and `--pantograph-repl`. The
-environment pins Lean `v4.10.0-rc1`, Mathlib commit
-`29dcec074de168ac2bf835a77ef68bbe069194c5`, and Pantograph commit
-`73781c2d58456e4bf369dadd4a501e1b78a0b177`.
+The command prints the exact values for `--source-root` and `--pantograph-repl`. Every
+pin comes from the installed `pantograph-async-client` package
+(`pantograph_async.compatibility`): Lean `v4.10.0-rc1`, Mathlib commit
+`29dcec074de168ac2bf835a77ef68bbe069194c5`, and Pantograph fork commit
+`0dd5d2225e2d093f66a4b6231c1aa35004f2c8f3`. The script applies the client's companion
+patch to that commit, checks every patched file against the recorded SHA-256 digests,
+and builds `repl`. It then runs the client's live checks against the new executable
+(skip with `--skip-smoke`) and writes `companion_build.json` in the output root,
+recording the source, patch, toolchain, Mathlib and binary identities. That file
+also works as the client's `build_manifest` if `repl` is copied elsewhere.
+Re-running it reuses an exact earlier application. A checkout with
+any other local change is refused and left untouched; move it aside or point
+`--output-root` elsewhere. Older environments built from
+`73781c2d58456e4bf369dadd4a501e1b78a0b177` do not provide the validated contract and must
+be rebuilt this way.
 
 You may set the environment in `configs/rl_actor_critic.json`:
 
@@ -244,13 +255,13 @@ You may set the environment in `configs/rl_actor_critic.json`:
 ```
 
 With `pantograph_imports` left as `null`, the driver imports `Init,Mathlib`. Both paths
-are required. Startup requests `printExprModelAST`, patches PyPantograph's narrow parser,
-and runs a live capability probe before loading theorem searches. Command-line values
+are required. Startup checks the protocol descriptor, applies the required model-expression
+options, and runs a live capability probe before loading theorem searches. Command-line values
 override the corresponding config values:
 
 The configured custom REPL is launched as `stdbuf -oL <repl> Init Mathlib`. The pinned
 Lean runtime otherwise block-buffers `ready.` and later newline-delimited JSON responses
-when stdout is connected to PyPantograph's pipe. stdin remains an open writable pipe so
+when stdout is connected to the client's pipe. stdin remains an open writable pipe so
 the server can accept `options.set`, `goal.start`, and `goal.tactic` after readiness.
 GNU `stdbuf` must therefore be available on `PATH`; it is supplied by `coreutils` on the
 supported Linux deployment. Closing stdin with `DEVNULL` or increasing the startup

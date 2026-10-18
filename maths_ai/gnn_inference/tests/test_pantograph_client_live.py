@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from maths_ai.hybrid_reasoner.pantograph_diagnostics import verify_live_client
-from maths_ai.hybrid_reasoner.pantograph_env import PantographEnv
+from maths_ai.hybrid_reasoner.pantograph_diagnostics import verify_live_application
+from pantograph_async import PantographEnv
 
 
 @pytest.fixture
@@ -27,11 +27,15 @@ def live_env(request):
 
 @pytest.mark.pantograph_live
 def test_actual_executable_model_ownership_and_repeated_proofs(live_env):
-    report = asyncio.run(verify_live_client(live_env))
+    report = asyncio.run(verify_live_application(live_env))
     assert report["scoped_proofs"] == 100
     assert report["initial_states"] == report["final_states"] == 0
     assert report["phase"] == "CLOSED" and report["subprocess_reaped"]
     assert "positive-unsafe-rejection" in report["checks"]
+    assert "constant-and-dependent-let-replay" in report["checks"]
+    application = report["application"]
+    assert application["initial_states"] == application["final_states"]
+    assert application["phase"] == "CLOSED" and application["subprocess_reaped"]
 
 
 @pytest.mark.pantograph_live

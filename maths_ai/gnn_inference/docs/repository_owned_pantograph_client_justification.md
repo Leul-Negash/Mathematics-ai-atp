@@ -189,11 +189,12 @@ lifetime contract, not on a claim that basic wire communication is impossible.
 ## Repository evidence
 
 - [Staged implementation and Lean requirements](dev_plans/repository_owned_pantograph_async_client.md)
-- [Revision-2 execution contract](../pantograph_backport/contract.json)
+- [Revision-2 execution contract](https://github.com/123nol/Pantograph-Client/blob/main/src/pantograph_async/resources/contract.json)
 - [Source provenance and captured live findings](../pantograph_backport/README.md)
-- [Pure response codec](../../hybrid_reasoner/pantograph_protocol.py)
-- [Owned async transport](../../hybrid_reasoner/pantograph_client.py)
-- [Explicit launch validation](../../hybrid_reasoner/pantograph_launch.py)
+- [Pure response codec](https://github.com/123nol/Pantograph-Client/blob/main/src/pantograph_async/protocol.py)
+- [Owned async transport](https://github.com/123nol/Pantograph-Client/blob/main/src/pantograph_async/client.py)
+- [Explicit launch validation](https://github.com/123nol/Pantograph-Client/blob/main/src/pantograph_async/launch.py)
+- [Application adapter](../../hybrid_reasoner/pantograph_adapter.py)
 - [Existing model-expression parser integration](../../hybrid_reasoner/pantograph_model_sexpr.py)
 - [Alternative-client assessment](pantograph_client_options_report.md)
 - [Custom-REPL update feasibility](pantograph_repl_update_feasibility.md)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 
 from maths_ai.data_models.proof_components import Goal, GoalLocal
-from maths_ai.hybrid_reasoner.pantograph_protocol import (
+from pantograph_async import (
     ExecutionGoal,
     ExecutionLocal,
     WireExpression,

@@ -14,7 +14,8 @@ from maths_ai.gnn_inference.atp_lean_gnn.inference import (
     _local_names_by_fv_label,
     _resolve_local_node_name,
 )
-from maths_ai.hybrid_reasoner.pantograph_protocol import (
+from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_goal
+from pantograph_async import (
     PantographProtocolError,
     decode_execution_goal,
 )
@@ -66,7 +67,7 @@ def _payload() -> dict[str, object]:
 class StrictCodecTests(unittest.TestCase):
     def test_payload_preserves_pretty_and_model_views_and_case_tag(self):
         parsed = decode_execution_goal(_payload())
-        goal = parsed.goal
+        goal = execution_goal_to_goal(parsed)
 
         self.assertEqual(goal.expression, "h = h")
         self.assertEqual(goal.goal_model_sexp, "(:app (:c Eq) (:fv FV0) (:fv FV0))")
@@ -90,7 +91,7 @@ class StrictCodecTests(unittest.TestCase):
 
 class NormalizedGraphTests(unittest.TestCase):
     def test_four_child_hyp_and_shared_fv_identity(self):
-        goal = decode_execution_goal(_payload()).goal
+        goal = execution_goal_to_goal(decode_execution_goal(_payload()))
         dag = model_goal_to_dag(goal)
 
         hyp = next(node for node in dag.nodes if node.label == "Hyp")

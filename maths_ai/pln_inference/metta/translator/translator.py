@@ -1,5 +1,5 @@
 """
-Lean/PyPantograph -> PeTTaChainer translator, updated for the NEW parser format.
+Lean/Pantograph -> PeTTaChainer translator, updated for the NEW parser format.
 
 This version writes ONE .metta file per resulting Lean subgoal, generates a shell
 runner script, captures one .log file per subgoal, and can parse/rank those logs.

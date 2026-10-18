@@ -32,7 +32,8 @@ from torch.optim import AdamW
 
 from maths_ai.data_models.proof_components import LeanGoalSeed, seed_replay_spec
 from maths_ai.hybrid_reasoner.joint_inference import PantographExecutor
-from maths_ai.hybrid_reasoner.pantograph_env import PantographEnv
+from maths_ai.hybrid_reasoner.pantograph_adapter import execution_state_to_goals
+from pantograph_async import PantographEnv
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import (
     create_model_sexpr_client,
     materialize_replay,
@@ -101,7 +102,7 @@ async def run_smoke(env: PantographEnv) -> None:
         )
         async with server.state_scope() as scope:
             seed_state = await materialize_replay(scope, replay)
-            goals = [goal.goal for goal in seed_state.goals]
+            goals = execution_state_to_goals(seed_state)
         if len(goals) != 1:
             raise RuntimeError(f"Smoke seed serialized into {len(goals)} goals.")
         node_vocab = build_vocab([model_goal_to_dag(goals[0])])

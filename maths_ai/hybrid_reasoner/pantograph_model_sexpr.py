@@ -5,16 +5,23 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 
+from pantograph_async import (
+    PantographClient,
+    PantographEnv,
+    PantographStartupError,
+    PantographStateScope,
+    TacticState,
+)
+from pantograph_async.probes import probe_model_client
+
 from maths_ai.data_models.proof_components import GoalReplaySpec
 
-from .pantograph_client import PantographClient, PantographStateScope
-from .pantograph_diagnostics import probe_model_client
-from .pantograph_env import PantographEnv
-from .pantograph_protocol import PantographStartupError, TacticState
+from .pantograph_adapter import require_client_compatibility
 
 
 async def create_model_sexpr_client(env: PantographEnv) -> PantographClient:
     """Finish descriptor, options, and scoped model probes under one deadline."""
+    require_client_compatibility()
     started = asyncio.get_running_loop().time()
     strict_env = replace(env, imports=tuple(dict.fromkeys((*env.imports, "Mathlib"))))
     client = None

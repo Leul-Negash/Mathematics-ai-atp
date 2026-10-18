@@ -1,12 +1,12 @@
-"""CPU-only owned-client check; explicit compiled project and REPL are required."""
+"""CPU-only client and graph-contract check; explicit compiled project and REPL are required."""
 
 import argparse
 import asyncio
 import json
 from pathlib import Path
 
-from maths_ai.hybrid_reasoner.pantograph_diagnostics import verify_live_client
-from maths_ai.hybrid_reasoner.pantograph_env import PantographEnv
+from maths_ai.hybrid_reasoner.pantograph_diagnostics import verify_live_application
+from pantograph_async import PantographEnv
 
 
 def main():
@@ -32,7 +32,7 @@ def main():
         response_line_limit=args.response_line_limit,
         stderr_tail_limit=args.stderr_tail_limit,
     )
-    report = json.dumps(asyncio.run(verify_live_client(env)), indent=2) + "\n"
+    report = json.dumps(asyncio.run(verify_live_application(env)), indent=2) + "\n"
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         with args.report.open("x") as stream:
