@@ -32,7 +32,16 @@ from maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver import (
     run_rl_training,
     save_checkpoint,
 )
+from maths_ai.gnn_inference.atp_lean_gnn.rl_live_collection import LiveReasonerPool
+from maths_ai.gnn_inference.atp_lean_gnn import rl_training_driver
 from maths_ai.gnn_inference.atp_lean_gnn.rl_resources import ResourcePlan
+from maths_ai.hybrid_reasoner.pantograph_protocol import (
+    PantographConfigurationError,
+    PantographProtocolError,
+    PantographRequestTimeout,
+    PantographStateError,
+    PantographTransportError,
+)
 from maths_ai.gnn_inference.tests.model_helpers import (
     ScopedFakeClient,
     actor_critic,
@@ -299,6 +308,31 @@ class ConfigTests(unittest.TestCase):
                     )
                 )
                 try:
+                    # A replacement worker is built by the same factory with the
+                    # same model replica, so it keeps every search setting.
+                    replacement = asyncio.run(
+                        live_pool._replacement_worker(live_pool.workers[0])
+                    )
+                    self.assertIs(replacement.model, live_pool.workers[1].model)
+                    live_pool.assert_generation(0)
+                    _RecordingReasoner.instances.remove(replacement.reasoner)
+                    settings = (
+                        "selection_policy",
+                        "num_simulations",
+                        "sim_batch_size",
+                        "puct_c",
+                        "top_k_tactics",
+                        "max_depth",
+                        "max_nodes",
+                        "use_pln",
+                    )
+                    self.assertEqual(
+                        {key: replacement.reasoner.kwargs[key] for key in settings},
+                        {
+                            key: _RecordingReasoner.instances[0].kwargs[key]
+                            for key in settings
+                        },
+                    )
                     self.assertEqual(len(_RecordingReasoner.instances), 2)
                     self.assertEqual(
                         len({id(reasoner) for reasoner in _RecordingReasoner.instances}),
@@ -754,6 +788,184 @@ class PLNKillSwitchDriverTests(unittest.TestCase):
             asyncio.run(run_rl_training(cfg, reasoner_factory=_recording_factory, pool=_pool()))
         self.assertEqual(len(received), 1)
         self.assertFalse(received[0])
+
+
+class _ErrorReasoner:
+    """prove() raises a chosen error on its first call."""
+
+    def __init__(self, inner, error: BaseException, *, retire_client: bool = False):
+        self._inner = inner
+        self._error = error
+        self._retire_client = retire_client
+        self.model = inner.model
+        self.server = inner.server
+        self.calls = 0
+
+    async def prove(self, goal, *, hypotheses=None, greedy=False, deadline=None):
+        self.calls += 1
+        if self.calls == 1:
+            if self._retire_client:
+                await self.server.aclose()
+            raise self._error
+        return await self._inner.prove(
+            goal, hypotheses=hypotheses, greedy=greedy, deadline=deadline
+        )
+
+
+class SingleReasonerFailureTests(unittest.TestCase):
+    """The single-reasoner path cannot replace its client, so session failures end it."""
+
+    def _reasoner(self, error, **kwargs):
+        node_vocab = _build_node_vocab()
+        torch.manual_seed(0)
+        inner = _make_reasoner(_make_model(node_vocab), node_vocab, _QEDExecutor(), top_k=2)
+        return _ErrorReasoner(inner, error, **kwargs)
+
+    def test_session_failures_propagate_instead_of_counting_as_failed_searches(self):
+        for error in (
+            PantographTransportError("process exited"),
+            PantographProtocolError("bad contract"),
+            PantographStateError("stale state"),
+            PantographConfigurationError("bad executable"),
+        ):
+            reasoner = self._reasoner(error)
+            with self.assertRaises(type(error)):
+                asyncio.run(collect_round(reasoner, _items(2), timeout_s=10.0))
+            self.assertEqual(reasoner.calls, 1)
+
+    def test_timeout_that_retired_the_only_client_ends_collection(self):
+        reasoner = self._reasoner(
+            PantographRequestTimeout("deadline exceeded"), retire_client=True
+        )
+        with self.assertRaises(PantographTransportError) as error:
+            asyncio.run(collect_round(reasoner, _items(2), timeout_s=10.0))
+        self.assertIn("reasoner pool", str(error.exception))
+        self.assertEqual(reasoner.calls, 1)
+
+
+class LivePoolDriverTests(unittest.TestCase):
+    """The round loop over a real ``LiveReasonerPool`` of scoped fake clients.
+
+    Collection finishes before any parameter update; at most one on-policy step
+    and the configured HTPS steps follow; the generation advances by the actual
+    optimizer-step count; replicas synchronize once to the final generation
+    before the next collection.
+    """
+
+    def _run(self, **overrides):
+        events: list[tuple] = []
+        clients: list[_FakeServer] = []
+        original_collect = LiveReasonerPool.collect_round
+        original_sync = LiveReasonerPool.synchronize
+        original_onpolicy = rl_training_driver.train_step_onpolicy
+        original_htps = rl_training_driver.train_step_htps_style
+
+        class _Environment:
+            def verify(self):
+                return None
+
+            def describe(self):
+                return "test environment"
+
+        async def create_client(_environment):
+            client = _FakeServer()
+            clients.append(client)
+            return client
+
+        async def collect(pool, batch, **kwargs):
+            events.append(("collect", pool.model_generation))
+            return await original_collect(pool, batch, **kwargs)
+
+        def synchronize(pool, model, generation):
+            events.append(("sync", generation))
+            return original_sync(pool, model, generation)
+
+        def onpolicy(*args, **kwargs):
+            metrics = original_onpolicy(*args, **kwargs)
+            events.append(("onpolicy", metrics["onpolicy_optimizer_step"]))
+            return metrics
+
+        def htps(*args, **kwargs):
+            metrics = original_htps(*args, **kwargs)
+            events.append(("htps", metrics["htps_optimizer_step"]))
+            return metrics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            cfg = _write_config(
+                tmp,
+                collection_workers=2,
+                cpu_reserve=0,
+                resource_check="warn",
+                **overrides,
+            )
+            torch.manual_seed(0)
+            with (
+                patch.object(rl_training_driver, "pantograph_env", lambda _cfg: _Environment()),
+                patch.object(rl_training_driver, "create_model_sexpr_client", create_client),
+                patch.object(LiveReasonerPool, "collect_round", collect),
+                patch.object(LiveReasonerPool, "synchronize", synchronize),
+                patch.object(rl_training_driver, "train_step_onpolicy", onpolicy),
+                patch.object(rl_training_driver, "train_step_htps_style", htps),
+            ):
+                asyncio.run(run_rl_training(cfg, pool=_pool()))
+            run_dir = next((tmp / "runs").iterdir())
+            rows = [
+                json.loads(line)
+                for line in (run_dir / "metrics.jsonl").read_text().splitlines()
+            ]
+        return events, rows, clients
+
+    def _assert_round_order(self, events, rows, htps_steps):
+        generation = 0
+        rounds = [index for index, event in enumerate(events) if event[0] == "collect"]
+        self.assertEqual(len(rounds), len(rows))
+        for start, end, row in zip(rounds, [*rounds[1:], len(events)], rows):
+            phase = events[start:end]
+            self.assertEqual(phase[0], ("collect", generation))
+            onpolicy = [event for event in phase if event[0] == "onpolicy"]
+            htps = [event for event in phase if event[0] == "htps"]
+            syncs = [event for event in phase if event[0] == "sync"]
+            self.assertLessEqual(len(onpolicy), 1)
+            self.assertEqual(len(htps), htps_steps)
+            steps = int(sum(event[1] for event in [*onpolicy, *htps]))
+            generation += steps
+            # Updates follow collection; one synchronization ends the round.
+            self.assertEqual(
+                [event[0] for event in phase],
+                ["collect", *(["onpolicy"] * len(onpolicy)), *(["htps"] * len(htps)),
+                 *(["sync"] if steps else [])],
+            )
+            self.assertEqual(syncs, [("sync", generation)] if steps else [])
+            self.assertEqual(row["parameter_updates_this_round"], float(steps))
+            self.assertEqual(row["model_generation"], float(generation))
+            self.assertEqual(row["replica_generation"], float(generation))
+        return generation
+
+    def test_htps_disabled_round_order_generation_and_replica_sync(self):
+        events, rows, clients = self._run(num_rounds=2)
+        generation = self._assert_round_order(events, rows, htps_steps=0)
+        self.assertEqual(generation, 2)
+        for row in rows:
+            self.assertEqual(row["onpolicy_optimizer_step"], 1.0)
+            self.assertEqual(row["htps_optimizer_steps"], 0.0)
+            self.assertGreater(row["imitation_samples_mined"], 0.0)
+            self.assertNotIn("tactic_imitation_loss", row)
+        self.assertEqual(len(clients), 2)
+        self.assertTrue(all(client.closed for client in clients))
+
+    def test_htps_enabled_round_order_generation_and_replica_sync(self):
+        events, rows, clients = self._run(
+            num_rounds=2, htps_steps_per_round=2, htps_batch_size=4
+        )
+        generation = self._assert_round_order(events, rows, htps_steps=2)
+        self.assertEqual(generation, 6)
+        for row in rows:
+            self.assertEqual(row["htps_optimizer_steps"], 2.0)
+            self.assertGreater(row["tactic_queue_len"], 0.0)
+            self.assertGreater(row["critic_queue_len"], 0.0)
+            self.assertIn("tactic_imitation_loss", row)
+        self.assertTrue(all(client.closed for client in clients))
 
 
 if __name__ == "__main__":
