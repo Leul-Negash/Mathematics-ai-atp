@@ -1,0 +1,23 @@
+{
+  "kind": "mcts-owned-client-live-evidence",
+  "note": "Actual-REPL evidence for MCTS-AC-branch after the owned-client port. It is not AC-branch evidence; the stage5_client reports remain AC results.",
+  "report": "report.json",
+  "report_sha256": "19454bccc55637d6d04fe3ae8d3d5e479c02aaa3b7d14d30f521cb645da10b62",
+  "command": "python -m maths_ai.gnn_inference.scripts.mcts_client_smoke --source-root <mathlib4> --pantograph-repl <Pantograph>/.lake/build/bin/repl --report report.json",
+  "target_branch": "MCTS-AC-branch",
+  "target_base_commit": "89a2417e522720d2cfe3f2e6218614e4d828c8de",
+  "client_source_commit": "e8e4b18e081d6dd84491433b00e8cfa596cdfbee",
+  "tested_revision": "3fbfd58b7e61acf20f489bff83530a96666c3c6a",
+  "executable": {
+    "source_url": "https://github.com/jajos12/Pantograph.git",
+    "base_commit": "0dd5d2225e2d093f66a4b6231c1aa35004f2c8f3",
+    "patch": "maths_ai/gnn_inference/pantograph_backport/repository_client_contract.patch",
+    "build": "lake build repl",
+    "toolchain": "leanprover/lean4:v4.10.0-rc1",
+    "repl_sha256": "ffc2a91985137f9183c4cc1571c08ece182996484feecf44b5e5d22d932d7dc0",
+    "note": "Rebuilt from the pinned base and patch; native Lean builds are not bit-reproducible, so this digest differs from the AC Stage 5 executable."
+  },
+  "mathlib_commit": "29dcec074de168ac2bf835a77ef68bbe069194c5",
+  "mathlib_build": "lake exe cache get",
+  "complete_theorem_certification": false
+}

@@ -1,0 +1,126 @@
+{
+  "target": {
+    "target_branch": "MCTS-AC-branch",
+    "target_base_commit": "89a2417e522720d2cfe3f2e6218614e4d828c8de",
+    "client_source_commit": "e8e4b18e081d6dd84491433b00e8cfa596cdfbee",
+    "repository_revision": "3fbfd58b7e61acf20f489bff83530a96666c3c6a",
+    "worktree_clean": true,
+    "search_sources_sha256": {
+      "maths_ai/hybrid_reasoner/joint_inference.py": "7b632968b09c5304f58658b438b0022b8895d19b0f440685b3529803d487f58f",
+      "maths_ai/hybrid_reasoner/hypergraph.py": "522e93af8fea87ea93d5e37b4eb395d63127e0645c85df5b467e0b3a8d020bba",
+      "maths_ai/hybrid_reasoner/mcts_diagnostics.py": "ab8a7a5dfbb49f35db654e90017aeb85d7710327b491dbd3e71e725efea0477a",
+      "maths_ai/hybrid_reasoner/selection_policy.py": "11b43c60d96eff04ddf7a5dc8d7beeff76732969fe492252956997c00efb4c7d",
+      "maths_ai/gnn_inference/atp_lean_gnn/rl_reasoner.py": "8abe3a85590945273a10aa90f6f494ba6960083e461765f06fc128e74a3ce177",
+      "maths_ai/gnn_inference/atp_lean_gnn/rl_live_collection.py": "b89514d8d050d46bb5281bfb993968d5fe30c0255fb0e56f68ce7235b6c12902",
+      "maths_ai/gnn_inference/atp_lean_gnn/rl_training_driver.py": "3c30e6f47c69ac0f662ba9d2ac3ad68a3897d876c6980df3ef0df0b624e1ecf5"
+    }
+  },
+  "configuration": {
+    "imports": [
+      "Mathlib"
+    ],
+    "request_timeout_s": 120,
+    "server_start_timeout_s": 120.0,
+    "worker_shutdown_timeout_s": 10.0,
+    "source_root_revision": "29dcec074de168ac2bf835a77ef68bbe069194c5",
+    "scoped_proofs": 100,
+    "repeated_searches": 20,
+    "search": {
+      "selection_policy": "puct",
+      "num_simulations": 8,
+      "sim_batch_size": 2,
+      "max_depth": 4,
+      "max_nodes": 20
+    },
+    "device": "cpu"
+  },
+  "unavailable_resources": {
+    "gpu": "not used; this is a CPU ownership gate, not GPU deployment evidence",
+    "checkpoint": "not used; proposals are scripted or from a fresh small model",
+    "petta": "not used; searches run with use_pln=False",
+    "complete_theorem_certification": false
+  },
+  "client": {
+    "python": "/home/leul/Icog/Maths AI/Mathematics-ai-atp/.venv-app/bin/python",
+    "python_version": "3.11.17 (main, Oct 14 2026, 01:05:33) [Clang 23.1.3 ]",
+    "repository_revision": "3fbfd58b7e61acf20f489bff83530a96666c3c6a",
+    "python_sources_sha256": {
+      "pantograph_client.py": "ced998cd5608ca51fb28cff3053628633bb1b159fff63ca55f51b5fe5bb770f2",
+      "pantograph_protocol.py": "95a74a7dec23b513f8168f2ad239124db286f77da0db713a4906046409f84a03",
+      "pantograph_model_sexpr.py": "ee8672ff665234da81b333517a7a620c2cd8d72f2128653ce6f01d32d7d492f8",
+      "pantograph_diagnostics.py": "b2cc469556efa605b5c7e38180a40a0319b674de021f9c985302d8b2055bbdb2"
+    },
+    "repl": "/home/leul/lean-env/Pantograph/.lake/build/bin/repl",
+    "repl_sha256": "ffc2a91985137f9183c4cc1571c08ece182996484feecf44b5e5d22d932d7dc0",
+    "source_root": "/home/leul/lean-env/mathlib4",
+    "toolchain": "leanprover/lean4:v4.10.0-rc1",
+    "imports": [
+      "Mathlib"
+    ],
+    "options": {
+      "automaticMode": true,
+      "noRepeat": false,
+      "printAuxDecls": false,
+      "printDependentMVars": false,
+      "printExprAST": true,
+      "printExprModelAST": true,
+      "printExprPretty": true,
+      "printImplementationDetailHyps": false,
+      "printJsonPretty": false
+    },
+    "descriptor": {
+      "protocol": "maths-ai-pantograph",
+      "protocolVersion": 1,
+      "modelSexpVersion": 1,
+      "transitionValidationVersion": 1,
+      "messageVersion": 1,
+      "goalSelection": "explicit-focused-v1",
+      "tacticErrorsFormat": "string-array-v1"
+    },
+    "checks": [
+      "instance-let-valid-and-admission-probes",
+      "identity_intro",
+      "conjunction_split",
+      "instance_intro",
+      "let_intro",
+      "parent-deletion-and-independent-alternatives",
+      "focus-and-sibling-resumption",
+      "failure-recovery-diagnostics-multiline",
+      "positive-unsafe-rejection",
+      "constant-and-dependent-let-replay"
+    ],
+    "scoped_proofs": 100,
+    "initial_states": 0,
+    "final_states": 0,
+    "pid": 63618,
+    "complete_theorem_certification": false,
+    "phase": "CLOSED",
+    "stderr_tail": "",
+    "subprocess_reaped": true
+  },
+  "search": {
+    "checks": [
+      "puct-multi-leaf-batch",
+      "checked-rejection-of-alternatives",
+      "puct-graph-equivalence",
+      "best-first-graph-equivalence",
+      "cooperative-deadline-scope-closure",
+      "repeated-searches-20",
+      "two-workers-one-model-device"
+    ],
+    "initial_states": 0,
+    "final_states": 0,
+    "phase": "CLOSED",
+    "subprocess_reaped": true
+  },
+  "learning": {
+    "solved": true,
+    "edge_actions": 1,
+    "failure_actions": 0,
+    "imitation_samples": 1,
+    "critic_samples": 1,
+    "onpolicy_optimizer_steps": 1,
+    "htps_optimizer_steps": 1,
+    "model_generation": 2
+  }
+}

@@ -379,3 +379,56 @@ worker-count test expects one while both committed/preserved configuration speci
 four; it remains a separate full-suite release item. Conda/GPU/checkpoint and
 remote RL validation remain Stage 8 work. No dependencies were uninstalled, no
 training run was launched, and no files were staged or committed.
+
+## MCTS-AC-branch port handoff — 2026-10-21
+
+The owned client now runs `MCTS-AC-branch` as well. The port starts from MCTS
+commit `89a2417e522720d2cfe3f2e6218614e4d828c8de` and reuses files from the
+complete AC tree at `e8e4b18e081d6dd84491433b00e8cfa596cdfbee`; it is not a
+merge of AC. Shared client, codec, contract, fixture, inference, and translator
+files are byte-identical to that tree. `joint_inference.py`, `hypergraph.py`,
+`rl_reasoner.py`, `rl_live_collection.py`, `rl_training_driver.py`, and
+`pln_rl_training.py` were adapted in place, so PUCT selection, partial-hypertree
+simulations, virtual losses, validity-aware backups, node-specific pending
+actions, cooperative deadlines, and HTPS replay with its separate optimizer are
+unchanged. The server epoch, in-reasoner restart, stale-leaf reproposal, private
+close calls, and process inspection are gone; the pool replaces the complete
+client/reasoner worker after a transport failure or hard/request timeout.
+
+Baseline at `89a2417` (with PyPantograph's Python sources on the path): 319
+passed, 1 skipped, 6 failed, and one collection error. The failures are three
+Thompson-sampler tests, two old server-construction tests, and the stdbuf path
+test; the collection error is the translator `test_imports.py` script. After
+the port the full suite has **740 passed, 5 skipped, 5 subtests passed**, and
+the 4 failures that also fail at the baseline: the three Thompson-sampler tests
+and the stdbuf path test, which depends on the host's `stdbuf`. The five skips
+are the four live cases in an ordinary run and the two-GPU topology case.
+
+The designated live run passed all four live tests without skips against a
+companion REPL rebuilt from the pinned fork commit and patch, with Mathlib
+`29dcec074de168ac2bf835a77ef68bbe069194c5`. The MCTS evidence is in
+`tests/fixtures/pantograph/mcts_owned_client/`; it records this branch's
+revision, search-source digests, configuration, executable digest, and
+unavailable resources. The AC `stage5_client/` reports remain AC results.
+
+```bash
+python -m pytest maths_ai/gnn_inference/tests/test_pantograph_client_live.py \
+  maths_ai/gnn_inference/tests/test_mcts_owned_client.py \
+  --run-pantograph-live -m pantograph_live -q
+python -m maths_ai.gnn_inference.scripts.mcts_client_smoke \
+  --source-root /path/to/compiled/mathlib4 \
+  --pantograph-repl /path/to/Pantograph/.lake/build/bin/repl \
+  --report /new/path/mcts_report.json
+```
+
+Two fixes found during the port also apply to AC. The collection pool now
+bounds startup and searches with `asyncio.timeout` instead of
+`asyncio.wait_for`: on Python 3.11 a second cancellation during shutdown could
+stop `wait_for` from waiting on a client whose cleanup was still running. The
+spawn-cancellation test also gives its cancellation case a startup deadline it
+cannot race.
+
+Stages 7 and 8 remain pending on this branch as on AC: PyPantograph is still a
+declared dependency, the setup script still pins the original unextended
+Pantograph source and does not produce the validated executable, and no clean
+environment install, Conda/GPU/checkpoint deployment, or training run was done.
