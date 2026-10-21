@@ -10,19 +10,18 @@ except ImportError:
     Digraph = None
 from pathlib import Path
 from typing import Dict, List, Optional
-from maths_ai.hybrid_reasoner.pantograph_client import (
+from pantograph_async import (
     PantographClient,
+    PantographEnv,
     PantographStateScope,
-)
-from maths_ai.hybrid_reasoner.pantograph_protocol import (
     TacticState,
     PantographGoalRejected,
     PantographTacticRejected,
     PantographProtocolError,
     PantographTransportError,
     PantographStateError,
-    execution_state_to_goals,
 )
+from maths_ai.hybrid_reasoner.pantograph_adapter import execution_state_to_goals
 
 from maths_ai.data_models.proof_components import (
     Goal,
@@ -47,7 +46,6 @@ from maths_ai.hybrid_reasoner.hypergraph import (
     TacticExecutor,
     TacticOutcome,
 )
-from maths_ai.hybrid_reasoner.pantograph_env import PantographEnv
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import (
     create_model_sexpr_client,
     materialize_replay,

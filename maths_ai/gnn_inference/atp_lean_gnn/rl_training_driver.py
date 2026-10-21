@@ -26,9 +26,9 @@ import torch
 from torch.optim import AdamW
 
 from maths_ai.data_models.proof_components import LeanGoalSeed
-from maths_ai.hybrid_reasoner.pantograph_env import PantographEnv
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
-from maths_ai.hybrid_reasoner.pantograph_protocol import (
+from pantograph_async import (
+    PantographEnv,
     PantographProtocolError,
     PantographStateError,
     PantographTransportError,

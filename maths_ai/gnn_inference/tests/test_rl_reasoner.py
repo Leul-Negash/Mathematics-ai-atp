@@ -5,7 +5,7 @@ import unittest
 from dataclasses import replace
 
 import torch
-from maths_ai.hybrid_reasoner.pantograph_protocol import (
+from pantograph_async import (
     PantographGoalRejected,
     PantographTransportError,
 )

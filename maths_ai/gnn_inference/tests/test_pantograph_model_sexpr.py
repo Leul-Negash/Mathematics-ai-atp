@@ -1,43 +1,37 @@
-"""Strict shared environment and factory; no upstream package or bundled REPL."""
+"""Model-session factory over the standalone client; no bundled REPL."""
 
 import asyncio
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
-from maths_ai.hybrid_reasoner.pantograph_env import PantographEnv
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
-from maths_ai.hybrid_reasoner.pantograph_protocol import (
+from pantograph_async import (
+    MODEL_SEXP_VERSION,
     PantographConfigurationError,
     PantographProtocolError,
     PantographStartupError,
 )
-from maths_ai.gnn_inference.tests.test_pantograph_client import (
+from maths_ai.gnn_inference.tests.pantograph_fake import (
     setup,
     run,
     assert_reaped,
 )
 
 
-def test_explicit_paths_are_required():
-    with pytest.raises(TypeError):
-        PantographEnv()
-    with pytest.raises(PantographConfigurationError):
-        PantographEnv(source_root=None, pantograph_repl=None).verify()
+def test_factory_rejects_an_incompatible_client_before_spawning(setup, monkeypatch):
+    env, report = setup
+    monkeypatch.setattr(
+        "maths_ai.hybrid_reasoner.pantograph_adapter.MODEL_SEXP_VERSION",
+        MODEL_SEXP_VERSION + 1,
+    )
 
+    async def body():
+        with pytest.raises(PantographConfigurationError, match="modelSexpVersion"):
+            await create_model_sexpr_client(env)
 
-def test_environment_uses_owned_launch_validation(setup):
-    env, _report = setup
-    env.verify()
-    assert "stdbuf -oL" in env.describe()
-    for changed in (
-        replace(env, source_root=Path("/nonexistent")),
-        replace(env, pantograph_repl=Path("/nonexistent/repl")),
-        replace(env, options={"noRepeat": True}),
-    ):
-        with pytest.raises(PantographConfigurationError):
-            changed.verify()
+    run(body)
+    assert not report.exists()
 
 
 def test_factory_finishes_scoped_probe_or_cleans_up_failure(setup, monkeypatch):

@@ -14,10 +14,8 @@ from maths_ai.gnn_inference.model import GNNPredictor
 from maths_ai.gnn_inference.atp_lean_gnn.inference import InferencePipeline
 from maths_ai.gnn_inference.tests.model_helpers import structured_goal, pantograph_goal
 from maths_ai.hybrid_reasoner.joint_inference import HybridReasoner, PantographExecutor
-from maths_ai.hybrid_reasoner.pantograph_protocol import (
-    PantographStateError,
-    execution_goal_to_translator,
-)
+from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_translator
+from pantograph_async import PantographStateError
 
 
 def test_production_modules_import_with_upstream_client_forbidden():
@@ -78,7 +76,7 @@ def test_translator_projection_uses_local_names_for_raw_free_variables():
     from maths_ai.pln_inference.metta.translator.translator_modules.extractor import (
         essentialize_subgoal,
     )
-    from maths_ai.hybrid_reasoner.pantograph_protocol import decode_execution_goal
+    from pantograph_async import decode_execution_goal
     import json
 
     fixture = Path(__file__).parent / "fixtures/pantograph/future_contract.json"
@@ -110,3 +108,18 @@ def test_translator_validates_environment_before_touching_output(tmp_path):
 
     asyncio.run(run())
     assert sentinel.read_text() == "preserve"
+
+
+def test_lazy_exports_preserve_existing_package_api():
+    from maths_ai.gnn_inference import atp_lean_gnn
+    from maths_ai.gnn_inference.atp_lean_gnn.graph import GraphNode
+
+    assert atp_lean_gnn.GraphNode is GraphNode
+    assert set(atp_lean_gnn.__all__) == set(atp_lean_gnn._EXPORT_MODULES)
+    with pytest.raises(AttributeError):
+        getattr(atp_lean_gnn, "not_an_export")
+    from maths_ai import hybrid_reasoner
+
+    assert "HybridReasoner" in dir(hybrid_reasoner)
+    with pytest.raises(AttributeError):
+        getattr(hybrid_reasoner, "not_an_export")

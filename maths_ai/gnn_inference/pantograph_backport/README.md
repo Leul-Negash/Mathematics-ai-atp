@@ -2,7 +2,7 @@
 
 Reconciled on 2026-10-08 after [upstream PR #1](https://github.com/jajos12/Pantograph/pull/1).
 Original Stages 0 and 1 of [the client plan](../docs/dev_plans/repository_owned_pantograph_async_client.md)
-shipped for contract revision 1. [contract.json](contract.json) now specifies
+shipped for contract revision 1. [contract.json](https://github.com/123nol/Pantograph-Client/blob/main/src/pantograph_async/resources/contract.json) now specifies
 revision 2. The codec, authored `future_contract.json`, and tests were subsequently
 refreshed together to revision 2 on 2026-10-08. The Stage 1 exit gate passed;
 Stage 2 transport/lifecycle is also implemented; its exit gate passed on October 8.
@@ -182,8 +182,8 @@ or remote deployment validation was performed.
 
 ## Stage 2 transport and lifecycle handoff
 
-The standalone [transport](../../hybrid_reasoner/pantograph_client.py) and
-[launch validator](../../hybrid_reasoner/pantograph_launch.py) are implemented.
+The standalone [transport](https://github.com/123nol/Pantograph-Client/blob/main/src/pantograph_async/client.py) and
+[launch validator](https://github.com/123nol/Pantograph-Client/blob/main/src/pantograph_async/launch.py) are implemented.
 The existing environment value supplies launch paths/imports/options, request
 timing (`timeout`), startup/cleanup timing (`server_start_timeout_s`,
 `worker_shutdown_timeout_s`), and the response/stderr limits. PyPantograph imports
@@ -251,7 +251,7 @@ Malformed evidence after a server allocation also retires the process. No state
 destructor, garbage-collection cleanup, reset command, or in-place restart exists.
 
 Verification on October 8: all 37 tests in
-[test_pantograph_state_scopes.py](../tests/test_pantograph_state_scopes.py) passed.
+[test_state_scopes.py](https://github.com/123nol/Pantograph-Client/blob/main/tests/test_state_scopes.py) passed.
 They use actual diagnostic subprocesses, check fake allocation counts returning
 to baseline and child reaping, and reject foreign/released/altered handles before
 I/O. Coverage includes lock races, in-flight scope exit, duplicate release,
@@ -272,8 +272,8 @@ user configuration was changed, and no new RL/deployment validation was performe
 
 Implemented on `client_centric_repo` in `/home/nolawi/pantograph_fork` over the
 exact merged PR #1 base. The tracked
-[companion patch](repository_client_contract.patch) and
-[provenance descriptor](repository_client_contract.provenance.json) contain the
+[companion patch](https://github.com/123nol/Pantograph-Client/blob/main/src/pantograph_async/resources/repository_client_contract.patch) and
+[provenance descriptor](https://github.com/123nol/Pantograph-Client/blob/main/docs/evidence/repository_client_contract.provenance.json) contain the
 Lean implementation, migrated tests, reusable capture utility and checked-boundary
 documentation. No source files were staged or committed.
 
@@ -379,3 +379,53 @@ worker-count test expects one while both committed/preserved configuration speci
 four; it remains a separate full-suite release item. Conda/GPU/checkpoint and
 remote RL validation remain Stage 8 work. No dependencies were uninstalled, no
 training run was launched, and no files were staged or committed.
+
+## 2026-10-18 handoff: standalone client extraction
+
+The client now lives in the standalone
+[Pantograph-Client](https://github.com/123nol/Pantograph-Client) repository as the
+`pantograph-async-client` distribution (import package `pantograph_async`),
+following the extraction plan's layout. Transport, launch validation, state
+scopes, the codec, wire probes, `contract.json` and the companion patch moved
+there unchanged, apart from module paths. A `compatibility.json` manifest now
+names the fork base, patch digest, patched-file digests and tested Lean/Mathlib
+inputs; the original provenance record is kept unchanged as evidence. The codec now owns
+`MODEL_SEXP_VERSION`, and execution types no longer convert themselves into
+application goals.
+
+This repository keeps the application side:
+[pantograph_adapter.py](../../hybrid_reasoner/pantograph_adapter.py) converts
+execution goals into canonical `Goal`/`GoalLocal` values and translator
+projections, and checks the graph representation against the client's wire
+version. [pantograph_model_sexpr.py](../../hybrid_reasoner/pantograph_model_sexpr.py)
+keeps Mathlib model-session startup and replay, and
+[pantograph_diagnostics.py](../../hybrid_reasoner/pantograph_diagnostics.py)
+adds graph goldens and canonical replay on top of the client's live gate. Every
+caller was migrated in one change. No embedded copy or old-path re-export
+remains, and PyPantograph is no longer a dependency.
+
+The offline codec, transport, scope and PR #1 evidence tests listed above now
+run in the client repository. Graph, canonical-conversion and factory tests stay
+here.
+
+`setup_sexpr_environment` now rebuilds the companion executable from
+`pantograph_async.compatibility`: it applies the patch to the pinned fork commit,
+verifies every patched file, builds `repl`, runs the client's live gate with
+`Mathlib`, and writes `companion_build.json` with the source, patch, toolchain,
+Mathlib and binary identities. It refuses modified checkouts instead of
+restoring them.
+
+Verification on 2026-10-18, CPU only:
+
+- A `repl` rebuilt from `jajos12/Pantograph@0dd5d22` plus the shipped patch
+  matched all 17 recorded source digests. Its binary hash differs from the
+  original build's, as native Lean builds are not bit-reproducible.
+- Against that executable, the installed client passed its live gate (all checks,
+  100 scoped proofs back to zero states, CLI report). The application gate passed
+  with `Init,Lean`, covering canonical fingerprints, DAG goldens and replay for
+  all four golden goals.
+- The GNN suite had 303 passed and 3 skipped, with the pre-existing worker-count
+  failure and a stdbuf path test that fails only where `/usr/bin/stdbuf` is not
+  GNU. Both also fail on `e8e4b18`.
+- Not run here: the Mathlib-based factory and two-worker live test, and the
+  setup smoke with `Mathlib`. Both need a compiled Mathlib.

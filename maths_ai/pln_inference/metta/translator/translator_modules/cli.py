@@ -15,9 +15,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 from pathlib import Path
-from maths_ai.hybrid_reasoner.pantograph_env import PantographEnv
+from pantograph_async import PantographEnv
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
-from maths_ai.hybrid_reasoner.pantograph_protocol import (
+from pantograph_async import (
     PantographGoalRejected,
     PantographTacticRejected,
 )

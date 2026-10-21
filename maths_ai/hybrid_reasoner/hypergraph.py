@@ -29,8 +29,7 @@ from typing import Deque, Dict, List, Optional, Protocol, Set, Tuple
 
 from maths_ai.data_models.proof_components import STV, Goal, TacticCandidate
 from maths_ai.data_models.proof_components import GoalState as GoalStateModel
-from maths_ai.hybrid_reasoner.pantograph_client import PantographStateScope
-from maths_ai.hybrid_reasoner.pantograph_protocol import TacticState
+from pantograph_async import PantographStateScope, TacticState
 
 
 class NodeStatus:

@@ -32,7 +32,7 @@ from torch_geometric.data import Batch
 from maths_ai.data_models.proof_components import Goal, TacticCandidate
 from maths_ai.hybrid_reasoner.hypergraph import ProofHypergraph, ProofNode
 from maths_ai.hybrid_reasoner.joint_inference import ExpansionResult, HybridReasoner
-from maths_ai.hybrid_reasoner.pantograph_protocol import PantographStateError
+from pantograph_async import PantographStateError
 
 from .actor_critic import ActorCriticWithArgsClassifier
 from .inference import _local_names_by_fv_label, _resolve_local_node_name

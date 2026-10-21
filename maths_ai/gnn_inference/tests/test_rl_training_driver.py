@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import torch
-from maths_ai.hybrid_reasoner.pantograph_protocol import (
+from pantograph_async import (
     PantographGoalRejected,
     PantographTransportError,
 )

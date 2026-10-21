@@ -21,7 +21,7 @@ from .parser import (
     to_plain,
 )
 from .renderer import build_query, render_formula, validate_formula_shape
-from maths_ai.hybrid_reasoner.pantograph_protocol import execution_goal_to_translator
+from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_translator
 
 
 def is_nonlogical_type_expr(expr: Any) -> bool:

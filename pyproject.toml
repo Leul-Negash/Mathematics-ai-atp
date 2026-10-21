@@ -8,16 +8,13 @@ dependencies = [
     "datasets>=5.0.1",
     "faiss-cpu>=1.14.2",
     "graphviz>=0.21",
-    "pantograph",
+    "pantograph-async-client @ git+https://github.com/Leul-Negash/Pantograph-Client@2678dcbdc034e00b581a5e52c6cf06ae7bef867b",
     "pydantic>=2.13.4",
     "pytest>=9.0.3",
     "torch>=2.12.0",
     "torch-geometric>=2.7.0",
 ]
 
-
-[tool.uv.sources]
-pantograph = { git = "https://github.com/stanford-centaur/PyPantograph" }
 
 [tool.setuptools.packages.find]
 where=["."]

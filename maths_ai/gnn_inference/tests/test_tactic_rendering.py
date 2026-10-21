@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from maths_ai.hybrid_reasoner.pantograph_protocol import (
+from pantograph_async import (
     PantographGoalRejected,
     PantographTacticRejected,
     PantographTransportError,
