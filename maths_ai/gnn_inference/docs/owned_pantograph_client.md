@@ -70,6 +70,9 @@ python -m pytest maths_ai/gnn_inference/tests/test_pantograph_client_live.py \
 
 ## MCTS search verification
 
+The port's pins, results and remaining gates are in the
+[MCTS client port handoff](mcts_client_port_handoff.md).
+
 Best-first and PUCT search use the same installed client API. Each theorem owns one
 state scope; a PUCT leaf stays allocated until all its candidate tactics finish, and
 each successful alternative is converted through the adapter to canonical goals and

@@ -167,3 +167,20 @@ def test_dependency_is_the_pinned_client_and_not_pypantograph():
     assert source["url"] == CLIENT_REPOSITORY
     assert source["vcs_info"]["commit_id"] == CLIENT_COMMIT
 
+
+MANIFEST = Path(__file__).parent / "fixtures/pantograph/mcts_owned_client/source_manifest.json"
+
+
+def test_copied_files_match_the_pinned_application_source():
+    import hashlib
+    import json
+
+    root = Path(__file__).parents[3]
+    manifest = json.loads(MANIFEST.read_text())
+    assert manifest["application_source_commit"] == (
+        "72c82ce13d62f132ee1939d8e92641c100f4c418"
+    )
+    assert manifest["copied"]
+    for entry in manifest["copied"]:
+        data = (root / entry["path"]).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == entry["sha256"], entry["path"]
