@@ -1,0 +1,1590 @@
+diff --git a/Pantograph.lean b/Pantograph.lean
+index 292efb9..0a30142 100644
+--- a/Pantograph.lean
++++ b/Pantograph.lean
+@@ -5,4 +5,5 @@ import Pantograph.Goal
+ import Pantograph.Library
+ import Pantograph.Protocol
+ import Pantograph.Serial
++import Pantograph.Validation
+ import Pantograph.Version
+diff --git a/Pantograph/Goal.lean b/Pantograph/Goal.lean
+index ad8f3bd..a10ed9a 100644
+--- a/Pantograph/Goal.lean
++++ b/Pantograph/Goal.lean
+@@ -3,6 +3,7 @@ Functions for handling metavariables
+ 
+ All the functions starting with `try` resume their inner monadic state.
+ -/
++import Pantograph.Diagnostics
+ import Pantograph.Tactic
+ import Lean
+ 
+@@ -16,7 +17,9 @@ def filename: String := "<pantograph>"
+ Represents an interconnected set of metavariables, or a state in proof search
+  -/
+ structure GoalState where
++  trustedEnv : Environment
+   savedState : Elab.Tactic.SavedState
++  messages : Array Protocol.Message := #[]
+ 
+   -- The root hole which is the search target
+   root: MVarId
+@@ -44,6 +47,7 @@ protected def GoalState.create (expr: Expr): Elab.TermElabM GoalState := do
+   return {
+     root := root.mvarId!,
+     savedState,
++    trustedEnv := ← getEnv,
+     parentMVar? := .none,
+   }
+ @[export pantograph_goal_state_create_from_mvars_m]
+@@ -53,6 +57,7 @@ protected def GoalState.createFromMVars (goals: List MVarId) (root: MVarId): Met
+   return {
+     root,
+     savedState,
++    trustedEnv := ← getEnv,
+     parentMVar? := .none,
+   }
+ @[export pantograph_goal_state_is_conv]
+@@ -74,8 +79,21 @@ protected def GoalState.metaContextOfGoal (state: GoalState) (mvarId: MVarId): O
+ protected def GoalState.metaState (state: GoalState): Meta.State :=
+   state.savedState.term.meta.meta
+ 
+-protected def GoalState.withContext (state: GoalState) (mvarId: MVarId) (m: MetaM α): MetaM α := do
+-  mvarId.withContext m |>.run' (← read) state.metaState
++/-- Read a goal snapshot without mutating its caller's environment or meta state. -/
++protected def GoalState.withMetaState (state : GoalState) (action : MetaM α) : MetaM α := do
++  let outer ← Meta.saveState
++  try
++    state.savedState.term.meta.restore
++    modifyThe Core.State fun s => { s with cache := state.savedState.term.meta.core.cache }
++    modifyThe Meta.State fun _ => state.metaState
++    action
++  finally
++    outer.restore
++    modifyThe Meta.State fun _ => outer.meta
++    modifyThe Core.State fun s => { s with traceState := outer.core.traceState, cache := outer.core.cache }
++
++protected def GoalState.withContext (state: GoalState) (mvarId: MVarId) (m: MetaM α): MetaM α :=
++  state.withMetaState (mvarId.withContext m)
+ 
+ protected def GoalState.withParentContext { n } [MonadControlT MetaM n] [Monad n] (state: GoalState): n α → n α :=
+   Meta.mapMetaM <| state.withContext state.parentMVar?.get!
+@@ -88,10 +106,6 @@ protected def GoalState.restoreMetaM (state: GoalState): MetaM Unit :=
+   state.savedState.term.meta.restore
+ protected def GoalState.restoreElabM (state: GoalState): Elab.TermElabM Unit :=
+   state.savedState.term.restore
+-private def GoalState.restoreTacticM (state: GoalState) (goal: MVarId): Elab.Tactic.TacticM Unit := do
+-  state.savedState.restore
+-  Elab.Tactic.setGoals [goal]
+-
+ @[export pantograph_goal_state_focus]
+ protected def GoalState.focus (state: GoalState) (goalId: Nat): Option GoalState := do
+   let goal ← state.savedState.tactic.goals.get? goalId
+@@ -128,7 +142,7 @@ protected def GoalState.resume (state: GoalState) (goals: List MVarId): Except S
+     .error s!"Goals {invalid_goals} are not in scope"
+   else
+     -- Set goals to the goals that have not been assigned yet, similar to the `focus` tactic.
+-    let unassigned := goals.filter (λ goal =>
++    let unassigned := goals.eraseDups.filter (λ goal =>
+       let mctx := state.mctx
+       ¬(mctx.eAssignment.contains goal || mctx.dAssignment.contains goal))
+     .ok {
+@@ -188,6 +202,7 @@ protected def GoalState.step (state: GoalState) (goal: MVarId) (tacticM: Elab.Ta
+     state with
+     savedState := { term := nextElabState, tactic := newGoals },
+     parentMVar? := .some goal,
++    messages := #[],
+     calcPrevRhs? := .none,
+   }
+ 
+@@ -196,38 +211,74 @@ inductive TacticResult where
+   -- Goes to next state
+   | success (state: GoalState)
+   -- Tactic failed with messages
+-  | failure (messages: Array String)
++  | failure (errors: Array String) (messages: Array Protocol.Message)
+   -- Could not parse tactic
+   | parseError (message: String)
+   -- The given action cannot be executed in the state
+   | invalidAction (message: String)
+ 
+-/-- Executes a `TacticM` monads on this `GoalState`, collecting the errors as necessary -/
+-protected def GoalState.tryTacticM (state: GoalState) (goal: MVarId) (tacticM: Elab.Tactic.TacticM Unit):
+-      Elab.TermElabM TacticResult := do
++/-- Execute an operation against an isolated snapshot and restore its caller. -/
++protected def GoalState.withOperation (state : GoalState) (action : Elab.TermElabM TacticResult) :
++    Elab.TermElabM TacticResult := do
++  let outer ← Elab.Term.saveState
+   try
+-    let nextState ← state.step goal tacticM
+-    return .success nextState
+-  catch exception =>
+-    return .failure #[← exception.toMessageData.toString]
++    state.restoreElabM
++    modifyThe Meta.State fun _ => state.metaState
++    modifyThe Core.State fun s => { s with messages := {}, cache := state.savedState.term.meta.core.cache }
++    let result : TacticResult ← try
++      let result ← action
++      match result with
++      | .success next =>
++        Elab.Term.synthesizeSyntheticMVarsUsingDefault
++        Elab.Term.synthesizeSyntheticMVars (postpone := .partial)
++        let term ← Elab.Term.saveState
++        pure (.success { next with savedState := { next.savedState with term } })
++      | other => pure other
++    catch exception => do
++      let text ← exception.toMessageData.toString
++      Elab.logException exception
++      let messages ← renderMessages (← getThe Core.State).messages
++      return TacticResult.failure #[text] (if messages.isEmpty then #[Protocol.Message.error text] else messages)
++    let log := (← getThe Core.State).messages
++    let messages ← renderMessages log
++    match result with
++    | .success next =>
++      if log.hasErrors then
++        let errors := messages.filter (fun (m : Protocol.Message) => m.severity == "error") |>.map (fun m => m.data)
++        return TacticResult.failure (if errors.isEmpty then #["Lean reported an error"] else errors) messages
++      else
++        -- Keep diagnostics outside the saved log so later requests cannot replay them.
++        let savedState := { next.savedState with term := {
++          next.savedState.term with meta := { next.savedState.term.meta with core := {
++            next.savedState.term.meta.core with messages := {}
++          } }
++        } }
++        return TacticResult.success { next with savedState, messages := next.messages ++ messages }
++    | .failure errors diagnostics => return TacticResult.failure errors diagnostics
++    | other => return other
++  finally
++    outer.restore (restoreInfo := true)
++    modifyThe Meta.State fun _ => outer.meta.meta
++    modifyThe Elab.Term.State fun _ => outer.elab
++    modifyThe Core.State fun s => { s with traceState := outer.meta.core.traceState, cache := outer.meta.core.cache }
++
++/-- Shared transaction for tactics supplied by library callers. -/
++protected def GoalState.tryTacticM (state: GoalState) (goal: MVarId)
++    (tacticM: Elab.Tactic.TacticM Unit): Elab.TermElabM TacticResult :=
++  state.withOperation do
++    return .success (← state.step goal tacticM)
+ 
+ /-- Execute a string tactic on given state. Restores TermElabM -/
+ protected def GoalState.tryTactic (state: GoalState) (goal: MVarId) (tactic: String):
+-    Elab.TermElabM TacticResult := do
+-  state.restoreElabM
++    Elab.TermElabM TacticResult := withInputContext tactic <| state.withOperation do
+   let isConvGoal := isLHSGoal? (← goal.getType) |>.isSome
+-  let tactic ← match Parser.runParserCategory
+-    (env := ← MonadEnv.getEnv)
+-    (catName := if isConvGoal then `conv else `tactic)
+-    (input := tactic)
+-    (fileName := filename) with
++  let tactic ← match parseTacticSequence (← getEnv) isConvGoal tactic with
+     | .ok stx => pure $ stx
+     | .error error => return .parseError error
+-  state.tryTacticM goal $ Elab.Tactic.evalTactic tactic
++  return .success (← state.step goal $ Elab.Tactic.evalTactic tactic)
+ 
+ protected def GoalState.tryAssign (state: GoalState) (goal: MVarId) (expr: String):
+-      Elab.TermElabM TacticResult := do
+-  state.restoreElabM
++      Elab.TermElabM TacticResult := withInputContext expr <| state.withOperation do
+   let expr ← match Parser.runParserCategory
+     (env := ← MonadEnv.getEnv)
+     (catName := `term)
+@@ -235,13 +286,12 @@ protected def GoalState.tryAssign (state: GoalState) (goal: MVarId) (expr: Strin
+     (fileName := filename) with
+     | .ok syn => pure syn
+     | .error error => return .parseError error
+-  state.tryTacticM goal $ Tactic.evalAssign expr
++  return .success (← state.step goal $ Tactic.evalAssign expr)
+ 
+ -- Specialized Tactics
+ 
+ protected def GoalState.tryLet (state: GoalState) (goal: MVarId) (binderName: String) (type: String):
+-      Elab.TermElabM TacticResult := do
+-  state.restoreElabM
++      Elab.TermElabM TacticResult := withInputContext type <| state.withOperation do
+   let type ← match Parser.runParserCategory
+     (env := ← MonadEnv.getEnv)
+     (catName := `term)
+@@ -249,16 +299,16 @@ protected def GoalState.tryLet (state: GoalState) (goal: MVarId) (binderName: St
+     (fileName := filename) with
+     | .ok syn => pure syn
+     | .error error => return .parseError error
+-  state.tryTacticM goal $ Tactic.evalLet binderName.toName type
++  return .success (← state.step goal $ Tactic.evalLet binderName.toName type)
+ 
+ /-- Enter conv tactic mode -/
+ protected def GoalState.conv (state: GoalState) (goal: MVarId):
+-      Elab.TermElabM TacticResult := do
++      Elab.TermElabM TacticResult := state.withOperation do
+   if state.convMVar?.isSome then
+     return .invalidAction "Already in conv state"
+   goal.checkNotAssigned `GoalState.conv
+   let tacticM :  Elab.Tactic.TacticM (Elab.Tactic.SavedState × MVarId) := do
+-    state.restoreTacticM goal
++    Elab.Tactic.setGoals [goal]
+ 
+     -- See Lean.Elab.Tactic.Conv.convTarget
+     let convMVar ← Elab.Tactic.withMainContext do
+@@ -266,30 +316,27 @@ protected def GoalState.conv (state: GoalState) (goal: MVarId):
+       Elab.Tactic.replaceMainGoal [newGoal.mvarId!]
+       pure rhs.mvarId!
+     return (← MonadBacktrack.saveState, convMVar)
+-  try
+-    let (nextSavedState, convRhs) ← tacticM { elaborator := .anonymous } |>.run' state.savedState.tactic
+-    -- Other goals are now dormant
+-    let otherGoals := state.goals.filter $ λ g => g != goal
+-    return .success {
+-      root := state.root,
+-      savedState := nextSavedState
+-      parentMVar? := .some goal,
+-      convMVar? := .some (convRhs, goal, otherGoals),
+-      calcPrevRhs? := .none
+-    }
+-  catch exception =>
+-    return .failure #[← exception.toMessageData.toString]
++  let (nextSavedState, convRhs) ← tacticM { elaborator := .anonymous } |>.run' state.savedState.tactic
++  -- Other goals are now dormant
++  let otherGoals := state.goals.filter $ λ g => g != goal
++  return .success {
++    root := state.root,
++    trustedEnv := state.trustedEnv,
++    savedState := nextSavedState
++    parentMVar? := .some goal,
++    convMVar? := .some (convRhs, goal, otherGoals),
++    calcPrevRhs? := .none
++  }
+ 
+ /-- Exit from `conv` mode. Resumes all goals before the mode starts and applys the conv -/
+ @[export pantograph_goal_state_conv_exit_m]
+ protected def GoalState.convExit (state: GoalState):
+-      Elab.TermElabM TacticResult := do
++      Elab.TermElabM TacticResult := state.withOperation do
+   let (convRhs, convGoal, _) ← match state.convMVar? with
+     | .some mvar => pure mvar
+     | .none => return .invalidAction "Not in conv state"
+   let tacticM :  Elab.Tactic.TacticM Elab.Tactic.SavedState:= do
+     -- Vide `Lean.Elab.Tactic.Conv.convert`
+-    state.savedState.restore
+ 
+     -- Close all existing goals with `refl`
+     for mvarId in (← Elab.Tactic.getGoals) do
+@@ -306,17 +353,15 @@ protected def GoalState.convExit (state: GoalState):
+       let proof ← instantiateMVars (.mvar convGoal)
+       Elab.Tactic.liftMetaTactic1 fun mvarId => mvarId.replaceTargetEq targetNew proof
+     MonadBacktrack.saveState
+-  try
+-    let nextSavedState ← tacticM { elaborator := .anonymous } |>.run' state.savedState.tactic
+-    return .success {
+-      root := state.root,
+-      savedState := nextSavedState
+-      parentMVar? := .some convGoal,
+-      convMVar? := .none
+-      calcPrevRhs? := .none
+-    }
+-  catch exception =>
+-    return .failure #[← exception.toMessageData.toString]
++  let nextSavedState ← tacticM { elaborator := .anonymous } |>.run' state.savedState.tactic
++  return .success {
++    root := state.root,
++    trustedEnv := state.trustedEnv,
++    savedState := nextSavedState
++    parentMVar? := .some convGoal,
++    convMVar? := .none
++    calcPrevRhs? := .none
++  }
+ 
+ protected def GoalState.calcPrevRhsOf? (state: GoalState) (goal: MVarId): Option Expr := do
+   let (mvarId, rhs) ← state.calcPrevRhs?
+@@ -326,8 +371,7 @@ protected def GoalState.calcPrevRhsOf? (state: GoalState) (goal: MVarId): Option
+     .none
+ @[export pantograph_goal_state_try_calc_m]
+ protected def GoalState.tryCalc (state: GoalState) (goal: MVarId) (pred: String):
+-      Elab.TermElabM TacticResult := do
+-  state.restoreElabM
++      Elab.TermElabM TacticResult := withInputContext pred <| state.withOperation do
+   if state.convMVar?.isSome then
+     return .invalidAction "Cannot initiate `calc` while in `conv` state"
+   let `(term|$pred) ← match Parser.runParserCategory
+@@ -342,58 +386,56 @@ protected def GoalState.tryCalc (state: GoalState) (goal: MVarId) (pred: String)
+   let decl ← goal.getDecl
+   let target ← instantiateMVars decl.type
+   let tag := decl.userName
+-  try
+-    goal.withContext do
++  goal.withContext do
+ 
+-    let mut step ← Elab.Term.elabType <| ← do
+-      if let some prevRhs := calcPrevRhs? then
+-        Elab.Term.annotateFirstHoleWithType pred (← Meta.inferType prevRhs)
+-      else
+-        pure pred
+-
+-    let some (_, lhs, rhs) ← Elab.Term.getCalcRelation? step |
+-      throwErrorAt pred "invalid 'calc' step, relation expected{indentExpr step}"
++  let mut step ← Elab.Term.elabType <| ← do
+     if let some prevRhs := calcPrevRhs? then
+-      unless ← Meta.isDefEqGuarded lhs prevRhs do
+-        throwErrorAt pred "invalid 'calc' step, left-hand-side is{indentD m!"{lhs} : {← Meta.inferType lhs}"}\nprevious right-hand-side is{indentD m!"{prevRhs} : {← Meta.inferType prevRhs}"}" -- "
+-
+-    -- Creates a mvar to represent the proof that the calc tactic solves the
+-    -- current branch
+-    -- In the Lean `calc` tactic this is gobbled up by
+-    -- `withCollectingNewGoalsFrom`
+-    let mut proof ← Meta.mkFreshExprMVarAt (← getLCtx) (← Meta.getLocalInstances) step
+-      (userName := tag ++ `calc)
+-    let mvarBranch := proof.mvarId!
+-
+-    let mut proofType ← Meta.inferType proof
+-    let mut remainder? := Option.none
+-
+-    -- The calc tactic either solves the main goal or leaves another relation.
+-    -- Replace the main goal, and save the new goal if necessary
+-    unless ← Meta.isDefEq proofType target do
+-      let rec throwFailed :=
+-        throwError "'calc' tactic failed, has type{indentExpr proofType}\nbut it is expected to have type{indentExpr target}"
+-      let some (_, _, rhs) ← Elab.Term.getCalcRelation? proofType | throwFailed
+-      let some (r, _, rhs') ← Elab.Term.getCalcRelation? target | throwFailed
+-      let lastStep := mkApp2 r rhs rhs'
+-      let lastStepGoal ← Meta.mkFreshExprSyntheticOpaqueMVar lastStep tag
+-      (proof, proofType) ← Elab.Term.mkCalcTrans proof proofType lastStepGoal lastStep
+-      unless ← Meta.isDefEq proofType target do throwFailed
+-      remainder? := .some lastStepGoal.mvarId!
+-    goal.assign proof
+-
+-    let goals := [ mvarBranch ] ++ remainder?.toList
+-    let calcPrevRhs? := remainder?.map $ λ g => (g, rhs)
+-    return .success {
+-      root := state.root,
+-      savedState := {
+-        term := ← MonadBacktrack.saveState,
+-        tactic := { goals },
+-      },
+-      parentMVar? := .some goal,
+-      calcPrevRhs?
+-    }
+-  catch exception =>
+-    return .failure #[← exception.toMessageData.toString]
++      Elab.Term.annotateFirstHoleWithType pred (← Meta.inferType prevRhs)
++    else
++      pure pred
++
++  let some (_, lhs, rhs) ← Elab.Term.getCalcRelation? step |
++    throwErrorAt pred "invalid 'calc' step, relation expected{indentExpr step}"
++  if let some prevRhs := calcPrevRhs? then
++    unless ← Meta.isDefEqGuarded lhs prevRhs do
++      throwErrorAt pred "invalid 'calc' step, left-hand-side is{indentD m!"{lhs} : {← Meta.inferType lhs}"}\nprevious right-hand-side is{indentD m!"{prevRhs} : {← Meta.inferType prevRhs}"}" -- "
++
++  -- Creates a mvar to represent the proof that the calc tactic solves the
++  -- current branch
++  -- In the Lean `calc` tactic this is gobbled up by
++  -- `withCollectingNewGoalsFrom`
++  let mut proof ← Meta.mkFreshExprMVarAt (← getLCtx) (← Meta.getLocalInstances) step
++    (userName := tag ++ `calc)
++  let mvarBranch := proof.mvarId!
++
++  let mut proofType ← Meta.inferType proof
++  let mut remainder? := Option.none
++
++  -- The calc tactic either solves the main goal or leaves another relation.
++  -- Replace the main goal, and save the new goal if necessary
++  unless ← Meta.isDefEq proofType target do
++    let rec throwFailed :=
++      throwError "'calc' tactic failed, has type{indentExpr proofType}\nbut it is expected to have type{indentExpr target}"
++    let some (_, _, rhs) ← Elab.Term.getCalcRelation? proofType | throwFailed
++    let some (r, _, rhs') ← Elab.Term.getCalcRelation? target | throwFailed
++    let lastStep := mkApp2 r rhs rhs'
++    let lastStepGoal ← Meta.mkFreshExprSyntheticOpaqueMVar lastStep tag
++    (proof, proofType) ← Elab.Term.mkCalcTrans proof proofType lastStepGoal lastStep
++    unless ← Meta.isDefEq proofType target do throwFailed
++    remainder? := .some lastStepGoal.mvarId!
++  goal.assign proof
++
++  let goals := [ mvarBranch ] ++ remainder?.toList
++  let calcPrevRhs? := remainder?.map $ λ g => (g, rhs)
++  return .success {
++    root := state.root,
++    trustedEnv := state.trustedEnv,
++    savedState := {
++      term := ← MonadBacktrack.saveState,
++      tactic := { goals },
++    },
++    parentMVar? := .some goal,
++    calcPrevRhs?
++  }
+ 
+ end Pantograph
+diff --git a/Pantograph/Library.lean b/Pantograph/Library.lean
+index 23a2046..296ab43 100644
+--- a/Pantograph/Library.lean
++++ b/Pantograph/Library.lean
+@@ -124,11 +124,30 @@ def exprEcho (expr: String) (expectedType?: Option String := .none) (levels: Arr
+ 
+ @[export pantograph_goal_start_expr_m]
+ def goalStartExpr (expr: String) (levels: Array String): CoreM (Protocol.CR GoalState) :=
+-  runTermElabM $ Elab.Term.withLevelNames (levels.toList.map (·.toName)) do
+-    let expr ← match ← parseElabType expr with
+-      | .error e => return .error e
+-      | .ok expr => pure $ expr
+-    return .ok $ ← GoalState.create expr
++  runTermElabM <| withInputContext expr <| Elab.Term.withLevelNames (levels.toList.map (·.toName)) do
++    let outer ← Elab.Term.saveState
++    try
++      modifyThe Core.State fun s => { s with messages := {} }
++      let expr ← match ← parseElabType expr with
++        | .error e => return .error e
++        | .ok expr => pure expr
++      let state ← GoalState.create expr
++      Elab.Term.synthesizeSyntheticMVarsUsingDefault
++      Elab.Term.synthesizeSyntheticMVars (postpone := .partial)
++      let term ← Elab.Term.saveState
++      let state := { state with savedState := { state.savedState with term } }
++      let log := (← getThe Core.State).messages
++      if log.hasErrors then
++        let messages ← renderMessages log
++        return .error (errorI "elab" (String.intercalate "\n" (messages.map (·.data)).toList))
++      return .ok { state with trustedEnv := outer.meta.core.env }
++    catch exception =>
++      return .error (errorI "elab" (← exception.toMessageData.toString))
++    finally
++      outer.restore (restoreInfo := true)
++      modifyThe Meta.State fun _ => outer.meta.meta
++      modifyThe Elab.Term.State fun _ => outer.elab
++      modifyThe Core.State fun s => { s with traceState := outer.meta.core.traceState, cache := outer.meta.core.cache }
+ 
+ @[export pantograph_goal_resume]
+ def goalResume (target: GoalState) (goals: Array String): Except String GoalState :=
+@@ -158,37 +177,35 @@ def goalTactic (state: GoalState) (goal:  MVarId) (tactic: String): CoreM Tactic
+ def goalAssign (state: GoalState) (goal: MVarId) (expr: String): CoreM TacticResult :=
+   runTermElabM <| state.tryAssign goal expr
+ @[export pantograph_goal_have_m]
+-protected def GoalState.tryHave (state: GoalState) (goal: MVarId) (binderName: String) (type: String): CoreM TacticResult := do
+-  let type ← match (← parseTermM type) with
+-    | .ok syn => pure syn
+-    | .error error => return .parseError error
+-  runTermElabM do
+-    state.restoreElabM
+-    state.tryTacticM goal $ Tactic.evalHave binderName.toName type
++protected def GoalState.tryHave (state: GoalState) (goal: MVarId) (binderName: String) (type: String): CoreM TacticResult :=
++  runTermElabM <| withInputContext type <| state.withOperation do
++    let type ← match (← parseTermM type) with
++      | .ok syn => pure syn
++      | .error error => return .parseError error
++    return .success (← state.step goal $ Tactic.evalHave binderName.toName type)
+ @[export pantograph_goal_try_define_m]
+-protected def GoalState.tryDefine (state: GoalState) (goal: MVarId) (binderName: String) (expr: String): CoreM TacticResult := do
+-  let expr ← match (← parseTermM expr) with
+-    | .ok syn => pure syn
+-    | .error error => return .parseError error
+-  runTermElabM do
+-    state.restoreElabM
+-    state.tryTacticM goal (Tactic.evalDefine binderName.toName expr)
++protected def GoalState.tryDefine (state: GoalState) (goal: MVarId) (binderName: String) (expr: String): CoreM TacticResult :=
++  runTermElabM <| withInputContext expr <| state.withOperation do
++    let expr ← match (← parseTermM expr) with
++      | .ok syn => pure syn
++      | .error error => return .parseError error
++    return .success (← state.step goal $ Tactic.evalDefine binderName.toName expr)
+ @[export pantograph_goal_try_motivated_apply_m]
+ protected def GoalState.tryMotivatedApply (state: GoalState) (goal: MVarId) (recursor: String):
+-      Elab.TermElabM TacticResult := do
+-  state.restoreElabM
++      Elab.TermElabM TacticResult := withInputContext recursor <| state.withOperation do
+   let recursor ← match (← parseTermM recursor) with
+     | .ok syn => pure syn
+     | .error error => return .parseError error
+-  state.tryTacticM goal (tacticM := Tactic.evalMotivatedApply recursor)
++  return .success (← state.step goal (tacticM := Tactic.evalMotivatedApply recursor))
++
+ @[export pantograph_goal_try_no_confuse_m]
+ protected def GoalState.tryNoConfuse (state: GoalState) (goal: MVarId) (eq: String):
+-      Elab.TermElabM TacticResult := do
+-  state.restoreElabM
++      Elab.TermElabM TacticResult := withInputContext eq <| state.withOperation do
+   let eq ← match (← parseTermM eq) with
+     | .ok syn => pure syn
+     | .error error => return .parseError error
+-  state.tryTacticM goal (tacticM := Tactic.evalNoConfuse eq)
++  return .success (← state.step goal (tacticM := Tactic.evalNoConfuse eq))
++
+ @[export pantograph_goal_let_m]
+ def goalLet (state: GoalState) (goal: MVarId) (binderName: String) (type: String): CoreM TacticResult :=
+   runTermElabM <| state.tryLet goal binderName type
+diff --git a/Pantograph/Protocol.lean b/Pantograph/Protocol.lean
+index 781f4bf..e782003 100644
+--- a/Pantograph/Protocol.lean
++++ b/Pantograph/Protocol.lean
+@@ -267,6 +267,24 @@ structure Message where
+ /-- Helper to create an error message from a plain string -/
+ def Message.error (s : String) : Message := { severity := "error", data := s }
+ 
++structure ProtocolDescribe where
++  deriving Lean.FromJson
++structure ProtocolDescriptor where
++  protocol: String := "maths-ai-pantograph"
++  protocolVersion: Nat := 1
++  modelSexpVersion: Nat := 1
++  transitionValidationVersion: Nat := 1
++  messageVersion: Nat := 1
++  goalSelection: String := "explicit-focused-v1"
++  tacticErrorsFormat: String := "string-array-v1"
++  deriving Lean.ToJson
++
++structure TransitionValidation where
++  version: Nat := 1
++  scope: String := "transition-expressions"
++  checked: Bool
++  deriving Lean.ToJson
++
+ structure GoalTacticResult where
+   -- The next goal state id. Existence of this field shows success
+   nextStateId?: Option Nat          := .none
+@@ -282,6 +300,8 @@ structure GoalTacticResult where
+   -- Structured diagnostic / error messages from execution
+   messages: Array Message := #[]
+ 
++  validation?: Option TransitionValidation := .none
++
+   -- Soundness audit flags expected by modern clients
+   hasSorry: Bool := false
+   hasUnsafe: Bool := false
+diff --git a/Pantograph/Serial.lean b/Pantograph/Serial.lean
+index 00766ca..c0f600e 100644
+--- a/Pantograph/Serial.lean
++++ b/Pantograph/Serial.lean
+@@ -531,8 +531,7 @@ protected def GoalState.serializeGoals
+       (state: GoalState)
+       (parent: Option GoalState := .none)
+       (options: @&Protocol.Options := {}):
+-    MetaM (Array Protocol.Goal):= do
+-  state.restoreMetaM
++    MetaM (Array Protocol.Goal):= state.withMetaState do
+   let goals := state.goals.toArray
+   let parentDecl? := parent.bind (λ parentState => parentState.mctx.findDecl? state.parentMVar?.get!)
+   goals.mapM fun goal => do
+@@ -545,8 +544,7 @@ protected def GoalState.serializeGoals
+ /-- Print the metavariables in a readable format -/
+ @[export pantograph_goal_state_diag_m]
+ protected def GoalState.diag (goalState: GoalState) (parent?: Option GoalState := .none) (options: Protocol.GoalDiag := {}): CoreM String := do
+-  let metaM: MetaM String := do
+-    goalState.restoreMetaM
++  let metaM: MetaM String := goalState.withMetaState do
+     let savedState := goalState.savedState
+     let goals := savedState.tactic.goals
+     let mctx ← getMCtx
+diff --git a/Repl.lean b/Repl.lean
+index f031e47..1d3ee61 100644
+--- a/Repl.lean
++++ b/Repl.lean
+@@ -1,5 +1,6 @@
+ import Lean.Data.HashMap
+ import Pantograph
++import Pantograph.Validation
+ 
+ namespace Pantograph.Repl
+ 
+@@ -33,6 +34,7 @@ def execute (command: Protocol.Command): MainM Lean.Json := do
+       | .error ierror => return Lean.toJson ierror
+     | .error error => return Lean.toJson $ errorCommand s!"Unable to parse json: {error}"
+   match command.cmd with
++  | "protocol.describe" => run protocol_describe
+   | "reset"         => run reset
+   | "stat"          => run stat
+   | "expr.echo"     => run expr_echo
+@@ -62,6 +64,8 @@ def execute (command: Protocol.Command): MainM Lean.Json := do
+       nextId := state.nextId + 1
+     }
+     return stateId
++  protocol_describe (_ : Protocol.ProtocolDescribe) : MainM (CR Protocol.ProtocolDescriptor) :=
++    pure (.ok {})
+   -- Command Functions
+   reset (_: Protocol.Reset): MainM (CR Protocol.StatResult) := do
+     let state ← get
+@@ -147,6 +151,7 @@ def execute (command: Protocol.Command): MainM Lean.Json := do
+           return if autoMode then .success resumedState else result
+         match ← resumedState.convExit with
+         | .success exitedState =>
++          let exitedState := { exitedState with messages := nextGoalState.messages ++ exitedState.messages }
+           if autoMode then
+             let dormantGoals := goalState.convMVar?.map (fun (_, _, goals) => goals) |>.getD []
+             match exitedState.resume (exitedState.goals ++ dormantGoals) with
+@@ -194,24 +199,19 @@ def execute (command: Protocol.Command): MainM Lean.Json := do
+           let .ok result := nextGoalState.resume (nextGoalState.goals ++ dormantGoals) | throwError "Resuming known goals"
+           pure result
+         | false, _ => pure nextGoalState
+-      let nextStateId ← newGoalState nextGoalState
++      let checked ← match validateTransition goalState nextGoalState goal with
++        | .ok checked => pure checked
++        | .error message => return .error (errorI "validation" message)
++      let nextGoalState := checked.state
+       let goals ← nextGoalState.serializeGoals (parent := .some goalState) (options := state.options) |>.run'
+-      -- Fragment entry can leave the parent unassigned; parentExpr? handles it.
+-      -- Auditing the parent also catches sorry/unsafe use in partial branches.
+-      let env ← Lean.MonadEnv.getEnv
+-      let proofExpr? := nextGoalState.parentExpr?
+-      let hasSorry := proofExpr?.map (·.hasSorry) |>.getD false
+-      let hasUnsafe := proofExpr?.map (fun expr =>
+-        expr.getUsedConstants.any (fun constName =>
+-          (env.find? constName).map (·.isUnsafe) |>.getD false
+-        )
+-      ) |>.getD false
++      let nextStateId ← newGoalState nextGoalState
+       return .ok {
+         nextStateId? := .some nextStateId,
+         goals? := .some goals,
+-        messages := #[],
+-        hasSorry,
+-        hasUnsafe,
++        messages := nextGoalState.messages,
++        hasSorry := checked.hasSorry,
++        hasUnsafe := checked.hasUnsafe,
++        validation? := some { checked := true },
+       }
+     | .ok (.parseError message) =>
+       return .ok {
+@@ -220,10 +220,10 @@ def execute (command: Protocol.Command): MainM Lean.Json := do
+       }
+     | .ok (.invalidAction message) =>
+       return .error $ errorI "invalid" message
+-    | .ok (.failure messages) =>
++    | .ok (.failure messages diagnostics) =>
+       return .ok {
+         tacticErrors? := .some messages,
+-        messages := messages.map Protocol.Message.error,
++        messages := diagnostics,
+       }
+   goal_continue (args: Protocol.GoalContinue): MainM (CR Protocol.GoalContinueResult) := do
+     let state ← get
+diff --git a/Test/Common.lean b/Test/Common.lean
+index 699ea4e..559a611 100644
+--- a/Test/Common.lean
++++ b/Test/Common.lean
+@@ -69,7 +69,7 @@ def GoalState.tacticOn (state: GoalState) (goalId: Nat) (tactic: String) := stat
+ 
+ def TacticResult.toString : TacticResult → String
+   | .success state => s!".success ({state.goals.length} goals)"
+-  | .failure messages =>
++  | .failure messages _ =>
+     let messages := "\n".intercalate messages.toList
+     s!".failure {messages}"
+   | .parseError error => s!".parseError {error}"
+diff --git a/Test/Integration.lean b/Test/Integration.lean
+index a45e6ce..29e1688 100644
+--- a/Test/Integration.lean
++++ b/Test/Integration.lean
+@@ -87,11 +87,11 @@ def test_tactic : Test :=
+     step "goal.start" [("expr", .str "∀ (p q: Prop), p ∨ q → q ∨ p")]
+      ({ stateId := 0, root := "_uniq.9" }: Protocol.GoalStartResult),
+     step "goal.tactic" [("stateId", .num 0), ("goalId", .num 0), ("tactic", .str "intro x")]
+-     ({ nextStateId? := .some 1, goals? := #[goal1], }: Protocol.GoalTacticResult),
++     ({ nextStateId? := .some 1, goals? := #[goal1], validation? := some { checked := true } }: Protocol.GoalTacticResult),
+     step "goal.print" [("stateId", .num 1)]
+      ({ parent? := .some { pp? := .some "fun x => ?m.12 x" }, }: Protocol.GoalPrintResult),
+     step "goal.tactic" [("stateId", .num 1), ("goalId", .num 0), ("tactic", .str "intro y")]
+-     ({ nextStateId? := .some 2, goals? := #[goal2], }: Protocol.GoalTacticResult),
++     ({ nextStateId? := .some 2, goals? := #[goal2], validation? := some { checked := true } }: Protocol.GoalTacticResult),
+   ]
+ def test_automatic_mode (automatic: Bool): Test :=
+   let varsPQ := #[
+@@ -135,12 +135,12 @@ def test_automatic_mode (automatic: Bool): Test :=
+     step "goal.start" [("expr", .str "∀ (p q: Prop), p ∨ q → q ∨ p")]
+      ({ stateId := 0, root := "_uniq.9" }: Protocol.GoalStartResult),
+     step "goal.tactic" [("stateId", .num 0), ("goalId", .num 0), ("tactic", .str "intro p q h")]
+-     ({ nextStateId? := .some 1, goals? := #[goal1], }: Protocol.GoalTacticResult),
++     ({ nextStateId? := .some 1, goals? := #[goal1], validation? := some { checked := true } }: Protocol.GoalTacticResult),
+     step "goal.tactic" [("stateId", .num 1), ("goalId", .num 0), ("tactic", .str "cases h")]
+-     ({ nextStateId? := .some 2, goals? := #[goal2l, goal2r], }: Protocol.GoalTacticResult),
++     ({ nextStateId? := .some 2, goals? := #[goal2l, goal2r], validation? := some { checked := true } }: Protocol.GoalTacticResult),
+     let goals? := if automatic then #[goal3l, goal2r] else #[goal3l]
+     step "goal.tactic" [("stateId", .num 2), ("goalId", .num 0), ("tactic", .str "apply Or.inr")]
+-     ({ nextStateId? := .some 3, goals?, }: Protocol.GoalTacticResult),
++     ({ nextStateId? := .some 3, goals?, validation? := some { checked := true } }: Protocol.GoalTacticResult),
+   ]
+ 
+ def test_env_add_inspect : Test :=
+@@ -256,7 +256,7 @@ def test_protocol_compat : Test :=
+     ]
+   }
+   let convGoal: Protocol.Goal := {
+-    name := "_uniq.98",
++    name := "_uniq.151",
+     isConversion := true,
+     fragment := "conv",
+     target := { pp? := .some "1 + 2 = 3" },
+@@ -272,7 +272,7 @@ def test_protocol_compat : Test :=
+      ({ stateId := 0, root := "_uniq.7" }: Protocol.GoalStartResult),
+     -- 1. Omit goalId (defaults to 0)
+     step "goal.tactic" [("stateId", .num 0), ("tactic", .str "intro p h")]
+-     ({ nextStateId? := .some 1, goals? := #[goal1] }: Protocol.GoalTacticResult),
++     ({ nextStateId? := .some 1, goals? := #[goal1], validation? := some { checked := true } }: Protocol.GoalTacticResult),
+     -- 2. Tactic failure: returns structured message objects with kind, severity, pos, data
+     step "goal.tactic" [("stateId", .num 1), ("tactic", .str "rfl")]
+      ({
+@@ -280,23 +280,23 @@ def test_protocol_compat : Test :=
+        messages := #[{
+          kind := "[anonymous]",
+          severity := "error",
+-         pos := { line := 0, column := 0 },
+-         endPos? := .none,
++         pos := { line := 1, column := 0 },
++         endPos? := some { line := 1, column := 3 },
+          data := "The rfl tactic failed. Possible reasons:\n- The goal is not a reflexive relation (neither `=` nor a relation with a @[refl] lemma).\n- The arguments of the relation are not equal.\nTry using the reflexivity lemma for your relation explicitly, e.g. `exact Eq.refl _` or\n`exact HEq.rfl` etc.\np : Prop\nh : p\n⊢ p"
+        }]
+      }: Protocol.GoalTacticResult),
+     -- 3. Sorry detection: returns hasSorry := true
+     step "goal.tactic" [("stateId", .num 1), ("tactic", .str "sorry")]
+-     ({ nextStateId? := .some 2, goals? := .some #[], hasSorry := true }: Protocol.GoalTacticResult),
++     ({ nextStateId? := .some 2, goals? := .some #[], hasSorry := true, validation? := some { checked := true } }: Protocol.GoalTacticResult),
+     -- 4. Conv mode exits explicitly or when its final goal closes
+     step "goal.start" [("expr", .str "1 + 2 = 3")]
+      ({ stateId := 3, root := "_uniq.96" }: Protocol.GoalStartResult),
+     step "goal.tactic" [("stateId", .num 3), ("mode", .str "conv")]
+-     ({ nextStateId? := .some 4, goals? := #[convGoal] }: Protocol.GoalTacticResult),
++     ({ nextStateId? := .some 4, goals? := #[convGoal], validation? := some { checked := true } }: Protocol.GoalTacticResult),
+     step "goal.tactic" [("stateId", .num 4), ("mode", .str "tactic")]
+-     ({ nextStateId? := .some 5, goals? := #[exitedConvGoal] }: Protocol.GoalTacticResult),
++     ({ nextStateId? := .some 5, goals? := #[exitedConvGoal], validation? := some { checked := true } }: Protocol.GoalTacticResult),
+     step "goal.tactic" [("stateId", .num 4), ("tactic", .str "rfl")]
+-     ({ nextStateId? := .some 6, goals? := #[exitedConvGoal] }: Protocol.GoalTacticResult),
++     ({ nextStateId? := .some 6, goals? := #[exitedConvGoal], validation? := some { checked := true } }: Protocol.GoalTacticResult),
+   ]
+ 
+ def test_conv_protocol : Test :=
+diff --git a/Test/Main.lean b/Test/Main.lean
+index 0fde5fa..271f4d2 100644
+--- a/Test/Main.lean
++++ b/Test/Main.lean
+@@ -7,6 +7,7 @@ import Test.Metavar
+ import Test.Proofs
+ import Test.Serial
+ import Test.Tactic
++import Test.Validation
+ 
+ -- Test running infrastructure
+ 
+@@ -44,6 +45,7 @@ def main (args: List String) := do
+     (trustLevel := 1)
+ 
+   let suites: List (String × List (String × IO LSpec.TestSeq)) := [
++    ("Validation", Validation.suite env_default),
+     ("Environment", Environment.suite),
+     ("Frontend", Frontend.suite env_default),
+     ("Integration", Integration.suite env_default),
+diff --git a/Test/Proofs.lean b/Test/Proofs.lean
+index a5ec349..82f43b2 100644
+--- a/Test/Proofs.lean
++++ b/Test/Proofs.lean
+@@ -127,7 +127,7 @@ def test_nat_add_comm (manual: Bool): TestM Unit := do
+     #[buildGoal [("n", "Nat"), ("m", "Nat")] "n + m = m + n"])
+ 
+   match ← state1.tacticOn 0 "assumption" with
+-  | .failure #[message] =>
++  | .failure #[message] _ =>
+     addTest $ LSpec.check "assumption" (message = "tactic 'assumption' failed\nn m : Nat\n⊢ n + m = m + n")
+   | other => do
+     addTest $ assertUnreachable $ other.toString
+@@ -282,9 +282,9 @@ def test_or_comm: TestM Unit := do
+     serializeExpressionSexp (← instantiateAll state2.parentExpr?.get!) (sanitize := false)
+   let orPQ := s!"((:c Or) (:fv {fvP}) (:fv {fvQ}))"
+   let orQP := s!"((:c Or) (:fv {fvQ}) (:fv {fvP}))"
+-  let motive := s!"(:lambda t._@._hyg.26 {orPQ} (:forall h ((:c Eq) ((:c Or) (:fv {fvP}) (:fv {fvQ})) (:fv {fvH}) 0) {orQP}))"
+-  let caseL := s!"(:lambda h._@._hyg.27 (:fv {fvP}) (:lambda h._@._hyg.28 ((:c Eq) {orPQ} (:fv {fvH}) ((:c Or.inl) (:fv {fvP}) (:fv {fvQ}) 0)) (:subst (:mv {caseL}) (:fv {fvP}) (:fv {fvQ}) 1)))"
+-  let caseR := s!"(:lambda h._@._hyg.29 (:fv {fvQ}) (:lambda h._@._hyg.30 ((:c Eq) {orPQ} (:fv {fvH}) ((:c Or.inr) (:fv {fvP}) (:fv {fvQ}) 0)) (:subst (:mv {caseR}) (:fv {fvP}) (:fv {fvQ}) 1)))"
++  let motive := s!"(:lambda t._@._hyg.30 {orPQ} (:forall h ((:c Eq) ((:c Or) (:fv {fvP}) (:fv {fvQ})) (:fv {fvH}) 0) {orQP}))"
++  let caseL := s!"(:lambda h._@._hyg.31 (:fv {fvP}) (:lambda h._@._hyg.32 ((:c Eq) {orPQ} (:fv {fvH}) ((:c Or.inl) (:fv {fvP}) (:fv {fvQ}) 0)) (:subst (:mv {caseL}) (:fv {fvP}) (:fv {fvQ}) 1)))"
++  let caseR := s!"(:lambda h._@._hyg.33 (:fv {fvQ}) (:lambda h._@._hyg.34 ((:c Eq) {orPQ} (:fv {fvH}) ((:c Or.inr) (:fv {fvP}) (:fv {fvQ}) 0)) (:subst (:mv {caseR}) (:fv {fvP}) (:fv {fvQ}) 1)))"
+   let conduit := s!"((:c Eq.refl) {orPQ} (:fv {fvH}))"
+   addTest $ LSpec.test "(2 parent)" (state2parent ==
+     s!"((:c Or.casesOn) (:fv {fvP}) (:fv {fvQ}) {motive} (:fv {fvH}) {caseL} {caseR} {conduit})")
+diff --git a/Test/Tactic/Prograde.lean b/Test/Tactic/Prograde.lean
+index 132718a..60ef47e 100644
+--- a/Test/Tactic/Prograde.lean
++++ b/Test/Tactic/Prograde.lean
+@@ -121,7 +121,7 @@ def test_define_root_expr : TestT Elab.TermElabM Unit := do
+   let .success state1 ← state0.tacticOn (goalId := 0) tactic | addTest $ assertUnreachable tactic
+   let binderName := `binder
+   let value := "x.fst"
+-  let expr ← state1.goals[0]!.withContext $ strToTermSyntax value
++  let expr ← state1.withContext (state1.get! 0) $ strToTermSyntax value
+   let tacticM := Tactic.evalDefine binderName expr
+   let .success state2 ← state1.tryTacticM (state1.get! 0) tacticM | addTest $ assertUnreachable s!"define {binderName} := {value}"
+   let tactic := s!"apply {binderName}"
+@@ -267,7 +267,7 @@ def test_let (specialized: Bool): TestT Elab.TermElabM Unit := do
+ 
+   let tactic := "exact h"
+   match ← state3r.tacticOn (goalId := 0) (tactic := tactic) with
+-  | .failure #[message] =>
++  | .failure #[message] _ =>
+     addTest $ LSpec.check tactic  (message = s!"type mismatch\n  h\nhas type\n  a : Prop\nbut is expected to have type\n  {mainTarget} : Prop")
+   | other => do
+     addTest $ assertUnreachable $ other.toString
+diff --git a/Pantograph/Diagnostics.lean b/Pantograph/Diagnostics.lean
+new file mode 100644
+index 0000000..80fa9ca
+--- /dev/null
++++ b/Pantograph/Diagnostics.lean
+@@ -0,0 +1,58 @@
++import Pantograph.Protocol
++import Lean
++
++namespace Pantograph
++open Lean
++
++private def messageKind : MessageData → Name
++  | .tagged name _ => name
++  | .withContext _ data | .withNamingContext _ data | .nest _ data
++  | .group data | .ofWidget _ data => messageKind data
++  | _ => .anonymous
++
++/-- Elaborate source strings against their actual source map. -/
++def withInputContext (input : String) (action : Elab.TermElabM α) : Elab.TermElabM α :=
++  withTheReader Core.Context (fun ctx =>
++    { ctx with fileName := "<pantograph>", fileMap := input.toFileMap }) action
++
++/-- Render diagnostics without introducing source locations absent from Lean. -/
++def renderMessages (log : MessageLog) : CoreM (Array Protocol.Message) := do
++  log.toArray.mapM fun message => do
++    let context ← read
++    let known := message.pos.line > 0 && !context.fileMap.source.isEmpty && message.fileName == context.fileName
++    let pos : Protocol.MessagePos := if known then
++      { line := message.pos.line, column := message.pos.column } else {}
++    let endPos? := message.endPos.bind fun p =>
++      if known && (p.line > pos.line || (p.line == pos.line && p.column >= pos.column)) then
++        some { line := p.line, column := p.column } else none
++    return {
++      kind := (messageKind message.data).toString,
++      severity := match message.severity with
++        | .information => "information"
++        | .warning => "warning"
++        | .error => "error",
++      pos, endPos?, data := ← message.data.toString
++    }
++
++private def convSequence : Parser.Parser :=
++  Parser.node ``Parser.Tactic.Conv.convSeq <|
++    (Parser.node ``Parser.Tactic.Conv.convSeqBracketed <|
++      Parser.symbol "{" >> Parser.withoutPosition
++        (Parser.Tactic.sepByIndentSemicolon (Parser.categoryParser `conv 0)) >> Parser.symbol "}") <|>
++    (Parser.node ``Parser.Tactic.Conv.convSeq1Indented <|
++      Parser.Tactic.sepBy1IndentSemicolon (Parser.categoryParser `conv 0))
++
++/-- Parse a full selected-mode sequence, including the final end-of-input check. -/
++def parseTacticSequence (env : Environment) (isConv : Bool) (input : String) : Except String Syntax :=
++  let parser := if isConv then convSequence else Parser.Tactic.tacticSeq
++  let context := Parser.mkInputContext input "<pantograph>"
++  let state := (Parser.andthenFn Parser.whitespace parser.fn).run context
++    { env, options := {} } (Parser.getTokenTable env) (Parser.mkParserState input)
++  if !state.allErrors.isEmpty then
++    .error (state.toErrorMsg context)
++  else if context.input.atEnd state.pos then
++    .ok state.stxStack.back
++  else
++    .error ((state.mkError "end of input").toErrorMsg context)
++
++end Pantograph
+diff --git a/Pantograph/Validation.lean b/Pantograph/Validation.lean
+new file mode 100644
+index 0000000..5ea55e9
+--- /dev/null
++++ b/Pantograph/Validation.lean
+@@ -0,0 +1,129 @@
++import Pantograph.Goal
++
++namespace Pantograph
++open Lean
++
++/-- Evidence produced by inspecting one transition's elaborated expressions. -/
++structure CheckedTransition where
++  state : GoalState
++  hasSorry : Bool
++  hasUnsafe : Bool
++
++private structure Scan where
++  mvars : Lean.HashSet (MVarId × Bool) := {}
++  fvars : Lean.HashSet (FVarId × Bool) := {}
++  constants : Lean.HashSet (Name × Bool) := {}
++  activeMVars : Lean.HashSet MVarId := {}
++  unresolved : Array MVarId := #[]
++  hasSorry : Bool := false
++  hasUnsafe : Bool := false
++
++private abbrev ScanM := StateT Scan (Except String)
++
++mutual
++  private partial def inspectExpr (before : Environment) (after : Environment)
++      (mctx : MetavarContext) (track : Bool) (lctx : LocalContext) (expr : Expr) : ScanM Unit := do
++    if expr.hasSorry then modify fun s => { s with hasSorry := true }
++    match expr with
++    | .mvar id => inspectMVar before after mctx track id
++    | .fvar id =>
++      unless (← get).fvars.contains (id, track) do
++        modify fun s => { s with fvars := s.fvars.insert (id, track) }
++        let some decl := lctx.find? id | throw s!"Missing local declaration {id.name}"
++        inspectExpr before after mctx track lctx decl.type
++        if let some value := decl.value? then inspectExpr before after mctx track lctx value
++    | .const name _ =>
++      unless (← get).constants.contains (name, track) do
++        modify fun s => { s with constants := s.constants.insert (name, track) }
++        let some info := after.find? name | throw s!"Missing proof dependency {name}"
++        if info.isUnsafe then modify fun s => { s with hasUnsafe := true }
++        -- Imported declarations remain the fixed trust basis.
++        unless (before.find? name).isSome do
++          inspectExpr before after mctx track {} info.type
++          if let some value := info.value? then inspectExpr before after mctx track {} value
++    | .app fn arg =>
++      inspectExpr before after mctx track lctx fn
++      inspectExpr before after mctx track lctx arg
++    | .lam _ type body _ | .forallE _ type body _ =>
++      inspectExpr before after mctx track lctx type
++      inspectExpr before after mctx track lctx body
++    | .letE _ type value body _ =>
++      inspectExpr before after mctx track lctx type
++      inspectExpr before after mctx track lctx value
++      inspectExpr before after mctx track lctx body
++    | .mdata _ body => inspectExpr before after mctx track lctx body
++    | .proj name index body =>
++      let some field := (getStructureFields after name).get? index | throw s!"Missing projection field {name}.{index}"
++      let some projector := getProjFnForField? after name field | throw s!"Missing projection dependency {name}.{field}"
++      inspectExpr before after mctx track lctx (.const projector [])
++      inspectExpr before after mctx track lctx body
++    | _ => pure ()
++
++  private partial def inspectContext (before : Environment) (after : Environment)
++      (mctx : MetavarContext) (track : Bool) (decl : MetavarDecl) : ScanM Unit := do
++    inspectExpr before after mctx track decl.lctx decl.type
++    for localDecl in decl.lctx do
++      inspectExpr before after mctx track decl.lctx (.fvar localDecl.fvarId)
++
++  private partial def inspectMVar (before : Environment) (after : Environment)
++      (mctx : MetavarContext) (track : Bool) (id : MVarId) : ScanM Unit := do
++    if (← get).activeMVars.contains id then throw s!"Cyclic metavariable assignment {id.name}"
++    unless (← get).mvars.contains (id, track) do
++      modify fun s => { s with mvars := s.mvars.insert (id, track) }
++      let some decl := mctx.findDecl? id | throw s!"Missing metavariable declaration {id.name}"
++      inspectContext before after mctx (track && !mctx.eAssignment.contains id && !mctx.dAssignment.contains id) decl
++      if let some value := mctx.eAssignment.find? id then
++        modify fun s => { s with activeMVars := s.activeMVars.insert id }
++        inspectExpr before after mctx track decl.lctx value
++        modify fun s => { s with activeMVars := s.activeMVars.erase id }
++      else if let some delayed := mctx.dAssignment.find? id then
++        let some pending := mctx.findDecl? delayed.mvarIdPending | throw "Missing delayed assignment target"
++        for value in delayed.fvars do inspectExpr before after mctx track pending.lctx value
++        modify fun s => { s with activeMVars := s.activeMVars.insert id }
++        inspectMVar before after mctx track delayed.mvarIdPending
++        modify fun s => { s with activeMVars := s.activeMVars.erase id }
++      else if track then
++        modify fun s => { s with unresolved := s.unresolved.push id }
++end
++
++/-- Inspect changed assignments, reachable dependencies and new local contexts.
++    Unresolved reachable holes become goals; existing dormant siblings keep their mode semantics. -/
++def validateTransition (before after : GoalState) (selected : MVarId) : Except String CheckedTransition := do
++  let action : ScanM Unit := do
++    inspectMVar before.trustedEnv after.env after.mctx true selected
++    for goal in before.goals do inspectMVar before.trustedEnv after.env after.mctx true goal
++    for goal in after.goals do inspectMVar before.trustedEnv after.env after.mctx true goal
++    let changed := after.mctx.eAssignment.foldl (init := #[]) fun acc id value =>
++      if (before.mctx.eAssignment.find? id).any (Expr.equal value) then acc else acc.push id
++    for id in changed do inspectMVar before.trustedEnv after.env after.mctx false id
++    let delayed := after.mctx.dAssignment.foldl (init := #[]) fun acc id value =>
++      match before.mctx.dAssignment.find? id with
++      | some old => if old.mvarIdPending == value.mvarIdPending && old.fvars == value.fvars then acc else acc.push id
++      | none => acc.push id
++    for id in delayed do inspectMVar before.trustedEnv after.env after.mctx false id
++    -- New contexts can contain admissions in let values even if the final proof ignores them.
++    let contexts := after.mctx.decls.foldl (init := #[]) fun acc id decl =>
++      if before.mctx.decls.contains id then acc else acc.push decl
++    for decl in contexts do inspectContext before.trustedEnv after.env after.mctx false decl
++    for id in after.savedState.term.elab.pendingMVars do
++      inspectMVar before.trustedEnv after.env after.mctx false id
++  let (_, evidence) ← action.run {}
++  let dormant := before.goals.filter (· != selected)
++  let conversion := after.convMVar?.map (fun (rhs, goal, siblings) => rhs :: goal :: siblings) |>.getD []
++  -- A retained conversion equation owns its evolving right-hand expression.
++  let conversion := after.goals.foldl (init := conversion) fun acc goal =>
++    match after.mctx.findDecl? goal with
++    | some decl =>
++      if (isLHSGoal? decl.type).isSome then
++        let (rhs, _) := instantiateMVarsCore after.mctx decl.type.consumeMData.appArg!
++        acc ++ (rhs.collectMVars {}).result.toList
++      else acc
++    | none => acc
++  let extra := evidence.unresolved.toList.filter fun id =>
++    !after.goals.contains id && !dormant.contains id && !conversion.contains id
++  let state := { after with savedState := {
++    after.savedState with tactic := { goals := after.goals ++ extra }
++  } }
++  return { state, hasSorry := evidence.hasSorry, hasUnsafe := evidence.hasUnsafe }
++
++end Pantograph
+diff --git a/Test/ContractFixtures.lean b/Test/ContractFixtures.lean
+new file mode 100644
+index 0000000..e0bf327
+--- /dev/null
++++ b/Test/ContractFixtures.lean
+@@ -0,0 +1,89 @@
++import Pantograph
++
++open Lean Elab Tactic
++
++/-- Test-only operation that reaches the unsafe scanner with an elaborated assignment. -/
++elab "contract_unsafe" : tactic => do
++  let name := `ContractFixtures.unsafeProof
++  let info : DefinitionVal := {
++    name, levelParams := [], type := mkConst ``True,
++    value := mkConst ``True.intro, hints := .opaque, safety := .unsafe
++  }
++  addDecl (.defnDecl info)
++  (← getMainGoal).assign (mkConst name)
++  setGoals []
++
++/-- A new safe dependency whose value contains an admission. -/
++elab "contract_dependency_sorry" : tactic => do
++  let value ← Meta.mkSorry (mkConst ``True) false
++  let name := `ContractFixtures.admittedProof
++  let info : DefinitionVal := {
++    name, levelParams := [], type := mkConst ``True,
++    value, hints := .opaque, safety := .safe
++  }
++  addDecl (.defnDecl info)
++  (← getMainGoal).assign (mkConst name)
++  setGoals []
++
++/-- Deliberately remove a reachable proof hole from the visible list. -/
++elab "contract_hidden_hole" : tactic => do
++  let goal ← getMainGoal
++  let hole ← Meta.mkFreshExprSyntheticOpaqueMVar (← goal.getType)
++  goal.assign hole
++  setGoals []
++
++/-- Mutate the environment and close the goal before reporting a logged error. -/
++elab "contract_failed_mutation" : tactic => do
++  let info : DefinitionVal := {
++    name := `ContractFixtures.failedMutation, levelParams := [], type := mkConst ``True,
++    value := mkConst ``True.intro, hints := .opaque, safety := .safe
++  }
++  addDecl (.defnDecl info)
++  (← getMainGoal).assign (mkConst ``True.intro)
++  setGoals []
++  discard <| Meta.inferType (mkConst `ContractFixtures.failedMutation)
++  logError "mutation must roll back"
++
++/-- Keep a newly introduced declaration in a partial state for a later tactic. -/
++elab "contract_store_admission" : tactic => do
++  let value ← Meta.mkSorry (mkConst ``True) false
++  addDecl (.defnDecl {
++    name := `ContractFixtures.storedAdmission, levelParams := [], type := mkConst ``True,
++    value, hints := .opaque, safety := .safe
++  })
++
++/-- A tagged diagnostic verifies that the wire kind comes from the message data. -/
++elab "contract_tagged_warning" : tactic => do
++  logWarning (.tagged `ContractFixtures.warningKind m!"tagged warning")
++
++/-- Reuse a failed declaration's name with a different type to test cache rollback. -/
++elab "contract_reuse_failed_name" : tactic => do
++  let name := `ContractFixtures.failedMutation
++  addDecl (.defnDecl {
++    name, levelParams := [], type := mkConst ``Nat,
++    value := mkNatLit 0, hints := .opaque, safety := .safe
++  })
++  unless (← Meta.inferType (mkConst name)).isConstOf ``Nat do
++    throwError "failed declaration type cache leaked"
++  (← getMainGoal).assign (mkConst name)
++  setGoals []
++
++/-- A delayed assignment whose pending proof was omitted from the goal list. -/
++elab "contract_delayed_hole" : tactic => do
++  let goal ← getMainGoal
++  let pending ← Meta.mkFreshExprSyntheticOpaqueMVar (← goal.getType)
++  assignDelayedMVar goal #[] pending.mvarId!
++  setGoals []
++
++/-- Missing assignment declarations must produce a named validation error. -/
++elab "contract_missing_assignment" : tactic => do
++  (← getMainGoal).assign (.mvar ⟨`ContractFixtures.missingAssignment⟩)
++  setGoals []
++
++/-- A reachable unresolved let value must survive a closed visible goal list. -/
++elab "contract_hidden_local_value" : tactic => withMainContext do
++  let goal ← getMainGoal
++  let hole ← Meta.mkFreshExprSyntheticOpaqueMVar (mkConst ``True)
++  Meta.withLetDecl `hiddenValue (mkConst ``True) hole fun value => do
++    goal.assign (← Meta.mkLetFVars #[value] value)
++  setGoals []
+diff --git a/Test/Validation.lean b/Test/Validation.lean
+new file mode 100644
+index 0000000..7612c84
+--- /dev/null
++++ b/Test/Validation.lean
+@@ -0,0 +1,155 @@
++import Test.Common
++import Test.ContractFixtures
++import Pantograph.Validation
++import Repl
++
++namespace Pantograph.Test.Validation
++open Lean Pantograph.Repl
++
++private def request (cmd : String) (fields : List (String × Json)) : MainM Json :=
++  Repl.execute { cmd, payload := Json.mkObj fields }
++
++private def start (expr : String) : MainM Nat := do
++  let result ← request "goal.start" [("expr", .str expr)]
++  match result.getObjValAs? Nat "stateId" with
++  | .ok id => pure id
++  | .error _ => throwError "goal.start failed: {result}"
++
++private def tactic (id : Nat) (text : String) (index : Nat := 0) : MainM Json :=
++  request "goal.tactic" [("stateId", toJson id), ("goalId", toJson index), ("tactic", .str text)]
++
++private def success (result : Json) : Bool :=
++  (result.getObjValAs? Nat "nextStateId").isOk &&
++  ((result.getObjVal? "validation").bind (·.getObjValAs? Bool "checked")).toOption == some true
++
++private def rejection (result : Json) : Bool :=
++  (result.getObjValAs? (Array String) "tacticErrors").isOk &&
++  !(result.getObjVal? "nextStateId").isOk &&
++  (result.getObjValAs? Bool "hasSorry").toOption == some false &&
++  (result.getObjValAs? Bool "hasUnsafe").toOption == some false
++
++private def goals (result : Json) : Array Json :=
++  result.getObjValAs? (Array Json) "goals" |>.toOption |>.getD #[]
++
++private def protocolTests : MainM LSpec.TestSeq := do
++  let mut tests := LSpec.TestSeq.done
++  let descriptor ← request "protocol.describe" []
++  tests := tests ++ LSpec.test "exact descriptor" (descriptor == toJson ({} : Protocol.ProtocolDescriptor))
++  let failedStart ← request "goal.start" [("expr", .str "(by run_tac Lean.logError \"start failure\"; exact True)")]
++  tests := tests ++ LSpec.test "logged start errors reject state allocation" ((failedStart.getObjValAs? String "error").toOption == some "elab")
++  tests := tests ++ LSpec.test "failed start allocated no state" ((← get).goalStates.isEmpty)
++  let root ← start "True"
++  let valid ← tactic root "trivial"
++  tests := tests ++ LSpec.test "valid completed transition" (success valid && (goals valid).isEmpty)
++  let skipped ← tactic root "skip"
++  tests := tests ++ LSpec.test "skip preserves the open goal" (success skipped && (goals skipped).size == 1)
++  let multiline ← start "∀ (p : Prop), p → p"
++  let result ← tactic multiline "intro p h\nexact h"
++  tests := tests ++ LSpec.test "complete multiline tactic sequence" (success result && (goals result).isEmpty)
++  let bad ← tactic root "trivial\nthis_is_not_a_tactic"
++  tests := tests ++ LSpec.test "trailing input rejected" ((bad.getObjValAs? String "parseError").isOk)
++  let bad ← tactic root "exact Nat.zero"
++  tests := tests ++ LSpec.test "ordinary type failure" (rejection bad)
++  let bad ← tactic root "run_tac Lean.logError \"capture error\" <;> trivial"
++  tests := tests ++ LSpec.test "logged error rejects completed tactic" (rejection bad)
++  let messages := bad.getObjValAs? (Array Protocol.Message) "messages" |>.toOption |>.getD #[]
++  tests := tests ++ LSpec.test "real error has source position" (messages.any fun m => m.pos.line == 1 && m.data == "capture error")
++  let bad ← tactic root "contract_failed_mutation"
++  tests := tests ++ LSpec.test "failed mutation rejected" (rejection bad)
++  let inspected ← request "env.inspect" [("name", .str "ContractFixtures.failedMutation")]
++  tests := tests ++ LSpec.test "failed environment mutation rolled back" ((inspected.getObjVal? "error").isOk)
++  let natRoot ← start "Nat"
++  discard <| tactic natRoot "contract_failed_mutation"
++  let reused ← tactic natRoot "contract_reuse_failed_name"
++  tests := tests ++ LSpec.test "failed declaration cache rolled back" (success reused && (goals reused).isEmpty)
++  let result ← tactic root "trivial"
++  tests := tests ++ LSpec.test "original state reusable after failures" (success result && (goals result).isEmpty)
++  let result ← tactic root "run_tac Lean.logWarning \"warning evidence\"\nrun_tac Lean.logInfo \"information evidence\"\ntrivial"
++  let messages := result.getObjValAs? (Array Protocol.Message) "messages" |>.toOption |>.getD #[]
++  tests := tests ++ LSpec.test "warning/information survive success" (success result &&
++    messages.any (fun m => m.severity == "warning" && m.data == "warning evidence") &&
++    messages.any (fun m => m.severity == "information" && m.data == "information evidence"))
++  let result ← tactic root "trivial"
++  tests := tests ++ LSpec.test "messages do not leak to following request" ((result.getObjValAs? (Array Protocol.Message) "messages").toOption == some #[])
++  for text in ["sorry", "exact (by sorry)", "have h : True := by sorry\nexact h", "contract_dependency_sorry"] do
++    let result ← tactic root text
++    tests := tests ++ LSpec.test s!"admission detected: {text}" (success result && (result.getObjValAs? Bool "hasSorry").toOption == some true)
++  let result ← tactic root "contract_unsafe"
++  tests := tests ++ LSpec.test "positive unsafe scanner evidence" (success result && (result.getObjValAs? Bool "hasUnsafe").toOption == some true)
++  let stored ← tactic root "contract_store_admission"
++  let storedId := stored.getObjValAs? Nat "nextStateId" |>.toOption |>.getD root
++  let used ← tactic storedId "exact ContractFixtures.storedAdmission"
++  tests := tests ++ LSpec.test "introduced declarations retain original trust boundary" (success used &&
++    (used.getObjValAs? Bool "hasSorry").toOption == some true)
++  let inspected ← request "env.inspect" [("name", .str "ContractFixtures.storedAdmission")]
++  tests := tests ++ LSpec.test "serialization does not leak successful environment mutations" ((inspected.getObjVal? "error").isOk)
++  let tagged ← tactic root "contract_tagged_warning"
++  let messages := tagged.getObjValAs? (Array Protocol.Message) "messages" |>.toOption |>.getD #[]
++  tests := tests ++ LSpec.test "message kind preserved" (messages.any fun m => m.kind == "ContractFixtures.warningKind")
++  let result ← tactic root "contract_hidden_hole"
++  tests := tests ++ LSpec.test "hidden reachable hole becomes a goal" (success result && (goals result).size == 1)
++  let id := result.getObjValAs? Nat "nextStateId" |>.toOption |>.getD root
++  let closed ← tactic id "trivial"
++  tests := tests ++ LSpec.test "restored hidden hole can be solved" (success closed && (goals closed).isEmpty)
++  let localHole ← tactic root "contract_hidden_local_value"
++  tests := tests ++ LSpec.test "hidden local value remains an obligation" (success localHole && (goals localHole).size == 1)
++  let delayed ← tactic root "contract_delayed_hole"
++  tests := tests ++ LSpec.test "delayed hole restored through the protocol" (success delayed && (goals delayed).size == 1)
++  let missing ← tactic root "contract_missing_assignment"
++  tests := tests ++ LSpec.test "missing assignment returns named validation error" ((missing.getObjValAs? String "error").toOption == some "validation" && !(missing.getObjVal? "nextStateId").isOk)
++  let conjunction ← start "True ∧ True"
++  let split ← tactic conjunction "constructor"
++  let id := split.getObjValAs? Nat "nextStateId" |>.toOption |>.getD conjunction
++  let second ← tactic id "trivial" 1
++  tests := tests ++ LSpec.test "nonzero selection preserves sibling" (success second && (goals second).size == 1)
++  let ids := (← get).goalStates.toList.map (·.1)
++  discard <| request "goal.delete" [("stateIds", toJson ids)]
++  let count ← request "stat" []
++  tests := tests ++ LSpec.test "all test allocations deleted" ((count.getObjValAs? Nat "nGoals").toOption == some 0)
++  return tests
++
++private def boundaryTests : Elab.TermElabM LSpec.TestSeq := do
++  let mut tests := LSpec.TestSeq.done
++  let state ← GoalState.create (mkConst ``True)
++  let sibling ← Meta.mkFreshExprSyntheticOpaqueMVar (mkConst ``True)
++  let state ← GoalState.createFromMVars [state.root, sibling.mvarId!] state.root
++  let .success next ← state.tryTacticM state.root (do
++      let value ← Meta.mkSorry (mkConst ``True) false
++      sibling.mvarId!.assign value
++      Elab.Tactic.setGoals [state.root]) | throwError "coupled tactic failed"
++  let checked := validateTransition state next state.root
++  tests := tests ++ LSpec.test "changed coupled assignment scanned" (checked.toOption.any (·.hasSorry))
++  let state ← GoalState.create (mkConst ``True)
++  let .success next ← state.tryTacticM state.root (do
++      let pending ← Meta.mkFreshExprSyntheticOpaqueMVar (mkConst ``True)
++      assignDelayedMVar state.root #[] pending.mvarId!
++      Elab.Tactic.setGoals []) | throwError "delayed tactic failed"
++  let checked := validateTransition state next state.root
++  tests := tests ++ LSpec.test "delayed pending obligation retained" (checked.toOption.any fun result => result.state.goals.length == 1)
++  let missing : MVarId := ⟨`ContractFixtures.missing⟩
++  let corrupted := { state with savedState := { state.savedState with tactic := { goals := [missing] } } }
++  tests := tests ++ LSpec.test "missing evidence produces validation failure" (!(validateTransition state corrupted state.root).isOk)
++  let cyclic := { state with savedState := { state.savedState with term := {
++    state.savedState.term with meta := { state.savedState.term.meta with meta := {
++      state.metaState with mctx := { state.mctx with eAssignment := state.mctx.eAssignment.insert state.root (.mvar state.root) }
++    } }
++  } } }
++  tests := tests ++ LSpec.test "cyclic assignments reject indeterminate evidence" (!(validateTransition state cyclic state.root).isOk)
++  logInfo "outer log"
++  let outer := (← getThe Core.State).messages
++  let .failure _ _ ← state.tryTacticM state.root (do
++      (← Elab.Tactic.getMainGoal).assign (mkConst ``True.intro)
++      logError "inner failure") | throwError "shared operation accepted logged error"
++  let current := (← getThe Core.State).messages
++  tests := tests ++ LSpec.test "outer message log restored" (current.toArray.size == outer.toArray.size)
++  tests := tests ++ LSpec.test "failed assignment restored" (!(← getMCtx).eAssignment.contains state.root)
++  return tests
++
++def suite (env : Environment) : List (String × IO LSpec.TestSeq) := [
++  ("Transition boundary", runTermElabMSeq env boundaryTests),
++  ("Protocol diagnostics and checks", do
++    let env ← importModules #[{ module := `Test.ContractFixtures }] {} (trustLevel := 1)
++    runCoreMSeq env (protocolTests.run { imports := ["Test.ContractFixtures"] } |>.run' {}))
++]
++
++end Pantograph.Test.Validation
+diff --git a/scripts/capture_repository_client_contract.py b/scripts/capture_repository_client_contract.py
+new file mode 100644
+index 0000000..925b77b
+--- /dev/null
++++ b/scripts/capture_repository_client_contract.py
+@@ -0,0 +1,220 @@
++#!/usr/bin/env python3
++"""Capture Stage 4 wire evidence and check it against the existing application codec.
++
++Run with the application's Python environment. Output must be a new directory.
++Historical captures are read as replay inputs and are never modified.
++"""
++from __future__ import annotations
++
++import argparse
++import asyncio
++import hashlib
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++
++BASE = "0dd5d2225e2d093f66a4b6231c1aa35004f2c8f3"
++
++
++async def capture(args):
++    repo = args.repo.resolve()
++    application = args.application.resolve()
++    fixtures = application / "maths_ai/gnn_inference/tests/fixtures/pantograph"
++    sys.path.insert(0, str(application))
++    from maths_ai.hybrid_reasoner.pantograph_protocol import (
++        decode_json_response, decode_response, decode_execution_goal,
++    )
++    from maths_ai.gnn_inference.atp_lean_gnn.graph import dag_fingerprint, model_goal_to_dag
++
++    assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip() == BASE
++    toolchain = (repo / "lean-toolchain").read_text().strip()
++    assert toolchain == (args.mathlib / "lean-toolchain").read_text().strip()
++    env = os.environ.copy()
++    mathlib_path = subprocess.check_output(
++        ["lake", "env", "printenv", "LEAN_PATH"], cwd=args.mathlib, text=True,
++    ).strip()
++    own_path = subprocess.check_output(
++        ["lake", "env", "printenv", "LEAN_PATH"], cwd=repo, text=True,
++    ).strip()
++    # Lake may return relative package paths; resolve them against each owning project.
++    def absolute_paths(value, owner):
++        return os.pathsep.join(str((owner / p).resolve()) if not Path(p).is_absolute() else p
++                               for p in value.split(os.pathsep) if p)
++    env["LEAN_PATH"] = absolute_paths(own_path, repo) + os.pathsep + absolute_paths(mathlib_path, args.mathlib)
++    repl = repo / ".lake/build/bin/repl"
++    proc = await asyncio.create_subprocess_exec(
++        "stdbuf", "-oL", str(repl), "Mathlib", "Test.ContractFixtures",
++        cwd=repo, env=env, stdin=asyncio.subprocess.PIPE,
++        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
++    )
++    stderr_task = asyncio.create_task(proc.stderr.read())
++    entries = []
++    allocated = set()
++    graph_checks = []
++    try:
++        ready = (await asyncio.wait_for(proc.stdout.readline(), 30)).decode().rstrip("\n")
++        assert ready == "ready.", ready
++
++        async def call(label, command, payload, *, owned=True):
++            line = command + " " + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
++            proc.stdin.write((line + "\n").encode())
++            await proc.stdin.drain()
++            response_line = (await asyncio.wait_for(proc.stdout.readline(), 30)).decode().rstrip("\n")
++            response = decode_json_response(response_line)
++            if owned:
++                decode_response(command, response)
++            entries.append(dict(label=label, command=command, request=payload,
++                                request_line=line, response_line=response_line, response=response))
++            for key in ("stateId", "nextStateId"):
++                if key in response:
++                    allocated.add(response[key])
++            if command == "goal.delete":
++                allocated.difference_update(payload["stateIds"])
++            return response
++
++        upstream = json.loads((fixtures / "upstream_pr1/capture.json").read_text())
++        golden = json.loads((fixtures / "canonical_graph_expectations.json").read_text())["goals"]
++        id_map = {}
++        renames = {
++            "unsupported_descriptor": "descriptor",
++            "admission_flag_present_without_validation": "checked_admission",
++            "logged_error_still_succeeds_without_diagnostics": "logged_error_rejected",
++        }
++        for old in upstream["interactions"]:
++            payload = dict(old["request"])
++            if "stateId" in payload:
++                payload["stateId"] = id_map.get(payload["stateId"], payload["stateId"])
++            if "stateIds" in payload:
++                payload["stateIds"] = sorted(allocated)
++            label = renames.get(old["label"], old["label"])
++            result = await call(label, old["command"], payload)
++            for key in ("stateId", "nextStateId"):
++                if key in old["response"] and key in result:
++                    id_map[old["response"][key]] = result[key]
++            if label in golden:
++                actual = result["goals"]
++                expected = golden[label]
++                assert len(actual) == len(expected)
++                for wire, target in zip(actual, expected):
++                    goal = decode_execution_goal(wire).goal
++                    canonical = goal.model_dump()
++                    assert canonical == target["canonical"], (label, canonical, target["canonical"])
++                    assert goal.state_fingerprint() == target["state_fingerprint"]
++                    dag = model_goal_to_dag(goal)
++                    assert dag_fingerprint(dag) == target["dag_fingerprint"]
++                    assert [node.as_dict() for node in dag.nodes] == target["nodes"]
++                    assert [list(edge) for edge in dag.edges] == target["edges"]
++                    assert dag.expression_root_id == target["expression_root_id"]
++                    assert dag.state_root_id == target["state_root_id"]
++                graph_checks.append(label)
++            if label == "logged_error_rejected":
++                assert result.get("tacticErrors") == ["capture error"]
++                assert "nextStateId" not in result
++                assert result["messages"][0]["data"] == "capture error"
++
++        root = (await call("validation_start", "goal.start", {"expr": "True"}))["stateId"]
++        for label, text, flag in [
++            ("skip", "skip", None),
++            ("warning_info", 'run_tac Lean.logWarning "warning evidence"\nrun_tac Lean.logInfo "information evidence"\ntrivial', None),
++            ("tagged_warning", "contract_tagged_warning", None),
++            ("nested_admission", "exact (by sorry)", "hasSorry"),
++            ("local_admission", "have h : True := by sorry\nexact h", "hasSorry"),
++            ("introduced_dependency_admission", "contract_dependency_sorry", "hasSorry"),
++            ("positive_unsafe", "contract_unsafe", "hasUnsafe"),
++            ("hidden_hole", "contract_hidden_hole", None),
++            ("delayed_hole", "contract_delayed_hole", None),
++            ("hidden_local_value", "contract_hidden_local_value", None),
++            ("missing_assignment", "contract_missing_assignment", "validation"),
++            ("failed_snapshot_mutation", "contract_failed_mutation", "failure"),
++            ("reuse_after_failure", "trivial", None),
++            ("trailing_input", "trivial\nthis_is_not_a_tactic", "parse"),
++        ]:
++            result = await call(label, "goal.tactic", {"stateId": root, "goalId": 0, "tactic": text})
++            if flag in ("hasSorry", "hasUnsafe"):
++                assert result[flag] is True and result["validation"]["checked"] is True
++            elif flag == "failure":
++                assert "tacticErrors" in result and "nextStateId" not in result
++            elif flag == "validation":
++                assert result.get("error") == "validation" and "nextStateId" not in result
++            elif flag == "parse":
++                assert "parseError" in result and "nextStateId" not in result
++            else:
++                assert "nextStateId" in result
++            if label in ("hidden_hole", "delayed_hole", "hidden_local_value"):
++                assert len(result["goals"]) == 1
++                solved = await call(label + "_solved", "goal.tactic", {
++                    "stateId": result["nextStateId"], "goalId": 0, "tactic": "trivial",
++                })
++                assert solved["goals"] == []
++            if label == "skip":
++                assert len(result["goals"]) == 1
++            if label == "warning_info":
++                assert {m["severity"] for m in result["messages"]} == {"warning", "information"}
++            if label == "reuse_after_failure":
++                assert result["messages"] == []
++        stored = await call("store_admission", "goal.tactic", {
++            "stateId": root, "goalId": 0, "tactic": "contract_store_admission",
++        })
++        used = await call("use_stored_admission", "goal.tactic", {
++            "stateId": stored["nextStateId"], "goalId": 0, "tactic": "exact ContractFixtures.storedAdmission",
++        })
++        assert used["hasSorry"] is True
++        identity = (await call("multiline_start", "goal.start", {"expr": "∀ (p : Prop), p → p"}))["stateId"]
++        result = await call("multiline_complete", "goal.tactic", {
++            "stateId": identity, "goalId": 0, "tactic": "intro p h\nexact h",
++        })
++        assert result["goals"] == []
++        # Exercise extra merged server operations without pretending they are owned-client APIs.
++        conv = (await call("conversion_start", "goal.start", {"expr": "(1 + 2) + 3 = 6"}))["stateId"]
++        result = await call("conversion_enter", "goal.tactic", {"stateId": conv, "mode": "conv"}, owned=False)
++        for index, text in enumerate(["lhs", "congr", "rfl", "rfl"]):
++            result = await call(f"conversion_step_{index}", "goal.tactic", {
++                "stateId": result["nextStateId"], "goalId": 0, "tactic": text,
++            }, owned=False)
++        assert [g["fragment"] for g in result["goals"]] == ["tactic"]
++        await call("validation_delete_all", "goal.delete", {"stateIds": sorted(allocated)})
++        assert (await call("validation_final_stat", "stat", {}))["nGoals"] == 0
++        proc.stdin.close()
++        await asyncio.wait_for(proc.wait(), 10)
++        stderr = (await stderr_task).decode()
++        assert proc.returncode == 0, stderr
++        args.output.mkdir(parents=True, exist_ok=False)
++        artifact = dict(kind="stage4-companion-live-capture", readiness_line=ready,
++                        interactions=entries, graph_checks=graph_checks,
++                        exit_code=proc.returncode, stderr=stderr,
++                        subprocess_reaped=True, final_allocations=len(allocated))
++        (args.output / "capture.json").write_text(json.dumps(artifact, ensure_ascii=False, indent=2) + "\n")
++        provenance = dict(base_commit=BASE, toolchain=toolchain,
++                          lean_version=subprocess.check_output(["lake", "env", "lean", "--version"], cwd=repo, text=True).strip(),
++                          repl_path=str(repl), repl_sha256=hashlib.sha256(repl.read_bytes()).hexdigest(),
++                          imports=["Mathlib", "Test.ContractFixtures"], lean_path=env["LEAN_PATH"],
++                          mathlib_expected_pin="29dcec074de168ac2bf835a77ef68bbe069194c5",
++                          mathlib_pin_verification="archive has no Git metadata; expected deployment pin",
++                          build_cache="copied reference archive cache; changed targets rebuilt",
++                          python_executable=sys.executable,
++                          decoder="existing revision-2 application codec", exchanges=len(entries),
++                          graph_checks=graph_checks, initial_state_count=0, final_state_count=0,
++                          subprocess_reaped=True, complete_theorem_certification=False)
++        (args.output / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
++        print(json.dumps(dict(exchanges=len(entries), graph_checks=graph_checks, output=str(args.output))))
++    finally:
++        if proc.returncode is None:
++            proc.kill()
++            await proc.wait()
++        if not stderr_task.done():
++            await stderr_task
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--repo", type=Path, default=Path.cwd())
++    parser.add_argument("--application", type=Path, required=True)
++    parser.add_argument("--mathlib", type=Path, required=True)
++    parser.add_argument("--output", type=Path, required=True)
++    asyncio.run(capture(parser.parse_args()))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/doc/repository_client_contract.md b/doc/repository_client_contract.md
+new file mode 100644
+index 0000000..e505905
+--- /dev/null
++++ b/doc/repository_client_contract.md
+@@ -0,0 +1,82 @@
++# Repository-owned client companion contract
++
++Stage 4 extends merged PR #1 at
++`0dd5d2225e2d093f66a4b6231c1aa35004f2c8f3` on `client_centric_repo`.
++The Lean toolchain and Mathlib deployment pin remain unchanged.
++
++`protocol.describe {}` identifies `maths-ai-pantograph`, protocol version 1,
++model S-expression version 1, transition validation version 1, message version 1,
++`explicit-focused-v1` goal selection, and `string-array-v1` tactic errors.
++The planning document's contract revision 2 is not a runtime compatibility mode.
++
++Successful `goal.tactic` responses retain `nextStateId`, `goals`, `messages`,
++`hasSorry`, and `hasUnsafe`. They also carry
++`validation: {version: 1, scope: "transition-expressions", checked: true}`.
++The metadata states that the defined expression checks completed. A positive
++admission or unsafe flag remains a successful allocation for the client to delete
++before rejecting that candidate. Missing or cyclic evidence returns a command
++error with category `validation` and allocates no result state.
++
++The shared operation transaction captures diagnostics and restores its caller's
++meta, elaborator, environment, message, trace, information, and declaration-cache
++state. Fresh-name counters remain monotonic. Logged errors reject execution even
++when tactics return normally. Thrown errors retain their diagnostics. Warnings
++and information survive success. Tagged messages retain their kind. Source
++strings use their real source maps; unavailable positions are exactly `(0, 0)`.
++Snapshot serialization and diagnostics also restore their caller.
++
++The parser runs full tactic or conversion sequences with end-of-input checking.
++Deferred synthetic elaboration runs inside the transaction. Default synthesis
++resolves ordinary implicit arguments. Partial synthesis runs deferred tactics
++while permitting unresolved typeclass obligations. Reachable unresolved holes
++remain goals. This applies to goal initialization as well as subsequent operations.
++
++Validation inspects the selected goal, input and returned goals, new or changed
++ordinary and delayed assignments, new local contexts, and pending synthetic
++expressions. It follows ordinary assignments and delayed pending assignments,
++local types and values, constant dependencies, and projection dependencies.
++Admission scanning uses elaborated terms rather than tactic strings. Unsafe
++scanning concerns resulting proof dependencies rather than the implementation
++of the tactic elaborator.
++
++Each state retains its original trust environment. Dependency traversal stops at
++that environment but still checks directly referenced constants for unsafe status.
++New reachable declarations have their types and values scanned recursively,
++including declarations retained from earlier transitions. Imported Mathlib
++remains the trust basis. This does not audit all imported axioms or kernel-certify
++an assembled theorem reconstructed from independent search nodes.
++
++Safety scanning covers changed assignments even when they are no longer visible.
++Obligation retention follows the selected, input and returned goals and their
++reachable expressions. Discarded elaboration variables are not all promoted to
++user goals. Existing dormant siblings retain manual-mode behavior. A retained
++conversion equation owns its evolving right-hand placeholders until conversion
++exit; unresolved holes after exit remain obligations. Cyclic expression
++assignments and missing declarations fail validation.
++
++All existing structured operations use the shared transaction: assignment,
++have/let/define, calc, motivated application, no-confusion, and conversion
++entry/exit. The merged omitted-index default, nonzero selection, sibling resumption,
++mode metadata and automatic final-conversion exit remain supported. Repeated
++references to the same resumed goal are removed while preserving order.
++
++The model serializer's expression normalization, fields, binder roles and local
++indices are unchanged. Its snapshot reads now restore their caller. Complete
++sequence parsing and synthetic elaboration can change fresh internal names;
++normalized expressions, graph fingerprints, node features and edges retain their
++canonical meaning.
++
++Verification: `lake build repl Test.ContractFixtures` and `lake test` pass.
++The suite contains 299 assertions, including 37 Stage 4 assertions. Existing
++Python codec, reconciliation, environment and model tests report 316 passes.
++The final diagnostic records 61 raw Mathlib exchanges against the existing codec,
++four unchanged canonical graph goldens, zero final allocations, and confirmed
++subprocess reaping. The sandboxed diagnostic's shutdown timeout is not counted
++as a pass; the recorded final capture ran outside that sandbox.
++
++The tracked patch, source hashes, executable hash and live evidence are in
++`pantograph_backport/`. The build reused a copied archive dependency/build cache
++and rebuilt changed targets. Stage 7's fresh release reproduction remains pending.
++Stage 5 actual-client integration, Stage 6 production migration, and Stage 8
++RL/deployment validation remain pending. No fork publication, dependency migration
++or RL launch is part of Stage 4.

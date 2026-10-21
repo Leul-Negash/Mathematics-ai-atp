@@ -1,0 +1,1695 @@
+{
+  "kind": "stage4-companion-live-capture",
+  "readiness_line": "ready.",
+  "interactions": [
+    {
+      "label": "options_set",
+      "command": "options.set",
+      "request": {
+        "printJsonPretty": false,
+        "printExprPretty": true,
+        "printExprAST": true,
+        "printExprModelAST": true,
+        "noRepeat": false,
+        "automaticMode": true
+      },
+      "request_line": "options.set {\"printJsonPretty\":false,\"printExprPretty\":true,\"printExprAST\":true,\"printExprModelAST\":true,\"noRepeat\":false,\"automaticMode\":true}",
+      "response_line": "{}",
+      "response": {}
+    },
+    {
+      "label": "options_print",
+      "command": "options.print",
+      "request": {},
+      "request_line": "options.print {}",
+      "response_line": "{\"printJsonPretty\":false,\"printImplementationDetailHyps\":false,\"printExprPretty\":true,\"printExprModelAST\":true,\"printExprAST\":true,\"printDependentMVars\":false,\"printAuxDecls\":false,\"noRepeat\":false,\"automaticMode\":true}",
+      "response": {
+        "printJsonPretty": false,
+        "printImplementationDetailHyps": false,
+        "printExprPretty": true,
+        "printExprModelAST": true,
+        "printExprAST": true,
+        "printDependentMVars": false,
+        "printAuxDecls": false,
+        "noRepeat": false,
+        "automaticMode": true
+      }
+    },
+    {
+      "label": "descriptor",
+      "command": "protocol.describe",
+      "request": {},
+      "request_line": "protocol.describe {}",
+      "response_line": "{\"transitionValidationVersion\":1,\"tacticErrorsFormat\":\"string-array-v1\",\"protocolVersion\":1,\"protocol\":\"maths-ai-pantograph\",\"modelSexpVersion\":1,\"messageVersion\":1,\"goalSelection\":\"explicit-focused-v1\"}",
+      "response": {
+        "transitionValidationVersion": 1,
+        "tacticErrorsFormat": "string-array-v1",
+        "protocolVersion": 1,
+        "protocol": "maths-ai-pantograph",
+        "modelSexpVersion": 1,
+        "messageVersion": 1,
+        "goalSelection": "explicit-focused-v1"
+      }
+    },
+    {
+      "label": "initial_stat",
+      "command": "stat",
+      "request": {},
+      "request_line": "stat {}",
+      "response_line": "{\"nGoals\":0}",
+      "response": {
+        "nGoals": 0
+      }
+    },
+    {
+      "label": "identity_start",
+      "command": "goal.start",
+      "request": {
+        "expr": "∀ (p : Prop), p → p"
+      },
+      "request_line": "goal.start {\"expr\":\"∀ (p : Prop), p → p\"}",
+      "response_line": "{\"stateId\":0,\"root\":\"_uniq.7\"}",
+      "response": {
+        "stateId": 0,
+        "root": "_uniq.7"
+      }
+    },
+    {
+      "label": "identity_intro",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 0,
+        "goalId": 0,
+        "tactic": "intro p h"
+      },
+      "request_line": "goal.tactic {\"stateId\":0,\"goalId\":0,\"tactic\":\"intro p h\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":1,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[{\"userName\":\"p\",\"type\":{\"sexp\":\"(:sort 0)\",\"pp\":\"Prop\",\"modelSexpVersion\":1,\"modelSexp\":\"(:sort Prop)\"},\"name\":\"_uniq.8\",\"isLet\":false,\"isInstance\":false,\"isInaccessible\":false,\"contextIndex\":0,\"binderRole\":\":explicit\"},{\"userName\":\"h\",\"type\":{\"sexp\":\"(:fv _uniq.8)\",\"pp\":\"p\",\"modelSexpVersion\":1,\"modelSexp\":\"(:fv FV0)\"},\"name\":\"_uniq.11\",\"isLet\":false,\"isInstance\":false,\"isInaccessible\":false,\"contextIndex\":1,\"binderRole\":\":explicit\"}],\"target\":{\"sexp\":\"(:fv _uniq.8)\",\"pp\":\"p\",\"modelSexpVersion\":1,\"modelSexp\":\"(:fv FV0)\"},\"name\":\"_uniq.12\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 1,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [
+              {
+                "userName": "p",
+                "type": {
+                  "sexp": "(:sort 0)",
+                  "pp": "Prop",
+                  "modelSexpVersion": 1,
+                  "modelSexp": "(:sort Prop)"
+                },
+                "name": "_uniq.8",
+                "isLet": false,
+                "isInstance": false,
+                "isInaccessible": false,
+                "contextIndex": 0,
+                "binderRole": ":explicit"
+              },
+              {
+                "userName": "h",
+                "type": {
+                  "sexp": "(:fv _uniq.8)",
+                  "pp": "p",
+                  "modelSexpVersion": 1,
+                  "modelSexp": "(:fv FV0)"
+                },
+                "name": "_uniq.11",
+                "isLet": false,
+                "isInstance": false,
+                "isInaccessible": false,
+                "contextIndex": 1,
+                "binderRole": ":explicit"
+              }
+            ],
+            "target": {
+              "sexp": "(:fv _uniq.8)",
+              "pp": "p",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:fv FV0)"
+            },
+            "name": "_uniq.12",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "tactic_failure",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 1,
+        "goalId": 0,
+        "tactic": "exact True.intro"
+      },
+      "request_line": "goal.tactic {\"stateId\":1,\"goalId\":0,\"tactic\":\"exact True.intro\"}",
+      "response_line": "{\"tacticErrors\":[\"type mismatch\\n  True.intro\\nhas type\\n  True : Prop\\nbut is expected to have type\\n  p : Prop\"],\"messages\":[{\"severity\":\"error\",\"pos\":{\"line\":1,\"column\":0},\"kind\":\"[anonymous]\",\"endPos\":{\"line\":1,\"column\":16},\"data\":\"type mismatch\\n  True.intro\\nhas type\\n  True : Prop\\nbut is expected to have type\\n  p : Prop\"}],\"hasUnsafe\":false,\"hasSorry\":false}",
+      "response": {
+        "tacticErrors": [
+          "type mismatch\n  True.intro\nhas type\n  True : Prop\nbut is expected to have type\n  p : Prop"
+        ],
+        "messages": [
+          {
+            "severity": "error",
+            "pos": {
+              "line": 1,
+              "column": 0
+            },
+            "kind": "[anonymous]",
+            "endPos": {
+              "line": 1,
+              "column": 16
+            },
+            "data": "type mismatch\n  True.intro\nhas type\n  True : Prop\nbut is expected to have type\n  p : Prop"
+          }
+        ],
+        "hasUnsafe": false,
+        "hasSorry": false
+      }
+    },
+    {
+      "label": "parse_failure",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 1,
+        "goalId": 0,
+        "tactic": "("
+      },
+      "request_line": "goal.tactic {\"stateId\":1,\"goalId\":0,\"tactic\":\"(\"}",
+      "response_line": "{\"parseError\":\"<pantograph>:1:1: unexpected end of input; expected '{'\",\"messages\":[{\"severity\":\"error\",\"pos\":{\"line\":0,\"column\":0},\"kind\":\"[anonymous]\",\"data\":\"<pantograph>:1:1: unexpected end of input; expected '{'\"}],\"hasUnsafe\":false,\"hasSorry\":false}",
+      "response": {
+        "parseError": "<pantograph>:1:1: unexpected end of input; expected '{'",
+        "messages": [
+          {
+            "severity": "error",
+            "pos": {
+              "line": 0,
+              "column": 0
+            },
+            "kind": "[anonymous]",
+            "data": "<pantograph>:1:1: unexpected end of input; expected '{'"
+          }
+        ],
+        "hasUnsafe": false,
+        "hasSorry": false
+      }
+    },
+    {
+      "label": "delete_parent",
+      "command": "goal.delete",
+      "request": {
+        "stateIds": [
+          0,
+          1
+        ]
+      },
+      "request_line": "goal.delete {\"stateIds\":[0,1]}",
+      "response_line": "{}",
+      "response": {}
+    },
+    {
+      "label": "identity_after_parent_delete",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 1,
+        "goalId": 0,
+        "tactic": "exact h"
+      },
+      "request_line": "goal.tactic {\"stateId\":1,\"goalId\":0,\"tactic\":\"exact h\"}",
+      "response_line": "{\"error\":\"index\",\"desc\":\"Invalid state index 1\"}",
+      "response": {
+        "error": "index",
+        "desc": "Invalid state index 1"
+      }
+    },
+    {
+      "label": "identity_alternative",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 1,
+        "goalId": 0,
+        "tactic": "assumption"
+      },
+      "request_line": "goal.tactic {\"stateId\":1,\"goalId\":0,\"tactic\":\"assumption\"}",
+      "response_line": "{\"error\":\"index\",\"desc\":\"Invalid state index 1\"}",
+      "response": {
+        "error": "index",
+        "desc": "Invalid state index 1"
+      }
+    },
+    {
+      "label": "conjunction_start",
+      "command": "goal.start",
+      "request": {
+        "expr": "True ∧ True"
+      },
+      "request_line": "goal.start {\"expr\":\"True ∧ True\"}",
+      "response_line": "{\"stateId\":2,\"root\":\"_uniq.15\"}",
+      "response": {
+        "stateId": 2,
+        "root": "_uniq.15"
+      }
+    },
+    {
+      "label": "conjunction_split",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 2,
+        "goalId": 0,
+        "tactic": "constructor"
+      },
+      "request_line": "goal.tactic {\"stateId\":2,\"goalId\":0,\"tactic\":\"constructor\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":3,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"userName\":\"left\",\"target\":{\"sexp\":\"(:c True)\",\"pp\":\"True\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c True)\"},\"name\":\"_uniq.22\",\"isConversion\":false,\"fragment\":\"tactic\"},{\"vars\":[],\"userName\":\"right\",\"target\":{\"sexp\":\"(:c True)\",\"pp\":\"True\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c True)\"},\"name\":\"_uniq.23\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 3,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "userName": "left",
+            "target": {
+              "sexp": "(:c True)",
+              "pp": "True",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:c True)"
+            },
+            "name": "_uniq.22",
+            "isConversion": false,
+            "fragment": "tactic"
+          },
+          {
+            "vars": [],
+            "userName": "right",
+            "target": {
+              "sexp": "(:c True)",
+              "pp": "True",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:c True)"
+            },
+            "name": "_uniq.23",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "nonzero_index",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 3,
+        "goalId": 1,
+        "tactic": "trivial"
+      },
+      "request_line": "goal.tactic {\"stateId\":3,\"goalId\":1,\"tactic\":\"trivial\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":4,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"userName\":\"left\",\"target\":{\"sexp\":\"(:c True)\",\"pp\":\"True\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c True)\"},\"name\":\"_uniq.22\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 4,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "userName": "left",
+            "target": {
+              "sexp": "(:c True)",
+              "pp": "True",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:c True)"
+            },
+            "name": "_uniq.22",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "finish_conjunction",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 4,
+        "goalId": 0,
+        "tactic": "trivial"
+      },
+      "request_line": "goal.tactic {\"stateId\":4,\"goalId\":0,\"tactic\":\"trivial\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":5,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 5,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": []
+      }
+    },
+    {
+      "label": "focused_all_goals",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 3,
+        "goalId": 0,
+        "tactic": "all_goals trivial"
+      },
+      "request_line": "goal.tactic {\"stateId\":3,\"goalId\":0,\"tactic\":\"all_goals trivial\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":6,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"userName\":\"right\",\"target\":{\"sexp\":\"(:c True)\",\"pp\":\"True\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c True)\"},\"name\":\"_uniq.23\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 6,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "userName": "right",
+            "target": {
+              "sexp": "(:c True)",
+              "pp": "True",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:c True)"
+            },
+            "name": "_uniq.23",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "instance_start",
+      "command": "goal.start",
+      "request": {
+        "expr": "∀ (α : Type) [inst : Inhabited α] (x : α), x = x"
+      },
+      "request_line": "goal.start {\"expr\":\"∀ (α : Type) [inst : Inhabited α] (x : α), x = x\"}",
+      "response_line": "{\"stateId\":7,\"root\":\"_uniq.73\"}",
+      "response": {
+        "stateId": 7,
+        "root": "_uniq.73"
+      }
+    },
+    {
+      "label": "instance_intro",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 7,
+        "goalId": 0,
+        "tactic": "intro α inst x"
+      },
+      "request_line": "goal.tactic {\"stateId\":7,\"goalId\":0,\"tactic\":\"intro α inst x\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":8,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[{\"userName\":\"α\",\"type\":{\"sexp\":\"(:sort 1)\",\"pp\":\"Type\",\"modelSexpVersion\":1,\"modelSexp\":\"(:sort Type)\"},\"name\":\"_uniq.74\",\"isLet\":false,\"isInstance\":false,\"isInaccessible\":false,\"contextIndex\":0,\"binderRole\":\":explicit\"},{\"userName\":\"inst\",\"type\":{\"sexp\":\"((:c Inhabited) (:fv _uniq.74))\",\"pp\":\"Inhabited α\",\"modelSexpVersion\":1,\"modelSexp\":\"(:app (:c Inhabited) (:arg :explicit 0 (:fv FV0)))\"},\"name\":\"_uniq.77\",\"isLet\":false,\"isInstance\":true,\"isInaccessible\":false,\"contextIndex\":1,\"binderRole\":\":instance-implicit\"},{\"userName\":\"x\",\"type\":{\"sexp\":\"(:fv _uniq.74)\",\"pp\":\"α\",\"modelSexpVersion\":1,\"modelSexp\":\"(:fv FV0)\"},\"name\":\"_uniq.80\",\"isLet\":false,\"isInstance\":false,\"isInaccessible\":false,\"contextIndex\":2,\"binderRole\":\":explicit\"}],\"target\":{\"sexp\":\"((:c Eq) (:fv _uniq.74) (:fv _uniq.80) (:fv _uniq.80))\",\"pp\":\"x = x\",\"modelSexpVersion\":1,\"modelSexp\":\"(:app (:c Eq) (:arg :implicit-type 0 (:fv FV0)) (:arg :explicit 1 (:fv FV2)) (:arg :explicit 2 (:fv FV2)))\"},\"name\":\"_uniq.81\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 8,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [
+              {
+                "userName": "α",
+                "type": {
+                  "sexp": "(:sort 1)",
+                  "pp": "Type",
+                  "modelSexpVersion": 1,
+                  "modelSexp": "(:sort Type)"
+                },
+                "name": "_uniq.74",
+                "isLet": false,
+                "isInstance": false,
+                "isInaccessible": false,
+                "contextIndex": 0,
+                "binderRole": ":explicit"
+              },
+              {
+                "userName": "inst",
+                "type": {
+                  "sexp": "((:c Inhabited) (:fv _uniq.74))",
+                  "pp": "Inhabited α",
+                  "modelSexpVersion": 1,
+                  "modelSexp": "(:app (:c Inhabited) (:arg :explicit 0 (:fv FV0)))"
+                },
+                "name": "_uniq.77",
+                "isLet": false,
+                "isInstance": true,
+                "isInaccessible": false,
+                "contextIndex": 1,
+                "binderRole": ":instance-implicit"
+              },
+              {
+                "userName": "x",
+                "type": {
+                  "sexp": "(:fv _uniq.74)",
+                  "pp": "α",
+                  "modelSexpVersion": 1,
+                  "modelSexp": "(:fv FV0)"
+                },
+                "name": "_uniq.80",
+                "isLet": false,
+                "isInstance": false,
+                "isInaccessible": false,
+                "contextIndex": 2,
+                "binderRole": ":explicit"
+              }
+            ],
+            "target": {
+              "sexp": "((:c Eq) (:fv _uniq.74) (:fv _uniq.80) (:fv _uniq.80))",
+              "pp": "x = x",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:app (:c Eq) (:arg :implicit-type 0 (:fv FV0)) (:arg :explicit 1 (:fv FV2)) (:arg :explicit 2 (:fv FV2)))"
+            },
+            "name": "_uniq.81",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "let_start",
+      "command": "goal.start",
+      "request": {
+        "expr": "∀ (n : Nat), let x := n; x = x"
+      },
+      "request_line": "goal.start {\"expr\":\"∀ (n : Nat), let x := n; x = x\"}",
+      "response_line": "{\"stateId\":9,\"root\":\"_uniq.96\"}",
+      "response": {
+        "stateId": 9,
+        "root": "_uniq.96"
+      }
+    },
+    {
+      "label": "let_intro",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 9,
+        "goalId": 0,
+        "tactic": "intro n x"
+      },
+      "request_line": "goal.tactic {\"stateId\":9,\"goalId\":0,\"tactic\":\"intro n x\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":10,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[{\"userName\":\"n\",\"type\":{\"sexp\":\"(:c Nat)\",\"pp\":\"ℕ\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c Nat)\"},\"name\":\"_uniq.97\",\"isLet\":false,\"isInstance\":false,\"isInaccessible\":false,\"contextIndex\":0,\"binderRole\":\":explicit\"},{\"value\":{\"sexp\":\"(:fv _uniq.97)\",\"pp\":\"n\",\"modelSexpVersion\":1,\"modelSexp\":\"(:fv FV0)\"},\"userName\":\"x\",\"type\":{\"sexp\":\"(:c Nat)\",\"pp\":\"ℕ\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c Nat)\"},\"name\":\"_uniq.100\",\"isLet\":true,\"isInstance\":false,\"isInaccessible\":false,\"contextIndex\":1,\"binderRole\":\":let\"}],\"target\":{\"sexp\":\"((:c Eq) (:c Nat) (:fv _uniq.100) (:fv _uniq.100))\",\"pp\":\"x = x\",\"modelSexpVersion\":1,\"modelSexp\":\"(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:fv FV1)) (:arg :explicit 2 (:fv FV1)))\"},\"name\":\"_uniq.101\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 10,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [
+              {
+                "userName": "n",
+                "type": {
+                  "sexp": "(:c Nat)",
+                  "pp": "ℕ",
+                  "modelSexpVersion": 1,
+                  "modelSexp": "(:c Nat)"
+                },
+                "name": "_uniq.97",
+                "isLet": false,
+                "isInstance": false,
+                "isInaccessible": false,
+                "contextIndex": 0,
+                "binderRole": ":explicit"
+              },
+              {
+                "value": {
+                  "sexp": "(:fv _uniq.97)",
+                  "pp": "n",
+                  "modelSexpVersion": 1,
+                  "modelSexp": "(:fv FV0)"
+                },
+                "userName": "x",
+                "type": {
+                  "sexp": "(:c Nat)",
+                  "pp": "ℕ",
+                  "modelSexpVersion": 1,
+                  "modelSexp": "(:c Nat)"
+                },
+                "name": "_uniq.100",
+                "isLet": true,
+                "isInstance": false,
+                "isInaccessible": false,
+                "contextIndex": 1,
+                "binderRole": ":let"
+              }
+            ],
+            "target": {
+              "sexp": "((:c Eq) (:c Nat) (:fv _uniq.100) (:fv _uniq.100))",
+              "pp": "x = x",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:fv FV1)) (:arg :explicit 2 (:fv FV1)))"
+            },
+            "name": "_uniq.101",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "truth_start",
+      "command": "goal.start",
+      "request": {
+        "expr": "True"
+      },
+      "request_line": "goal.start {\"expr\":\"True\"}",
+      "response_line": "{\"stateId\":11,\"root\":\"_uniq.107\"}",
+      "response": {
+        "stateId": 11,
+        "root": "_uniq.107"
+      }
+    },
+    {
+      "label": "omitted_goal_id_defaults_to_zero",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 11,
+        "tactic": "trivial"
+      },
+      "request_line": "goal.tactic {\"stateId\":11,\"tactic\":\"trivial\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":12,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 12,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": []
+      }
+    },
+    {
+      "label": "checked_admission",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 11,
+        "goalId": 0,
+        "tactic": "sorry"
+      },
+      "request_line": "goal.tactic {\"stateId\":11,\"goalId\":0,\"tactic\":\"sorry\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":13,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":true,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 13,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": true,
+        "goals": []
+      }
+    },
+    {
+      "label": "logged_error_rejected",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 11,
+        "goalId": 0,
+        "tactic": "run_tac Lean.logError \"capture error\" <;> trivial"
+      },
+      "request_line": "goal.tactic {\"stateId\":11,\"goalId\":0,\"tactic\":\"run_tac Lean.logError \\\"capture error\\\" <;> trivial\"}",
+      "response_line": "{\"tacticErrors\":[\"capture error\"],\"messages\":[{\"severity\":\"error\",\"pos\":{\"line\":1,\"column\":0},\"kind\":\"[anonymous]\",\"endPos\":{\"line\":1,\"column\":37},\"data\":\"capture error\"}],\"hasUnsafe\":false,\"hasSorry\":false}",
+      "response": {
+        "tacticErrors": [
+          "capture error"
+        ],
+        "messages": [
+          {
+            "severity": "error",
+            "pos": {
+              "line": 1,
+              "column": 0
+            },
+            "kind": "[anonymous]",
+            "endPos": {
+              "line": 1,
+              "column": 37
+            },
+            "data": "capture error"
+          }
+        ],
+        "hasUnsafe": false,
+        "hasSorry": false
+      }
+    },
+    {
+      "label": "valid_truth",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 11,
+        "goalId": 0,
+        "tactic": "trivial"
+      },
+      "request_line": "goal.tactic {\"stateId\":11,\"goalId\":0,\"tactic\":\"trivial\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":14,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 14,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": []
+      }
+    },
+    {
+      "label": "goal_parse_error",
+      "command": "goal.start",
+      "request": {
+        "expr": "("
+      },
+      "request_line": "goal.start {\"expr\":\"(\"}",
+      "response_line": "{\"error\":\"parsing\",\"desc\":\"<stdin>:1:1: unexpected end of input; expected ')', '_', '↑', '↥', '⇑' or identifier\"}",
+      "response": {
+        "error": "parsing",
+        "desc": "<stdin>:1:1: unexpected end of input; expected ')', '_', '↑', '↥', '⇑' or identifier"
+      }
+    },
+    {
+      "label": "goal_elab_error",
+      "command": "goal.start",
+      "request": {
+        "expr": "NoSuchCaptureType"
+      },
+      "request_line": "goal.start {\"expr\":\"NoSuchCaptureType\"}",
+      "response_line": "{\"error\":\"elab\",\"desc\":\"unknown identifier 'NoSuchCaptureType'\"}",
+      "response": {
+        "error": "elab",
+        "desc": "unknown identifier 'NoSuchCaptureType'"
+      }
+    },
+    {
+      "label": "invalid_state",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 999999999,
+        "goalId": 0,
+        "tactic": "skip"
+      },
+      "request_line": "goal.tactic {\"stateId\":999999999,\"goalId\":0,\"tactic\":\"skip\"}",
+      "response_line": "{\"error\":\"index\",\"desc\":\"Invalid state index 999999999\"}",
+      "response": {
+        "error": "index",
+        "desc": "Invalid state index 999999999"
+      }
+    },
+    {
+      "label": "invalid_goal",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 11,
+        "goalId": 99,
+        "tactic": "skip"
+      },
+      "request_line": "goal.tactic {\"stateId\":11,\"goalId\":99,\"tactic\":\"skip\"}",
+      "response_line": "{\"error\":\"index\",\"desc\":\"Invalid goal index 99\"}",
+      "response": {
+        "error": "index",
+        "desc": "Invalid goal index 99"
+      }
+    },
+    {
+      "label": "delete_all",
+      "command": "goal.delete",
+      "request": {
+        "stateIds": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14
+        ]
+      },
+      "request_line": "goal.delete {\"stateIds\":[2,3,4,5,6,7,8,9,10,11,12,13,14]}",
+      "response_line": "{}",
+      "response": {}
+    },
+    {
+      "label": "final_stat",
+      "command": "stat",
+      "request": {},
+      "request_line": "stat {}",
+      "response_line": "{\"nGoals\":0}",
+      "response": {
+        "nGoals": 0
+      }
+    },
+    {
+      "label": "validation_start",
+      "command": "goal.start",
+      "request": {
+        "expr": "True"
+      },
+      "request_line": "goal.start {\"expr\":\"True\"}",
+      "response_line": "{\"stateId\":15,\"root\":\"_uniq.595\"}",
+      "response": {
+        "stateId": 15,
+        "root": "_uniq.595"
+      }
+    },
+    {
+      "label": "skip",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "skip"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"skip\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":16,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"target\":{\"sexp\":\"(:c True)\",\"pp\":\"True\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c True)\"},\"name\":\"_uniq.595\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 16,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "target": {
+              "sexp": "(:c True)",
+              "pp": "True",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:c True)"
+            },
+            "name": "_uniq.595",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "warning_info",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "run_tac Lean.logWarning \"warning evidence\"\nrun_tac Lean.logInfo \"information evidence\"\ntrivial"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"run_tac Lean.logWarning \\\"warning evidence\\\"\\nrun_tac Lean.logInfo \\\"information evidence\\\"\\ntrivial\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":17,\"messages\":[{\"severity\":\"warning\",\"pos\":{\"line\":1,\"column\":0},\"kind\":\"[anonymous]\",\"endPos\":{\"line\":1,\"column\":42},\"data\":\"warning evidence\"},{\"severity\":\"information\",\"pos\":{\"line\":2,\"column\":0},\"kind\":\"[anonymous]\",\"endPos\":{\"line\":2,\"column\":43},\"data\":\"information evidence\"}],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 17,
+        "messages": [
+          {
+            "severity": "warning",
+            "pos": {
+              "line": 1,
+              "column": 0
+            },
+            "kind": "[anonymous]",
+            "endPos": {
+              "line": 1,
+              "column": 42
+            },
+            "data": "warning evidence"
+          },
+          {
+            "severity": "information",
+            "pos": {
+              "line": 2,
+              "column": 0
+            },
+            "kind": "[anonymous]",
+            "endPos": {
+              "line": 2,
+              "column": 43
+            },
+            "data": "information evidence"
+          }
+        ],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": []
+      }
+    },
+    {
+      "label": "tagged_warning",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "contract_tagged_warning"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"contract_tagged_warning\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":18,\"messages\":[{\"severity\":\"warning\",\"pos\":{\"line\":1,\"column\":0},\"kind\":\"ContractFixtures.warningKind\",\"endPos\":{\"line\":1,\"column\":23},\"data\":\"tagged warning\"}],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"target\":{\"sexp\":\"(:c True)\",\"pp\":\"True\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c True)\"},\"name\":\"_uniq.595\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 18,
+        "messages": [
+          {
+            "severity": "warning",
+            "pos": {
+              "line": 1,
+              "column": 0
+            },
+            "kind": "ContractFixtures.warningKind",
+            "endPos": {
+              "line": 1,
+              "column": 23
+            },
+            "data": "tagged warning"
+          }
+        ],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "target": {
+              "sexp": "(:c True)",
+              "pp": "True",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:c True)"
+            },
+            "name": "_uniq.595",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "nested_admission",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "exact (by sorry)"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"exact (by sorry)\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":19,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":true,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 19,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": true,
+        "goals": []
+      }
+    },
+    {
+      "label": "local_admission",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "have h : True := by sorry\nexact h"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"have h : True := by sorry\\nexact h\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":20,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":true,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 20,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": true,
+        "goals": []
+      }
+    },
+    {
+      "label": "introduced_dependency_admission",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "contract_dependency_sorry"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"contract_dependency_sorry\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":21,\"messages\":[{\"severity\":\"warning\",\"pos\":{\"line\":1,\"column\":0},\"kind\":\"[anonymous]\",\"endPos\":{\"line\":1,\"column\":25},\"data\":\"declaration uses 'sorry'\"}],\"hasUnsafe\":false,\"hasSorry\":true,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 21,
+        "messages": [
+          {
+            "severity": "warning",
+            "pos": {
+              "line": 1,
+              "column": 0
+            },
+            "kind": "[anonymous]",
+            "endPos": {
+              "line": 1,
+              "column": 25
+            },
+            "data": "declaration uses 'sorry'"
+          }
+        ],
+        "hasUnsafe": false,
+        "hasSorry": true,
+        "goals": []
+      }
+    },
+    {
+      "label": "positive_unsafe",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "contract_unsafe"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"contract_unsafe\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":22,\"messages\":[],\"hasUnsafe\":true,\"hasSorry\":false,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 22,
+        "messages": [],
+        "hasUnsafe": true,
+        "hasSorry": false,
+        "goals": []
+      }
+    },
+    {
+      "label": "hidden_hole",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "contract_hidden_hole"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"contract_hidden_hole\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":23,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"target\":{\"sexp\":\"(:c True)\",\"pp\":\"True\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c True)\"},\"name\":\"_uniq.1512\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 23,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "target": {
+              "sexp": "(:c True)",
+              "pp": "True",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:c True)"
+            },
+            "name": "_uniq.1512",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "hidden_hole_solved",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 23,
+        "goalId": 0,
+        "tactic": "trivial"
+      },
+      "request_line": "goal.tactic {\"stateId\":23,\"goalId\":0,\"tactic\":\"trivial\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":24,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 24,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": []
+      }
+    },
+    {
+      "label": "delayed_hole",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "contract_delayed_hole"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"contract_delayed_hole\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":25,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"target\":{\"sexp\":\"(:c True)\",\"pp\":\"True\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c True)\"},\"name\":\"_uniq.1525\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 25,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "target": {
+              "sexp": "(:c True)",
+              "pp": "True",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:c True)"
+            },
+            "name": "_uniq.1525",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "delayed_hole_solved",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 25,
+        "goalId": 0,
+        "tactic": "trivial"
+      },
+      "request_line": "goal.tactic {\"stateId\":25,\"goalId\":0,\"tactic\":\"trivial\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":26,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 26,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": []
+      }
+    },
+    {
+      "label": "hidden_local_value",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "contract_hidden_local_value"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"contract_hidden_local_value\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":27,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"target\":{\"sexp\":\"(:c True)\",\"pp\":\"True\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c True)\"},\"name\":\"_uniq.1538\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 27,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "target": {
+              "sexp": "(:c True)",
+              "pp": "True",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:c True)"
+            },
+            "name": "_uniq.1538",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "hidden_local_value_solved",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 27,
+        "goalId": 0,
+        "tactic": "trivial"
+      },
+      "request_line": "goal.tactic {\"stateId\":27,\"goalId\":0,\"tactic\":\"trivial\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":28,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 28,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": []
+      }
+    },
+    {
+      "label": "missing_assignment",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "contract_missing_assignment"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"contract_missing_assignment\"}",
+      "response_line": "{\"error\":\"validation\",\"desc\":\"Missing metavariable declaration ContractFixtures.missingAssignment\"}",
+      "response": {
+        "error": "validation",
+        "desc": "Missing metavariable declaration ContractFixtures.missingAssignment"
+      }
+    },
+    {
+      "label": "failed_snapshot_mutation",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "contract_failed_mutation"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"contract_failed_mutation\"}",
+      "response_line": "{\"tacticErrors\":[\"mutation must roll back\"],\"messages\":[{\"severity\":\"error\",\"pos\":{\"line\":1,\"column\":0},\"kind\":\"[anonymous]\",\"endPos\":{\"line\":1,\"column\":24},\"data\":\"mutation must roll back\"}],\"hasUnsafe\":false,\"hasSorry\":false}",
+      "response": {
+        "tacticErrors": [
+          "mutation must roll back"
+        ],
+        "messages": [
+          {
+            "severity": "error",
+            "pos": {
+              "line": 1,
+              "column": 0
+            },
+            "kind": "[anonymous]",
+            "endPos": {
+              "line": 1,
+              "column": 24
+            },
+            "data": "mutation must roll back"
+          }
+        ],
+        "hasUnsafe": false,
+        "hasSorry": false
+      }
+    },
+    {
+      "label": "reuse_after_failure",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "trivial"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"trivial\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":29,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 29,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": []
+      }
+    },
+    {
+      "label": "trailing_input",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "trivial\nthis_is_not_a_tactic"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"trivial\\nthis_is_not_a_tactic\"}",
+      "response_line": "{\"parseError\":\"<pantograph>:2:1: unknown tactic\",\"messages\":[{\"severity\":\"error\",\"pos\":{\"line\":0,\"column\":0},\"kind\":\"[anonymous]\",\"data\":\"<pantograph>:2:1: unknown tactic\"}],\"hasUnsafe\":false,\"hasSorry\":false}",
+      "response": {
+        "parseError": "<pantograph>:2:1: unknown tactic",
+        "messages": [
+          {
+            "severity": "error",
+            "pos": {
+              "line": 0,
+              "column": 0
+            },
+            "kind": "[anonymous]",
+            "data": "<pantograph>:2:1: unknown tactic"
+          }
+        ],
+        "hasUnsafe": false,
+        "hasSorry": false
+      }
+    },
+    {
+      "label": "store_admission",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 15,
+        "goalId": 0,
+        "tactic": "contract_store_admission"
+      },
+      "request_line": "goal.tactic {\"stateId\":15,\"goalId\":0,\"tactic\":\"contract_store_admission\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":30,\"messages\":[{\"severity\":\"warning\",\"pos\":{\"line\":1,\"column\":0},\"kind\":\"[anonymous]\",\"endPos\":{\"line\":1,\"column\":24},\"data\":\"declaration uses 'sorry'\"}],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"target\":{\"sexp\":\"(:c True)\",\"pp\":\"True\",\"modelSexpVersion\":1,\"modelSexp\":\"(:c True)\"},\"name\":\"_uniq.595\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 30,
+        "messages": [
+          {
+            "severity": "warning",
+            "pos": {
+              "line": 1,
+              "column": 0
+            },
+            "kind": "[anonymous]",
+            "endPos": {
+              "line": 1,
+              "column": 24
+            },
+            "data": "declaration uses 'sorry'"
+          }
+        ],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "target": {
+              "sexp": "(:c True)",
+              "pp": "True",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:c True)"
+            },
+            "name": "_uniq.595",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "use_stored_admission",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 30,
+        "goalId": 0,
+        "tactic": "exact ContractFixtures.storedAdmission"
+      },
+      "request_line": "goal.tactic {\"stateId\":30,\"goalId\":0,\"tactic\":\"exact ContractFixtures.storedAdmission\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":31,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":true,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 31,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": true,
+        "goals": []
+      }
+    },
+    {
+      "label": "multiline_start",
+      "command": "goal.start",
+      "request": {
+        "expr": "∀ (p : Prop), p → p"
+      },
+      "request_line": "goal.start {\"expr\":\"∀ (p : Prop), p → p\"}",
+      "response_line": "{\"stateId\":32,\"root\":\"_uniq.1570\"}",
+      "response": {
+        "stateId": 32,
+        "root": "_uniq.1570"
+      }
+    },
+    {
+      "label": "multiline_complete",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 32,
+        "goalId": 0,
+        "tactic": "intro p h\nexact h"
+      },
+      "request_line": "goal.tactic {\"stateId\":32,\"goalId\":0,\"tactic\":\"intro p h\\nexact h\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":33,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 33,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": []
+      }
+    },
+    {
+      "label": "conversion_start",
+      "command": "goal.start",
+      "request": {
+        "expr": "(1 + 2) + 3 = 6"
+      },
+      "request_line": "goal.start {\"expr\":\"(1 + 2) + 3 = 6\"}",
+      "response_line": "{\"stateId\":34,\"root\":\"_uniq.1726\"}",
+      "response": {
+        "stateId": 34,
+        "root": "_uniq.1726"
+      }
+    },
+    {
+      "label": "conversion_enter",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 34,
+        "mode": "conv"
+      },
+      "request_line": "goal.tactic {\"stateId\":34,\"mode\":\"conv\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":35,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"target\":{\"sexp\":\"((:c Eq) (:sort 0) ((:c Eq) (:c Nat) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c OfNat.ofNat) (:c Nat) (:lit 1) ((:c instOfNatNat) (:lit 1))) ((:c OfNat.ofNat) (:c Nat) (:lit 2) ((:c instOfNatNat) (:lit 2)))) ((:c OfNat.ofNat) (:c Nat) (:lit 3) ((:c instOfNatNat) (:lit 3)))) ((:c OfNat.ofNat) (:c Nat) (:lit 6) ((:c instOfNatNat) (:lit 6)))) (:mv _uniq.2407))\",\"pp\":\"1 + 2 + 3 = 6\",\"modelSexpVersion\":1,\"modelSexp\":\"(:app (:c Eq) (:arg :implicit-type 0 (:sort Prop)) (:arg :explicit 1 (:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 1)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 1))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 2)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 2))))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 3)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 3))))))))) (:arg :explicit 2 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 6)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 6))))))))) (:arg :explicit 2 (:metavar)))\"},\"name\":\"_uniq.2408\",\"isConversion\":true,\"fragment\":\"conv\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 35,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "target": {
+              "sexp": "((:c Eq) (:sort 0) ((:c Eq) (:c Nat) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c OfNat.ofNat) (:c Nat) (:lit 1) ((:c instOfNatNat) (:lit 1))) ((:c OfNat.ofNat) (:c Nat) (:lit 2) ((:c instOfNatNat) (:lit 2)))) ((:c OfNat.ofNat) (:c Nat) (:lit 3) ((:c instOfNatNat) (:lit 3)))) ((:c OfNat.ofNat) (:c Nat) (:lit 6) ((:c instOfNatNat) (:lit 6)))) (:mv _uniq.2407))",
+              "pp": "1 + 2 + 3 = 6",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:app (:c Eq) (:arg :implicit-type 0 (:sort Prop)) (:arg :explicit 1 (:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 1)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 1))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 2)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 2))))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 3)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 3))))))))) (:arg :explicit 2 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 6)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 6))))))))) (:arg :explicit 2 (:metavar)))"
+            },
+            "name": "_uniq.2408",
+            "isConversion": true,
+            "fragment": "conv"
+          }
+        ]
+      }
+    },
+    {
+      "label": "conversion_step_0",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 35,
+        "goalId": 0,
+        "tactic": "lhs"
+      },
+      "request_line": "goal.tactic {\"stateId\":35,\"goalId\":0,\"tactic\":\"lhs\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":36,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"target\":{\"sexp\":\"((:c Eq) (:c Nat) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c OfNat.ofNat) (:c Nat) (:lit 1) ((:c instOfNatNat) (:lit 1))) ((:c OfNat.ofNat) (:c Nat) (:lit 2) ((:c instOfNatNat) (:lit 2)))) ((:c OfNat.ofNat) (:c Nat) (:lit 3) ((:c instOfNatNat) (:lit 3)))) (:mv _uniq.2448))\",\"pp\":\"1 + 2 + 3\",\"modelSexpVersion\":1,\"modelSexp\":\"(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 1)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 1))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 2)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 2))))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 3)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 3))))))))) (:arg :explicit 2 (:metavar)))\"},\"name\":\"_uniq.2449\",\"isConversion\":true,\"fragment\":\"conv\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 36,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "target": {
+              "sexp": "((:c Eq) (:c Nat) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c OfNat.ofNat) (:c Nat) (:lit 1) ((:c instOfNatNat) (:lit 1))) ((:c OfNat.ofNat) (:c Nat) (:lit 2) ((:c instOfNatNat) (:lit 2)))) ((:c OfNat.ofNat) (:c Nat) (:lit 3) ((:c instOfNatNat) (:lit 3)))) (:mv _uniq.2448))",
+              "pp": "1 + 2 + 3",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 1)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 1))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 2)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 2))))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 3)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 3))))))))) (:arg :explicit 2 (:metavar)))"
+            },
+            "name": "_uniq.2449",
+            "isConversion": true,
+            "fragment": "conv"
+          }
+        ]
+      }
+    },
+    {
+      "label": "conversion_step_1",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 36,
+        "goalId": 0,
+        "tactic": "congr"
+      },
+      "request_line": "goal.tactic {\"stateId\":36,\"goalId\":0,\"tactic\":\"congr\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":37,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"userName\":\"a\",\"target\":{\"sexp\":\"((:c Eq) (:c Nat) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c OfNat.ofNat) (:c Nat) (:lit 1) ((:c instOfNatNat) (:lit 1))) ((:c OfNat.ofNat) (:c Nat) (:lit 2) ((:c instOfNatNat) (:lit 2)))) (:mv _uniq.2511))\",\"pp\":\"1 + 2\",\"modelSexpVersion\":1,\"modelSexp\":\"(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 1)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 1))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 2)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 2))))))))) (:arg :explicit 2 (:metavar)))\"},\"name\":\"_uniq.2512\",\"isConversion\":true,\"fragment\":\"conv\"},{\"vars\":[],\"userName\":\"a\",\"target\":{\"sexp\":\"((:c Eq) (:c Nat) ((:c OfNat.ofNat) (:c Nat) (:lit 3) ((:c instOfNatNat) (:lit 3))) (:mv _uniq.2513))\",\"pp\":\"3\",\"modelSexpVersion\":1,\"modelSexp\":\"(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 3)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 3))))))) (:arg :explicit 2 (:metavar)))\"},\"name\":\"_uniq.2514\",\"isConversion\":true,\"fragment\":\"conv\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 37,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "userName": "a",
+            "target": {
+              "sexp": "((:c Eq) (:c Nat) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c OfNat.ofNat) (:c Nat) (:lit 1) ((:c instOfNatNat) (:lit 1))) ((:c OfNat.ofNat) (:c Nat) (:lit 2) ((:c instOfNatNat) (:lit 2)))) (:mv _uniq.2511))",
+              "pp": "1 + 2",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 1)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 1))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 2)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 2))))))))) (:arg :explicit 2 (:metavar)))"
+            },
+            "name": "_uniq.2512",
+            "isConversion": true,
+            "fragment": "conv"
+          },
+          {
+            "vars": [],
+            "userName": "a",
+            "target": {
+              "sexp": "((:c Eq) (:c Nat) ((:c OfNat.ofNat) (:c Nat) (:lit 3) ((:c instOfNatNat) (:lit 3))) (:mv _uniq.2513))",
+              "pp": "3",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 3)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 3))))))) (:arg :explicit 2 (:metavar)))"
+            },
+            "name": "_uniq.2514",
+            "isConversion": true,
+            "fragment": "conv"
+          }
+        ]
+      }
+    },
+    {
+      "label": "conversion_step_2",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 37,
+        "goalId": 0,
+        "tactic": "rfl"
+      },
+      "request_line": "goal.tactic {\"stateId\":37,\"goalId\":0,\"tactic\":\"rfl\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":38,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"userName\":\"a\",\"target\":{\"sexp\":\"((:c Eq) (:c Nat) ((:c OfNat.ofNat) (:c Nat) (:lit 3) ((:c instOfNatNat) (:lit 3))) (:mv _uniq.2513))\",\"pp\":\"3\",\"modelSexpVersion\":1,\"modelSexp\":\"(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 3)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 3))))))) (:arg :explicit 2 (:metavar)))\"},\"name\":\"_uniq.2514\",\"isConversion\":true,\"fragment\":\"conv\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 38,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "userName": "a",
+            "target": {
+              "sexp": "((:c Eq) (:c Nat) ((:c OfNat.ofNat) (:c Nat) (:lit 3) ((:c instOfNatNat) (:lit 3))) (:mv _uniq.2513))",
+              "pp": "3",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 3)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 3))))))) (:arg :explicit 2 (:metavar)))"
+            },
+            "name": "_uniq.2514",
+            "isConversion": true,
+            "fragment": "conv"
+          }
+        ]
+      }
+    },
+    {
+      "label": "conversion_step_3",
+      "command": "goal.tactic",
+      "request": {
+        "stateId": 38,
+        "goalId": 0,
+        "tactic": "rfl"
+      },
+      "request_line": "goal.tactic {\"stateId\":38,\"goalId\":0,\"tactic\":\"rfl\"}",
+      "response_line": "{\"validation\":{\"version\":1,\"scope\":\"transition-expressions\",\"checked\":true},\"nextStateId\":39,\"messages\":[],\"hasUnsafe\":false,\"hasSorry\":false,\"goals\":[{\"vars\":[],\"target\":{\"sexp\":\"((:c Eq) (:c Nat) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c OfNat.ofNat) (:c Nat) (:lit 1) ((:c instOfNatNat) (:lit 1))) ((:c OfNat.ofNat) (:c Nat) (:lit 2) ((:c instOfNatNat) (:lit 2)))) ((:c OfNat.ofNat) (:c Nat) (:lit 3) ((:c instOfNatNat) (:lit 3)))) ((:c OfNat.ofNat) (:c Nat) (:lit 6) ((:c instOfNatNat) (:lit 6))))\",\"pp\":\"1 + 2 + 3 = 6\",\"modelSexpVersion\":1,\"modelSexp\":\"(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 1)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 1))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 2)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 2))))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 3)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 3))))))))) (:arg :explicit 2 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 6)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 6))))))))\"},\"name\":\"_uniq.1726\",\"isConversion\":false,\"fragment\":\"tactic\"}]}",
+      "response": {
+        "validation": {
+          "version": 1,
+          "scope": "transition-expressions",
+          "checked": true
+        },
+        "nextStateId": 39,
+        "messages": [],
+        "hasUnsafe": false,
+        "hasSorry": false,
+        "goals": [
+          {
+            "vars": [],
+            "target": {
+              "sexp": "((:c Eq) (:c Nat) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c HAdd.hAdd) (:c Nat) (:c Nat) (:c Nat) ((:c instHAdd) (:c Nat) (:c instAddNat)) ((:c OfNat.ofNat) (:c Nat) (:lit 1) ((:c instOfNatNat) (:lit 1))) ((:c OfNat.ofNat) (:c Nat) (:lit 2) ((:c instOfNatNat) (:lit 2)))) ((:c OfNat.ofNat) (:c Nat) (:lit 3) ((:c instOfNatNat) (:lit 3)))) ((:c OfNat.ofNat) (:c Nat) (:lit 6) ((:c instOfNatNat) (:lit 6))))",
+              "pp": "1 + 2 + 3 = 6",
+              "modelSexpVersion": 1,
+              "modelSexp": "(:app (:c Eq) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c HAdd.hAdd) (:arg :implicit-type 0 (:c Nat)) (:arg :implicit-type 1 (:c Nat)) (:arg :implicit-type 2 (:c Nat)) (:arg :instance 3 (:instance-of (:app (:c HAdd) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:c Nat)) (:arg :explicit 2 (:c Nat))))) (:arg :explicit 4 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 1)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 1))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 2)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 2))))))))) (:arg :explicit 5 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 3)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 3))))))))) (:arg :explicit 2 (:app (:c OfNat.ofNat) (:arg :implicit-type 0 (:c Nat)) (:arg :explicit 1 (:lit 6)) (:arg :instance 2 (:instance-of (:app (:c OfNat) (:arg :explicit 0 (:c Nat)) (:arg :explicit 1 (:lit 6))))))))"
+            },
+            "name": "_uniq.1726",
+            "isConversion": false,
+            "fragment": "tactic"
+          }
+        ]
+      }
+    },
+    {
+      "label": "validation_delete_all",
+      "command": "goal.delete",
+      "request": {
+        "stateIds": [
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38,
+          39
+        ]
+      },
+      "request_line": "goal.delete {\"stateIds\":[15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39]}",
+      "response_line": "{}",
+      "response": {}
+    },
+    {
+      "label": "validation_final_stat",
+      "command": "stat",
+      "request": {},
+      "request_line": "stat {}",
+      "response_line": "{\"nGoals\":0}",
+      "response": {
+        "nGoals": 0
+      }
+    }
+  ],
+  "graph_checks": [
+    "identity_intro",
+    "conjunction_split",
+    "instance_intro",
+    "let_intro"
+  ],
+  "exit_code": 0,
+  "stderr": "",
+  "subprocess_reaped": true,
+  "final_allocations": 0
+}
