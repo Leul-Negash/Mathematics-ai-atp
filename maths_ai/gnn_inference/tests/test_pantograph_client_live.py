@@ -1,28 +1,10 @@
 """Stage 5 live gate; no mocked Lean execution or model checkpoint."""
 
 import asyncio
-import os
-from pathlib import Path
 
 import pytest
 
 from maths_ai.hybrid_reasoner.pantograph_diagnostics import verify_live_application
-from pantograph_async import PantographEnv
-
-
-@pytest.fixture
-def live_env(request):
-    source = os.environ.get("PANTOGRAPH_TEST_SOURCE_ROOT")
-    repl = os.environ.get("PANTOGRAPH_TEST_REPL")
-    if not source or not repl:
-        if request.config.getoption("--run-pantograph-live"):
-            pytest.fail(
-                "Required live run needs PANTOGRAPH_TEST_SOURCE_ROOT and PANTOGRAPH_TEST_REPL."
-            )
-        pytest.skip("Explicit live paths not configured.")
-    return PantographEnv(
-        source_root=Path(source), pantograph_repl=Path(repl), imports=("Mathlib",)
-    )
 
 
 @pytest.mark.pantograph_live

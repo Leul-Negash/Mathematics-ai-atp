@@ -29,6 +29,7 @@ sys.meta_path.insert(0, Guard())
 import maths_ai.hybrid_reasoner.joint_inference
 import maths_ai.hybrid_reasoner.hypergraph
 import maths_ai.hybrid_reasoner.selection_policy
+import maths_ai.hybrid_reasoner.mcts_diagnostics
 import maths_ai.gnn_inference.atp_lean_gnn.rl_reasoner
 import maths_ai.gnn_inference.atp_lean_gnn.rl_live_collection
 import maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver
@@ -37,6 +38,7 @@ import maths_ai.gnn_inference.atp_lean_gnn.search_harvest
 import maths_ai.gnn_inference.inference_engine
 import maths_ai.gnn_inference.model
 import maths_ai.gnn_inference.scripts.rl_smoke
+import maths_ai.gnn_inference.scripts.mcts_client_smoke
 import maths_ai.pln_inference.metta.translator.translator_modules.cli
 assert 'pantograph' not in sys.modules
 """

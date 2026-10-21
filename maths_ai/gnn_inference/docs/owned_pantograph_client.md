@@ -68,6 +68,63 @@ python -m pytest maths_ai/gnn_inference/tests/test_pantograph_client_live.py \
   --run-pantograph-live -q
 ```
 
+## MCTS search verification
+
+Best-first and PUCT search use the same installed client API. Each theorem owns one
+state scope; a PUCT leaf stays allocated until all its candidate tactics finish, and
+each successful alternative is converted through the adapter to canonical goals and
+released at once. An overlapping `prove` on the same reasoner is rejected before it
+touches the running search's cached roots, pending actions, greedy mode, or result.
+A transport failure or timeout ends the search; the pool, not the reasoner, replaces
+the complete client/reasoner worker.
+
+Checked tactic rejections become actor failure records. Goal elaboration failures and
+session failures close the node without a critic label or failure record, and an
+unknown simulation backup increments `N` but not `N_v` or `W`. Cooperative deadlines
+still return the completed partial graph.
+
+The search gate runs the application gate above, then both search modes against the
+actual executable: a genuine multi-leaf PUCT batch, graph equivalence of search nodes
+with the canonical expectations, checked rejection of alternatives, scope closure
+after a cooperative cutoff, repeated searches on one session, two pool workers with
+independent clients sharing one model device, and one bounded on-policy plus HTPS
+update:
+
+```bash
+python -m maths_ai.gnn_inference.scripts.mcts_client_smoke \
+  --source-root /path/to/compiled/mathlib4 \
+  --pantograph-repl /path/to/Pantograph/.lake/build/bin/repl \
+  --report /new/path/mcts_report.json
+```
+
+The report records this branch's identity (target base commit, application source
+commit, repository revision, and digests of the search modules), the installed
+client's repository, commit, and location, and the executable identity. It refuses to
+run when the installed client is not the pinned commit. The live tests require the
+same explicit paths:
+
+```bash
+python -m pytest maths_ai/gnn_inference/tests/test_pantograph_client_live.py \
+  maths_ai/gnn_inference/tests/test_mcts_owned_client.py \
+  --run-pantograph-live -m pantograph_live -q
+```
+
+The RL smoke uses the same factory and runs PUCT by default; pass
+`--selection-policy legacy` for the best-first loop and `--no-pln` to run without
+the petta binary:
+
+```bash
+python -m maths_ai.gnn_inference.scripts.rl_smoke \
+  --source-root /path/to/compiled/mathlib4 \
+  --pantograph-repl /path/to/Pantograph/.lake/build/bin/repl --no-pln
+```
+
+Synthetic runs build their node vocabulary from the seed goal plus
+`supported_structural_labels(max_locals=..., max_arity=...)` from
+`pln_rl_training`, the module that owns the structural-label check. A vocabulary
+from the seed alone misses labels its successors introduce, such as `FV1` after
+`intro`; the check still rejects any state beyond the stated bounds.
+
 ## Notebook and inference use
 
 Use `await` inside notebooks and one `asyncio.run` at terminal entry points. A live
