@@ -120,3 +120,21 @@ def test_translator_validates_environment_before_touching_output(tmp_path):
 
     asyncio.run(run())
     assert sentinel.read_text() == "preserve"
+
+
+def test_copied_files_match_the_pinned_source_manifest():
+    import hashlib
+    import json
+
+    root = Path(__file__).parents[3]
+    manifest = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/pantograph/mcts_owned_client/source_manifest.json"
+        ).read_text()
+    )
+    assert manifest["source_commit"] == "e8e4b18e081d6dd84491433b00e8cfa596cdfbee"
+    assert manifest["copied"]
+    for entry in manifest["copied"]:
+        data = (root / entry["path"]).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == entry["sha256"], entry["path"]

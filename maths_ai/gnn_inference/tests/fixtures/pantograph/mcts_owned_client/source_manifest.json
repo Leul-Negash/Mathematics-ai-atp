@@ -1,0 +1,312 @@
+{
+  "kind": "mcts-owned-client-source-manifest",
+  "source_commit": "e8e4b18e081d6dd84491433b00e8cfa596cdfbee",
+  "target_base_commit": "89a2417e522720d2cfe3f2e6218614e4d828c8de",
+  "note": "Files under copied are byte-identical to the pinned AC tree; files under adapted were changed for this branch or are new here.",
+  "copied": [
+    {
+      "path": "README.md",
+      "mode": "100755",
+      "sha256": "0bed58a97ea3eb79c929bebc7b816ce756a1421e6c79f073a7e5730e0c9f3940"
+    },
+    {
+      "path": "maths_ai/gnn_inference/atp_lean_gnn/__init__.py",
+      "mode": "100755",
+      "sha256": "abe630fecdb0968c142cd8eabe64626e78496f8383065ff68ebf7925b8377eae"
+    },
+    {
+      "path": "maths_ai/gnn_inference/atp_lean_gnn/inference.py",
+      "mode": "100755",
+      "sha256": "ef6da0c23830078ed60662f64a58b4250482d8290dd1c1895c9f898ce61d8084"
+    },
+    {
+      "path": "maths_ai/gnn_inference/docs/repository_owned_pantograph_client_justification.md",
+      "mode": "100644",
+      "sha256": "d89d5e91fd36885c8ffa152281c3cea393e063da1f8d1dd60947ef22c9b2dc75"
+    },
+    {
+      "path": "maths_ai/gnn_inference/inference_engine.py",
+      "mode": "100755",
+      "sha256": "2ef1f51200ac86d2a8dd7b1a475d05d926216012afe3e1d7199c833123f0e695"
+    },
+    {
+      "path": "maths_ai/gnn_inference/model.py",
+      "mode": "100755",
+      "sha256": "8012584a156a00f3e06007118705ffc57b82b241a1a6d02fa9ea9476fc13032c"
+    },
+    {
+      "path": "maths_ai/gnn_inference/pantograph_backport/contract.json",
+      "mode": "100644",
+      "sha256": "289b56f48008cb5a0741aff651227e58e39ecfeeced2c24d5f8d8284f06de640"
+    },
+    {
+      "path": "maths_ai/gnn_inference/pantograph_backport/repository_client_contract.patch",
+      "mode": "100644",
+      "sha256": "ca9921913281f0c53f11cdde59afe15cf38f70a08f59068cd7b96f3ab1f2d021"
+    },
+    {
+      "path": "maths_ai/gnn_inference/pantograph_backport/repository_client_contract.provenance.json",
+      "mode": "100644",
+      "sha256": "30ea08110a6116c4cf90359d2d081e8508eff84af1f52af593e0ef839972ba81"
+    },
+    {
+      "path": "maths_ai/gnn_inference/scripts/capture_pantograph_fixtures.py",
+      "mode": "100644",
+      "sha256": "d1f7dd0fc00fd1ec38d9b03a03beb67e58bc85a51e4af51f0e506dc8eb689cd7"
+    },
+    {
+      "path": "maths_ai/gnn_inference/scripts/pantograph_client_smoke.py",
+      "mode": "100644",
+      "sha256": "eac8a199ba2980d3eae46063f2d024ac21014c53ad7ec064f8bb183c9e25d86b"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/baseline/baseline.json",
+      "mode": "100644",
+      "sha256": "cf8c32e894647953de89aaf9e31857c572d86872596e2e8e1a947a07f2bb4951"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/baseline/provenance.json",
+      "mode": "100644",
+      "sha256": "b68dbc5f2bfcb1caac89306151d19776f88688d86b4af9e8eee28bc5e107ae69"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/canonical_graph_expectations.json",
+      "mode": "100644",
+      "sha256": "7fc06f9678a8b3092939f7dda6890e0133a9f67e5862b2c7a5d6d5c01ee7cff5"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/fake_repl.py",
+      "mode": "100644",
+      "sha256": "82fc2d4f393549e69b803c4c01b020288a74a68566a8dd4a9808989825eb786a"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/future_contract.json",
+      "mode": "100644",
+      "sha256": "95aaf29046cdf75c285ecd48209301bd404437349f46a3d03ed7f6dc5948de28"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/historical_revision1/future_contract.json",
+      "mode": "100644",
+      "sha256": "a09a49ae56862538b175eb653796581eed1e17cd4568b76a9c1cdf8dc21483fc"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/stage4_companion/capture.json",
+      "mode": "100644",
+      "sha256": "7403d7a284850b4ce6b916dcd5e45717ec9e770ac0b69a91b455adb3717ac024"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/stage4_companion/provenance.json",
+      "mode": "100644",
+      "sha256": "918b6faf68b640b6870bab57d2640e635ad5802ded038aeb9ab445c0a3e69159"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/stage5_client/final_report.json",
+      "mode": "100644",
+      "sha256": "dc0a617df434aee2228c6f14d65ded283456d78b5f00c6db65ca0283b1b360b9"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/stage5_client/report.json",
+      "mode": "100644",
+      "sha256": "4ec0fbeec11ad0f595d96f0ee777203f84d40d0ed22f04e8f461b2a87a6ab003"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/upstream_pr1/capture.json",
+      "mode": "100644",
+      "sha256": "ab66cb0eeaf494a52a0cb8cfb9d811e63ba508d7ad9e09f480827ad0eb973c60"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/pantograph/upstream_pr1/provenance.json",
+      "mode": "100644",
+      "sha256": "391e393aecf3bdd5a011e3cf57624e28efe350a0862579bfa298be21334be3ce"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/model_helpers.py",
+      "mode": "100644",
+      "sha256": "d26e34bc3e40933881ad19351f9706babb70ffcb1fb388c08bae30bd4ae3319c"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_model_sexpr_contract.py",
+      "mode": "100644",
+      "sha256": "9b5dd92f1dd48bbd8c9d7d56db4686db40bd40320329930558ae0660caf75019"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_pantograph_env.py",
+      "mode": "100644",
+      "sha256": "10804f5e81908af56cfdb73b7c4019361b513a41c0d608ebcc862625a5366428"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_pantograph_pr1_reconciliation.py",
+      "mode": "100644",
+      "sha256": "6309c315710bd52324ca39507f62e703e147f56c66298cb4d1e81320139f538e"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_pantograph_protocol.py",
+      "mode": "100644",
+      "sha256": "320ac9134b18c608f847091fcf8f66239e4d463f316bc264af7b5bdfe6c755fb"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_pantograph_state_scopes.py",
+      "mode": "100644",
+      "sha256": "c6885e3f46167890e1ab629bc1ecca03b3c9deceb820bd08e07e6997e26d728c"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/__init__.py",
+      "mode": "100755",
+      "sha256": "288f7b17f4125ac867abd347a6b03c3e189d2482203824008d909c35dfa4dec5"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/pantograph_client.py",
+      "mode": "100644",
+      "sha256": "ced998cd5608ca51fb28cff3053628633bb1b159fff63ca55f51b5fe5bb770f2"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/pantograph_diagnostics.py",
+      "mode": "100644",
+      "sha256": "b2cc469556efa605b5c7e38180a40a0319b674de021f9c985302d8b2055bbdb2"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/pantograph_env.py",
+      "mode": "100644",
+      "sha256": "046dca2df279e0bc004a7c9c382dfbd723fb2b85af041ff57f275fd4d258adda"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/pantograph_launch.py",
+      "mode": "100644",
+      "sha256": "0d36cf45187f7cbbf8b2bbfff4ad53923026cb17db582353315cf17914d4216c"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/pantograph_model_sexpr.py",
+      "mode": "100644",
+      "sha256": "ee8672ff665234da81b333517a7a620c2cd8d72f2128653ce6f01d32d7d492f8"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/pantograph_protocol.py",
+      "mode": "100644",
+      "sha256": "95a74a7dec23b513f8168f2ad239124db286f77da0db713a4906046409f84a03"
+    },
+    {
+      "path": "maths_ai/pln_inference/metta/translator/readme.md",
+      "mode": "100755",
+      "sha256": "0416753664abe9909adbc6fb6491f545ed893cdaa9a006615a053ae574b6dfe5"
+    },
+    {
+      "path": "maths_ai/pln_inference/metta/translator/test_imports.py",
+      "mode": "100755",
+      "sha256": "3916437fb010febe15c86b17e76574af3c899698b12893912d06ae3782e601f4"
+    },
+    {
+      "path": "maths_ai/pln_inference/metta/translator/translator.py",
+      "mode": "100755",
+      "sha256": "e8ee830afe7ad6632b5945fdcfb7deb216d6c91b8c7018e0ce39f05a73525a0b"
+    },
+    {
+      "path": "maths_ai/pln_inference/metta/translator/translator_modules/cli.py",
+      "mode": "100755",
+      "sha256": "13761426eec219b5e4352becc0900505865b86e903d461547a6eb4d464901103"
+    },
+    {
+      "path": "maths_ai/pln_inference/metta/translator/translator_modules/extractor.py",
+      "mode": "100755",
+      "sha256": "405e54fcea3d299521fc7b7439787024b1e7561c83f09200fadf0666771abdcb"
+    },
+    {
+      "path": "maths_ai/pln_inference/metta/translator/translator_modules/normalizer.py",
+      "mode": "100755",
+      "sha256": "af83b4cfc9709ed83add1365464b6bce500d26ed8c291b4535fd45b1d0d4dd59"
+    }
+  ],
+  "adapted": [
+    {
+      "path": "maths_ai/gnn_inference/atp_lean_gnn/pln_rl_training.py",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/gnn_inference/atp_lean_gnn/rl_live_collection.py",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/gnn_inference/atp_lean_gnn/rl_reasoner.py",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/gnn_inference/atp_lean_gnn/rl_training_driver.py",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/gnn_inference/docs/dev_plans/mcts_branch_pantograph_port.md",
+      "change": "target-only, adapted"
+    },
+    {
+      "path": "maths_ai/gnn_inference/docs/owned_pantograph_client.md",
+      "change": "adapted from the source tree"
+    },
+    {
+      "path": "maths_ai/gnn_inference/docs/rl_training_setup.md",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/gnn_inference/pantograph_backport/README.md",
+      "change": "adapted from the source tree"
+    },
+    {
+      "path": "maths_ai/gnn_inference/scripts/mcts_client_smoke.py",
+      "change": "new on this branch"
+    },
+    {
+      "path": "maths_ai/gnn_inference/scripts/rl_smoke.py",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/conftest.py",
+      "change": "adapted from the source tree"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_mcts_owned_client.py",
+      "change": "new on this branch"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_owned_client_migration.py",
+      "change": "adapted from the source tree"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_pantograph_client.py",
+      "change": "adapted from the source tree"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_pantograph_client_live.py",
+      "change": "adapted from the source tree"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_rl_live_collection.py",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_rl_live_collection_children.py",
+      "change": "new on this branch"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_rl_reasoner.py",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_rl_training_driver.py",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_tactic_rendering.py",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/hypergraph.py",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/joint_inference.py",
+      "change": "adapted from both branches"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/mcts_diagnostics.py",
+      "change": "new on this branch"
+    }
+  ]
+}

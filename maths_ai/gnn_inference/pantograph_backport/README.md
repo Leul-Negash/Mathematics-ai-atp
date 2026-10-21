@@ -388,7 +388,8 @@ complete AC tree at `e8e4b18e081d6dd84491433b00e8cfa596cdfbee`; it is not a
 merge of AC. Shared client, codec, contract, fixture, inference, and translator
 files are byte-identical to that tree. `joint_inference.py`, `hypergraph.py`,
 `rl_reasoner.py`, `rl_live_collection.py`, `rl_training_driver.py`, and
-`pln_rl_training.py` were adapted in place, so PUCT selection, partial-hypertree
+`pln_rl_training.py` were adapted in place (the full list, with digests of
+every copied file, is in `tests/fixtures/pantograph/mcts_owned_client/source_manifest.json`), so PUCT selection, partial-hypertree
 simulations, virtual losses, validity-aware backups, node-specific pending
 actions, cooperative deadlines, and HTPS replay with its separate optimizer are
 unchanged. The server epoch, in-reasoner restart, stale-leaf reproposal, private
@@ -399,7 +400,7 @@ Baseline at `89a2417` (with PyPantograph's Python sources on the path): 319
 passed, 1 skipped, 6 failed, and one collection error. The failures are three
 Thompson-sampler tests, two old server-construction tests, and the stdbuf path
 test; the collection error is the translator `test_imports.py` script. After
-the port the full suite has **740 passed, 5 skipped, 5 subtests passed**, and
+the port the full suite has **741 passed, 5 skipped, 5 subtests passed**, and
 the 4 failures that also fail at the baseline: the three Thompson-sampler tests
 and the stdbuf path test, which depends on the host's `stdbuf`. The five skips
 are the four live cases in an ordinary run and the two-GPU topology case.
