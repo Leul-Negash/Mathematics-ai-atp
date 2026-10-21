@@ -2,7 +2,8 @@
 
 A recording scoped client stands in for the REPL: it rejects operations on
 released states the way the real scope does, and records every allocation and
-release, so these tests check ownership as well as search results.
+release, so these tests check ownership as well as search results. The
+``pantograph_live`` cases run the same search against the actual executable.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import itertools
 import unittest
 from types import MethodType
 
+import pytest
 import torch
 
 from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
@@ -30,6 +32,11 @@ from maths_ai.hybrid_reasoner.hypergraph import (
     SearchEndReason,
 )
 from maths_ai.hybrid_reasoner.joint_inference import PantographExecutor
+from maths_ai.hybrid_reasoner.mcts_diagnostics import (
+    verify_mcts_search,
+    verify_shared_device_workers,
+)
+from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
 from maths_ai.hybrid_reasoner.pantograph_protocol import (
     PantographGoalRejected,
     PantographProtocolError,
@@ -569,6 +576,35 @@ class CooperativeDeadlineTests(unittest.TestCase):
         for edge in graph.edges.values():
             self.assertEqual(edge.visit_stats.virtual_loss, 0)
         _assert_scoped_cleanly(self, client)
+
+
+@pytest.mark.pantograph_live
+def test_actual_puct_and_best_first_search_over_the_owned_client(live_env):
+    async def run():
+        client = await create_model_sexpr_client(live_env)
+        async with client:
+            baseline = (await client.stat()).n_goals
+            checks = await verify_mcts_search(client, searches=20)
+            assert (await client.stat()).n_goals == baseline
+        assert client.phase.value == "CLOSED"
+        return checks
+
+    checks = asyncio.run(run())
+    assert {
+        "puct-multi-leaf-batch",
+        "checked-rejection-of-alternatives",
+        "puct-graph-equivalence",
+        "best-first-graph-equivalence",
+        "cooperative-deadline-scope-closure",
+        "repeated-searches-20",
+    } <= set(checks)
+
+
+@pytest.mark.pantograph_live
+def test_actual_pool_workers_share_one_model_device(live_env):
+    assert asyncio.run(verify_shared_device_workers(live_env)) == [
+        "two-workers-one-model-device"
+    ]
 
 
 if __name__ == "__main__":
