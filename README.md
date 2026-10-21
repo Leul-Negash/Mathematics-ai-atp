@@ -2,6 +2,10 @@
 
 This repository is an experimental proof-search and theorem-proving project that combines machine learning, symbolic reasoning, and Lean/Pantograph tooling. The codebase is organized around the `maths_ai` package, with supporting experiments and data assets for research and prototyping.
 
+Live Lean workflows use the repository-owned async client and require an explicit
+validated custom REPL and compiled Mathlib project. See the
+[current client, notebook, and translator instructions](maths_ai/gnn_inference/docs/owned_pantograph_client.md).
+
 ## Overview
 
 The project aims to explore hybrid automated theorem proving by combining:

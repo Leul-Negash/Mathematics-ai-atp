@@ -60,13 +60,15 @@ class VariableNormalizer:
         similar states with different concrete variables will not collapse to
         the same rendered formula.
     """
+
     def __init__(self, *, normalize: bool = False) -> None:
         self.normalize = normalize
         self.var_map: dict[str, str] = {}
+        self.local_names: dict[str, str] = {}
         self.counter = 0
 
     def get(self, var_id: Any) -> str:
-        key = str(var_id)
+        key = self.local_names.get(str(var_id), str(var_id))
 
         if not self.normalize:
             return sanitize_metta_symbol(key)

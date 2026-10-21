@@ -34,6 +34,7 @@ from maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver import (
 )
 from maths_ai.gnn_inference.atp_lean_gnn.rl_resources import ResourcePlan
 from maths_ai.gnn_inference.tests.model_helpers import (
+    ScopedFakeClient,
     actor_critic,
     pantograph_goal,
     structured_goal,
@@ -50,18 +51,22 @@ class _FakeGoalState:
         self.goals = list(goals or [])
 
 
-class _FakeServer:
+class _FakeServer(ScopedFakeClient):
     def __init__(self):
         self.closed = False
 
-    def _close(self):
+    async def aclose(self):
         self.closed = True
+        self.is_usable = False
 
-    async def goal_start_async(self, expression):
+    async def _start_goal(self, expression):
         return _FakeGoalState()
 
-    async def goal_tactic_async(self, state, tactic):
-        return _FakeGoalState([pantograph_goal(structured_goal(GOAL_EXPR, HYPS))])
+    async def _apply_tactic(self, state, tactic):
+        if tactic.startswith("intro "):
+            return _FakeGoalState([pantograph_goal(structured_goal(GOAL_EXPR, HYPS))])
+        # Any other tactic closes the replayed goal.
+        return _FakeGoalState()
 
 
 class _QEDExecutor:
@@ -270,7 +275,7 @@ class ConfigTests(unittest.TestCase):
             with (
                 patch(
                     "maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver."
-                    "create_model_sexpr_server",
+                    "create_model_sexpr_client",
                     new=create_server,
                 ),
                 patch(

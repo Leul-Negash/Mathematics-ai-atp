@@ -732,7 +732,7 @@ dependencies = [
     { name = "datasets" },
     { name = "faiss-cpu" },
     { name = "graphviz" },
-    { name = "pantograph" },
+    { name = "pantograph-async-client" },
     { name = "pydantic" },
     { name = "pytest" },
     { name = "torch" },
@@ -749,7 +749,7 @@ requires-dist = [
     { name = "datasets", specifier = ">=5.0.1" },
     { name = "faiss-cpu", specifier = ">=1.14.2" },
     { name = "graphviz", specifier = ">=0.21" },
-    { name = "pantograph", git = "https://github.com/stanford-centaur/PyPantograph" },
+    { name = "pantograph-async-client", git = "https://github.com/123nol/Pantograph-Client?rev=664bcaa10578cb933afc618b8e8cb20a1b751106" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "torch", specifier = ">=2.12.0" },
@@ -1209,9 +1209,9 @@ wheels = [
 ]
 
 [[package]]
-name = "pantograph"
-version = "0.3.15"
-source = { git = "https://github.com/stanford-centaur/PyPantograph#2c9fad2727c405c9976b766088ca761f14733f95" }
+name = "pantograph-async-client"
+version = "0.1.0"
+source = { git = "https://github.com/123nol/Pantograph-Client?rev=664bcaa10578cb933afc618b8e8cb20a1b751106#664bcaa10578cb933afc618b8e8cb20a1b751106" }
 
 [[package]]
 name = "pluggy"

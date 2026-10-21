@@ -24,6 +24,7 @@ from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import (
     ActorCriticWithArgsClassifier,
 )
 from maths_ai.gnn_inference.tests.model_helpers import (
+    ScopedFakeClient,
     actor_critic,
     pantograph_goal,
     structured_goal,
@@ -51,20 +52,19 @@ class _FakeGoalState:
         self.goals = [pantograph_goal(goal) for goal in (goals or [])]
 
 
-class _FakeServer:
+class _FakeServer(ScopedFakeClient):
     def __init__(self):
-        self.proc = object()
         self.goals_by_expression = {}
         self._last_expression = None
 
-    async def goal_start_async(self, expression):
+    async def _start_goal(self, expression):
         self._last_expression = expression
         goal = self.goals_by_expression.get(expression)
         if goal is None:
             goal = structured_goal(expression, HYPS if expression == GOAL_EXPR else [])
         return _FakeGoalState([goal] if goal is not None else [], expression=expression)
 
-    async def goal_tactic_async(self, state, tactic):
+    async def _apply_tactic(self, state, tactic):
         if tactic.startswith("intro "):
             if state.expression == "∀ (p : Prop), p → p":
                 return _FakeGoalState(
@@ -550,7 +550,6 @@ class MCTSSearchTests(unittest.TestCase):
             return MaterializedGoal(
                 goal=node.goal,
                 state=object(),
-                server_epoch=self._server_epoch,
                 fingerprint=node.goal.state_fingerprint(),
             )
 
@@ -575,7 +574,6 @@ class MCTSSearchTests(unittest.TestCase):
             return MaterializedGoal(
                 goal=node.goal,
                 state=object(),
-                server_epoch=self._server_epoch,
                 fingerprint=node.goal.state_fingerprint(),
             )
 
@@ -588,38 +586,37 @@ class MCTSSearchTests(unittest.TestCase):
         asyncio.run(reasoner._expand_leaves(graph, leaf_ids))
         self.assertEqual(proposed, [leaf_ids[1]])
 
-    def test_restart_resamples_stale_leaf_before_execution(self):
+    def test_leaf_batch_is_proposed_once_and_executed_with_its_own_state(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
         graph, leaf_ids = self._two_leaf_graph()
         policy_rows = []
         executions = []
-        calls = 0
 
         async def materialize(self, graph, node):
             return MaterializedGoal(
                 goal=node.goal,
-                state=f"state-{self._server_epoch}",
-                server_epoch=self._server_epoch,
+                state=f"state-{node.id}",
                 fingerprint=node.goal.state_fingerprint(),
             )
 
         def propose(self, nodes):
-            nonlocal calls
-            calls += 1
-            policy_rows.append((calls, [node.id for node in nodes]))
-            if calls == 1:
-                self._server_epoch += 1
-            return [[TacticCandidate(tactic_name="skip", arguments=[], probability=1.0)] for _ in nodes]
+            policy_rows.append([node.id for node in nodes])
+            return [
+                [TacticCandidate(tactic_name="skip", arguments=[], probability=1.0)]
+                for _ in nodes
+            ]
 
         async def execute(self, graph, node, candidates, *, materialized):
-            executions.append((node.id, materialized.server_epoch, materialized.state))
+            executions.append((node.id, materialized.state))
 
         reasoner._materialize_for_expansion = MethodType(materialize, reasoner)
         reasoner.predict_next_tactics_for_nodes = MethodType(propose, reasoner)
         reasoner._execute_and_link = MethodType(execute, reasoner)
-        asyncio.run(reasoner._expand_leaves(graph, [leaf_ids[0]]))
-        self.assertEqual(policy_rows, [(1, [leaf_ids[0]]), (2, [leaf_ids[0]])])
-        self.assertEqual(executions, [(leaf_ids[0], 1, "state-1")])
+        asyncio.run(reasoner._expand_leaves(graph, leaf_ids))
+        self.assertEqual(policy_rows, [leaf_ids])
+        self.assertEqual(
+            executions, [(node_id, f"state-{node_id}") for node_id in leaf_ids]
+        )
 
 
 class PLNDisabledTests(unittest.TestCase):

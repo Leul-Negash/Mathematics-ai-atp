@@ -30,8 +30,7 @@ from typing import Deque, Dict, List, Optional, Protocol, Set, Tuple
 
 from maths_ai.data_models.proof_components import STV, Goal, TacticCandidate
 from maths_ai.data_models.proof_components import GoalState as GoalStateModel
-from pantograph import Server
-from pantograph.server import GoalState
+from pantograph_async import PantographStateScope, TacticState
 
 class NodeStatus:
     OPEN = "open"          # not yet expanded; eligible for the search frontier
@@ -246,14 +245,16 @@ class TacticExecutor(Protocol):
     """Applies a predicted tactic to a goal state and reports the outcome.
 
     Turning a ``(tactic_name, arguments)`` pair into an actual Lean state
-    transition needs a running Lean/Pantograph backend (cf. the translator
-    readme's ``server.goal_tactic(state, tactic=...)``); ``HybridReasoner``
+    transition needs a running Lean/Pantograph backend
+    (``scope.apply_tactic(state, tactic)``); ``HybridReasoner``
     is built against ``PantographExecutor`` for that.
     ``NullTacticExecutor`` implements the same protocol for tests/tooling
     that don't have a Lean/Pantograph backend available.
     """
 
-    async def apply(self, server: Server, state: GoalState, tactic: TacticCandidate) -> TacticOutcome:
+    async def apply(
+        self, scope: PantographStateScope, state: TacticState, tactic: TacticCandidate
+    ) -> TacticOutcome:
         ...
 
 
@@ -267,9 +268,11 @@ class NullTacticExecutor:
     failure keeps the missing piece visible instead of masking it.
     """
 
-    async def apply(self, server: Server, state: GoalState, tactic: TacticCandidate) -> TacticOutcome:
+    async def apply(
+        self, scope: PantographStateScope, state: TacticState, tactic: TacticCandidate
+    ) -> TacticOutcome:
         rendered = " ".join([tactic.tactic_name, *(arg.rstrip(":") for arg in tactic.arguments)]).strip()
-        target = state.goals[0].target if state.goals else "<no goals>"
+        target = state.goals[0].target.pp if state.goals else "<no goals>"
         return TacticOutcome(
             success=False,
             error=(

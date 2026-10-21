@@ -19,7 +19,7 @@ class _Server:
         self.worker_id = worker_id
         self.closed = False
 
-    def _close(self) -> None:
+    async def aclose(self) -> None:
         self.closed = True
 
 
