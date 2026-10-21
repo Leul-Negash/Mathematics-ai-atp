@@ -7,6 +7,10 @@ Mathlib project instead of core Lean. The seed goal is provable in either, so a
 failure under ``--source-root`` that does not reproduce without it points at the
 Lean environment rather than the RL loop.
 
+The search runs with the branch's PUCT simulation settings by default; pass
+``--selection-policy legacy`` for the best-first loop, and ``--no-pln`` to run
+without the petta binary.
+
 What it validates end-to-end with a REAL Pantograph server and a REAL petta binary:
   collect: RLHybridReasoner samples from a fresh (untrained) actor-critic, decodes each
   draw into a Lean tactic, the PantographExecutor applies it, PLN scores the survivors,
@@ -34,11 +38,13 @@ from maths_ai.data_models.proof_components import LeanGoalSeed, seed_replay_spec
 from maths_ai.hybrid_reasoner.joint_inference import PantographExecutor
 from maths_ai.hybrid_reasoner.pantograph_env import PantographEnv
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import (
-    create_model_sexpr_server,
-    pantograph_state_to_goals,
+    create_model_sexpr_client,
+    materialize_replay,
 )
 
-from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import ActorCriticWithArgsClassifier
+from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import (
+    ActorCriticWithArgsClassifier,
+)
 from maths_ai.gnn_inference.atp_lean_gnn.model_factory import build_actor_critic_model
 from maths_ai.gnn_inference.atp_lean_gnn.model_spec import ModelSpec
 from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
@@ -46,7 +52,7 @@ from maths_ai.gnn_inference.atp_lean_gnn.pln_reward import RewardConfig
 from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import (
     train_step_onpolicy,
 )
-from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab
+from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab_from_labels
 from maths_ai.gnn_inference.atp_lean_gnn.rl_reasoner import RLHybridReasoner
 
 
@@ -88,67 +94,111 @@ def build_model(node_vocab: dict[str, int]) -> ActorCriticWithArgsClassifier:
     return model
 
 
-async def run_smoke(env: PantographEnv) -> None:
+async def run_smoke(env: PantographEnv, *, use_pln: bool = True, **search) -> None:
     torch.manual_seed(0)
 
     env.verify()
     print(f"[rl_smoke] starting Pantograph server: {env.describe()}")
-    server = await create_model_sexpr_server(env)
-    replay = seed_replay_spec(LeanGoalSeed(expression=SEED_GOAL, hypotheses=SEED_HYPS))
-    seed_state = await server.goal_start_async(replay.expression)
-    seed_state = await server.goal_tactic_async(
-        seed_state, f"intro {' '.join(replay.local_names)}"
-    )
-    goals = pantograph_state_to_goals(seed_state)
-    if len(goals) != 1:
-        raise RuntimeError(f"Smoke seed serialized into {len(goals)} goals.")
-    node_vocab = build_vocab([model_goal_to_dag(goals[0])])
-    model = build_model(node_vocab)
-    executor = PantographExecutor(server)
+    async with await create_model_sexpr_client(env) as server:
+        replay = seed_replay_spec(
+            LeanGoalSeed(expression=SEED_GOAL, hypotheses=SEED_HYPS)
+        )
+        async with server.state_scope() as scope:
+            seed_state = await materialize_replay(scope, replay)
+            goals = [goal.goal for goal in seed_state.goals]
+        if len(goals) != 1:
+            raise RuntimeError(f"Smoke seed serialized into {len(goals)} goals.")
+        # Introduced locals add free-variable labels the seed goal lacks.
+        node_vocab = build_vocab_from_labels(
+            [
+                *(node.label for node in model_goal_to_dag(goals[0]).nodes),
+                *(f"FV{index}" for index in range(8)),
+            ]
+        )
+        model = build_model(node_vocab)
+        executor = PantographExecutor(server)
 
-    reasoner = RLHybridReasoner(
-        model,
-        node_vocab,
-        TACTIC_VOCAB,
-        executor=executor,
-        env=env,
-        top_k_tactics=4,
-        max_depth=4,
-        max_nodes=30,
-    )
+        reasoner = RLHybridReasoner(
+            model,
+            node_vocab,
+            TACTIC_VOCAB,
+            executor=executor,
+            top_k_tactics=4,
+            max_depth=4,
+            max_nodes=30,
+            use_pln=use_pln,
+            **search,
+        )
 
-    print(f"[rl_smoke] collect: proving `{SEED_GOAL}` with hyps {SEED_HYPS}")
-    result = await reasoner.prove(SEED_GOAL, hypotheses=SEED_HYPS)
+        print(
+            f"[rl_smoke] collect ({reasoner.selection_policy}): proving "
+            f"`{SEED_GOAL}` with hyps {SEED_HYPS}"
+        )
+        result = await reasoner.prove(SEED_GOAL, hypotheses=SEED_HYPS)
 
-    graph = result.graph
-    print(
-        f"[rl_smoke] search done: solved={graph.is_solved()} nodes={len(graph.nodes)} "
-        f"edges={len(graph.edges)} on-policy edges={len(result.edge_actions)} "
-        f"failures={len(result.failure_actions)}"
-    )
-    assert result.edge_actions or result.failure_actions, (
-        "no on-policy signal collected — neither an accepted edge nor a failure record"
-    )
+        graph = result.graph
+        print(
+            f"[rl_smoke] search done: solved={graph.is_solved()} nodes={len(graph.nodes)} "
+            f"edges={len(graph.edges)} on-policy edges={len(result.edge_actions)} "
+            f"failures={len(result.failure_actions)}"
+        )
+        assert (
+            result.edge_actions or result.failure_actions
+        ), "no on-policy signal collected — neither an accepted edge nor a failure record"
 
-    optimizer = AdamW(model.parameters(), lr=1e-3)
-    metrics = train_step_onpolicy(
-        model, optimizer, [result], reasoner.dag_featurize_data,
-        reward_cfg=RewardConfig(step_penalty=0.01),
-        bc_weight=0.0,
-    )
-    print(f"[rl_smoke] train step metrics: {metrics}")
-    assert metrics.get("num_transitions", 0.0) + metrics.get("num_failures", 0.0) > 0
-    assert all(v == v for v in metrics.values()), "NaN in training metrics"
-    print("[rl_smoke] OK — collect → harvest → one on-policy gradient step completed.")
+        optimizer = AdamW(model.parameters(), lr=1e-3)
+        metrics = train_step_onpolicy(
+            model,
+            optimizer,
+            [result],
+            reasoner.dag_featurize_data,
+            reward_cfg=RewardConfig(step_penalty=0.01),
+            bc_weight=0.0,
+        )
+        print(f"[rl_smoke] train step metrics: {metrics}")
+        assert (
+            metrics.get("num_transitions", 0.0) + metrics.get("num_failures", 0.0) > 0
+        )
+        assert all(v == v for v in metrics.values()), "NaN in training metrics"
+        print(
+            "[rl_smoke] OK — collect → harvest → one on-policy gradient step completed."
+        )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Live smoke test for the on-policy RL loop")
-    parser.add_argument("--source-root", type=str, required=True,
-                        help="Pinned Mathlib Lake project root")
-    parser.add_argument("--pantograph-repl", type=str, required=True,
-                        help="Pinned model-S-expression Pantograph REPL binary")
+    parser = argparse.ArgumentParser(
+        description="Live smoke test for the on-policy RL loop"
+    )
+    parser.add_argument(
+        "--source-root",
+        type=str,
+        required=True,
+        help="Pinned Mathlib Lake project root",
+    )
+    parser.add_argument(
+        "--pantograph-repl",
+        type=str,
+        required=True,
+        help="Pinned model-S-expression Pantograph REPL binary",
+    )
+    parser.add_argument(
+        "--selection-policy", choices=("legacy", "puct"), default="puct"
+    )
+    parser.add_argument("--num-simulations", type=int, default=8)
+    parser.add_argument("--sim-batch-size", type=int, default=2)
+    parser.add_argument(
+        "--no-pln", action="store_true", help="Run without the petta binary"
+    )
     args = parser.parse_args()
+    search = (
+        {
+            "selection_policy": "puct",
+            "num_simulations": args.num_simulations,
+            "sim_batch_size": args.sim_batch_size,
+        }
+        if args.selection_policy == "puct"
+        else {}
+    )
 
     source_root = Path(args.source_root)
     env = PantographEnv(
@@ -156,7 +206,7 @@ def main() -> None:
         pantograph_repl=Path(args.pantograph_repl),
         imports=("Init", "Mathlib"),
     )
-    asyncio.run(run_smoke(env))
+    asyncio.run(run_smoke(env, use_pln=not args.no_pln, **search))
 
 
 if __name__ == "__main__":

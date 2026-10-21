@@ -111,8 +111,7 @@ Terminal), not a notebook — the driver is a long-running CLI process.
 ```bash
 cd /path/to/new-maths
 uv sync                          # installs torch, torch-geometric, pydantic, faiss-cpu,
-                                 # and pantograph (from the PyPantograph git source)
-                                 # dataset mode (iter_dataset_rows)
+                                 # and the dataset-mode dependencies (iter_dataset_rows)
 ```
 
 CUDA check (the prepared configs use `"device": "auto"`, which falls back to CPU —
@@ -124,9 +123,12 @@ uv run python -c "import torch; print(torch.cuda.is_available(), torch.version.c
 
 ### 3.2 Lean / Pantograph
 
-Live RL uses the repository's strict model-S-expression server factory. It requires a
-Lake project, a custom `pantograph-repl` built against that project, and the `Mathlib`
-import. Use the setup helper to verify the pair and print the exact config flags:
+Live RL uses the repository-owned async client
+(`maths_ai/hybrid_reasoner/pantograph_client.py`) through its strict
+model-S-expression factory. It requires a Lake project, the validated custom REPL built
+against that project, and the `Mathlib` import; no PyPantograph module is imported. See
+[owned_pantograph_client.md](owned_pantograph_client.md) for the client contract. Use
+the setup helper to verify the pair and print the exact config flags:
 
 ```bash
 uv run python maths_ai/gnn_inference/scripts/setup_sexpr_environment.py \
@@ -140,7 +142,7 @@ several minutes.
 
 The configured custom REPL is launched as `stdbuf -oL <repl> Init Mathlib`. The pinned
 Lean runtime otherwise block-buffers `ready.` and later newline-delimited JSON responses
-when stdout is connected to PyPantograph's pipe. stdin remains an open writable pipe so
+when stdout is connected to the client's pipe. stdin remains an open writable pipe so
 the server can accept `options.set`, `goal.start`, and `goal.tactic` after readiness.
 GNU `stdbuf` must therefore be available on `PATH`; it is supplied by `coreutils` on the
 supported Linux deployment. Closing stdin with `DEVNULL` or increasing the startup
@@ -262,10 +264,11 @@ readout, comes from the version-3 warm-start manifest.
 
 `source_root` is the Lake project whose toolchain and Mathlib environment the live server
 loads. `pantograph_repl` is the custom REPL binary built for that same environment. Both
-are required for live RL; the strict server factory validates them, imports `Mathlib`, and
-runs a capability probe on startup and after every restart. The probe exercises explicit
-and instance locals and checks normalized `FV{i}` identities. A Python client or REPL from
-another Lean/Mathlib pair is a protocol mismatch even when the executable starts.
+are required for live RL; the strict client factory validates them, checks the REPL's
+`maths-ai-pantograph` descriptor, imports `Mathlib`, and runs a capability probe before
+the worker accepts a theorem. The probe exercises explicit, instance, and local-let
+locals and checks normalized `FV{i}` identities. A REPL from another Lean/Mathlib pair,
+or the original unextended REPL, is a protocol mismatch even when the executable starts.
 
 **Search mode:**
 
@@ -293,10 +296,13 @@ one batch before backup. `puct_c` is the exploration constant in the PUCT score
 explicit budget under `"legacy"` and a missing `num_simulations` under `"puct"` both
 raise `ValueError` before any Lean server starts.
 
-Each PUCT leaf is serialized through Pantograph before the batched policy forward. If a
-server restart occurs while a leaf batch is being executed, every materialized state from
-the old server epoch is discarded. Those leaves are replayed under the new epoch and their
-actions are resampled; stale actions are not recorded as executor failures.
+Each search owns one client state scope. Each PUCT leaf is serialized through that scope
+before the batched policy forward, and its state stays allocated until every candidate
+tactic for that leaf has finished. A successful alternative is converted to canonical
+goals and released at once; graph nodes and replay queues hold canonical goals, never
+live states. The scope releases whatever remains when the search ends, on any exit path.
+The reasoner never restarts its client: a transport failure or timeout ends the search,
+and the collection pool replaces the complete client/reasoner worker.
 
 The visit counters have separate meanings. `N` counts every completed traversal, including
 an `UNKNOWN` result caused by an unelaborated node or infrastructure failure. `N_v` counts
@@ -526,9 +532,12 @@ one-worker process memory:
 The monotonic deadline passed to `prove()` is cooperative. Legacy search checks it
 between expansions, and PUCT search checks it between simulation batches, so completed
 experience is returned with `SearchEndReason.DEADLINE`. The outer timeout adds grace
-for the in-flight Pantograph call. If that hard timeout expires, the driver discards
-the partial result, closes the server, and reconstructs the complete worker before
-assigning another theorem. Other workers continue processing.
+for the in-flight Pantograph call. If that hard timeout or a client request timeout
+expires, or the client reports a transport failure, the driver discards the partial
+result, closes the client, and reconstructs the complete worker before assigning another
+theorem. Other workers continue processing. Protocol, state, and configuration errors
+stop collection instead of being retried; an ordinary error in one theorem stays
+isolated to that theorem's record.
 
 Startup logs contain effective CPU limits, worker/server count, active devices, GPU
 free and total memory, and canonical parameter bytes. Per-round metrics include

@@ -30,7 +30,11 @@ from torch.optim import AdamW
 
 from maths_ai.data_models.proof_components import Goal, LeanGoalSeed
 from maths_ai.hybrid_reasoner.pantograph_env import PantographEnv
-from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_server
+from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
+from maths_ai.hybrid_reasoner.pantograph_protocol import (
+    PantographRequestTimeout,
+    PantographTransportError,
+)
 from maths_ai.hybrid_reasoner.hypergraph import BackupSource, SearchEndReason
 from maths_ai.hybrid_reasoner.selection_policy import resolve_search_params
 
@@ -42,7 +46,7 @@ from .dataset import DATASET_NAME, iter_dataset_rows
 from .pln_reward import RewardConfig
 from .pln_rl_training import make_dag_featurizer, train_step_htps_style, train_step_onpolicy
 from .reporting import console_print
-from .rl_live_collection import LiveReasonerPool
+from .rl_live_collection import FATAL_SESSION_ERRORS, LiveReasonerPool
 from .rl_resources import ResourcePlan, plan_resources
 from .rl_reasoner import RLHybridReasoner, RLSearchResult
 from .search_harvest import (
@@ -234,6 +238,8 @@ def pantograph_env(cfg: RLTrainingConfig) -> PantographEnv:
         pantograph_repl=cfg.pantograph_repl,
         imports=imports,
         timeout=cfg.server_timeout_s,
+        server_start_timeout_s=cfg.server_start_timeout_s,
+        worker_shutdown_timeout_s=cfg.worker_shutdown_timeout_s,
     )
 
 
@@ -419,13 +425,15 @@ async def collect_round(
 ) -> tuple[list[RLSearchResult], dict[str, float]]:
     """Collect with per-theorem fault isolation.
 
-    A pool uses isolated reasoners and Pantograph servers concurrently. The
-    single-reasoner path remains available for tests and small runs.
+    A pool uses isolated reasoners and Pantograph clients concurrently and
+    replaces a worker whose client failed. The single-reasoner path remains
+    available for tests and small runs; it cannot replace its only client, so a
+    transport failure or a timeout that retired the client ends the run.
 
     Timeout handling: ``prove`` receives a monotonic ``deadline`` and stops
     cleanly between expansions / simulation batches, returning the partial
     graph — a multi-simulation search that runs out of time keeps its
-    completed simulations as experience. ``asyncio.wait_for`` stays as a
+    completed simulations as experience. ``asyncio.timeout`` stays as a
     backstop at ``timeout_s * 1.25`` for a hang inside a single Lean call,
     where cancellation (and the loss of that search) is the only option left.
     """
@@ -445,24 +453,30 @@ async def collect_round(
     for item in batch:
         try:
             deadline = time.monotonic() + timeout_s
-            result = await asyncio.wait_for(
-                reasoner.prove(
+            async with asyncio.timeout(timeout_s * 1.25):
+                result = await reasoner.prove(
                     item.goal.expression,
                     hypotheses=item.goal.hypotheses,
                     greedy=greedy,
                     deadline=deadline,
-                ),
-                timeout=timeout_s * 1.25,
-            )
+                )
             results.append(result)
             if result.graph.is_solved():
                 solved += 1
             if result.graph.end_reason == SearchEndReason.DEADLINE:
                 cooperative_deadlines += 1
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, PantographRequestTimeout) as exc:
             failed += 1
             hard_timeouts += 1
             console_print(f"  [collect] timeout on: {item.goal.expression[:60]}")
+            server = getattr(reasoner, "server", None)
+            if server is not None and not server.is_usable:
+                raise PantographTransportError(
+                    "A hard timeout retired the only Pantograph client; use a "
+                    "reasoner pool to replace interrupted workers."
+                ) from exc
+        except (*FATAL_SESSION_ERRORS, PantographTransportError):
+            raise
         except Exception as exc:  # noqa: BLE001 — a single search may not kill the run
             failed += 1
             console_print(f"  [collect] error on: {item.goal.expression[:60]} — {exc}")
@@ -620,7 +634,7 @@ async def _create_live_reasoner_pool(
     from maths_ai.hybrid_reasoner.joint_inference import PantographExecutor
 
     async def server_factory(_worker_id: int):
-        return await create_model_sexpr_server(env)
+        return await create_model_sexpr_client(env)
 
     def reasoner_factory(worker_id, device, replica, server):
         del worker_id
@@ -638,7 +652,6 @@ async def _create_live_reasoner_pool(
             sim_batch_size=cfg.sim_batch_size,
             puct_c=cfg.puct_c,
             use_pln=cfg.use_pln,
-            env=env,
         )
 
     async def search_factory(reasoner, theorem, greedy, deadline):

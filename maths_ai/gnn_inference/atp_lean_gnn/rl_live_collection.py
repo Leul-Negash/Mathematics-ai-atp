@@ -10,6 +10,15 @@ from typing import Any, Awaitable, Callable, Literal
 
 import torch
 
+from maths_ai.hybrid_reasoner.pantograph_client import await_cleanup
+from maths_ai.hybrid_reasoner.pantograph_protocol import (
+    PantographConfigurationError,
+    PantographProtocolError,
+    PantographRequestTimeout,
+    PantographStateError,
+    PantographTransportError,
+)
+
 from .rl_resources import ResourcePlan
 
 
@@ -26,6 +35,17 @@ SearchFactory = Callable[[Any, Any, bool, float], Awaitable[Any]]
 SolvedPredicate = Callable[[Any], bool]
 CooperativeDeadlinePredicate = Callable[[Any], bool]
 LogFunction = Callable[[str], None]
+
+# Startup and search budgets use ``asyncio.timeout`` rather than ``wait_for``:
+# the awaited coroutine stays in the caller's task, so a repeated cancellation
+# during shutdown cannot detach a client whose cleanup is still running.
+
+# Errors that mean the client contract itself is broken; no retry can help.
+FATAL_SESSION_ERRORS = (
+    PantographProtocolError,
+    PantographStateError,
+    PantographConfigurationError,
+)
 
 
 @dataclass
@@ -83,20 +103,30 @@ class WorkerStartupError(RuntimeError):
         )
 
 
-def _close_server(server: Any) -> None:
-    try:
-        server._close()
-    except Exception:
-        return
+async def _close_servers(servers: list[Any]) -> None:
+    """Close and reap every client; each close is bounded by its own settings."""
 
+    async def close_all():
+        results = await asyncio.gather(
+            *(server.aclose() for server in servers), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
-async def _close_servers(servers: list[Any], timeout_s: float) -> None:
-    await asyncio.wait_for(
-        asyncio.gather(
-            *(asyncio.to_thread(_close_server, server) for server in servers)
-        ),
-        timeout=timeout_s,
+    await await_cleanup(
+        asyncio.create_task(close_all(), name="pantograph-pool-close-all")
     )
+
+
+async def _close_partial_server(server: Any, original: BaseException) -> None:
+    try:
+        await server.aclose()
+    except BaseException as cleanup:
+        if isinstance(original, asyncio.CancelledError):
+            original.add_note(f"Partial worker cleanup also reported: {cleanup}")
+            raise original
+        raise
 
 
 class LiveReasonerPool:
@@ -135,6 +165,9 @@ class LiveReasonerPool:
         self.model_generation = int(model_generation)
         self.log = log
         self._closed = False
+        self._close_task: asyncio.Task | None = None
+        self._collecting = False
+        self._collection_task: asyncio.Task | None = None
         self._replica_generations: dict[int, int] = {
             id(worker.model): self.model_generation for worker in workers
         }
@@ -178,14 +211,15 @@ class LiveReasonerPool:
         ) -> LiveReasonerWorker:
             server = None
             try:
-                server = await asyncio.wait_for(
-                    server_factory(worker_id), timeout=startup_timeout_s
-                )
+                async with asyncio.timeout(startup_timeout_s):
+                    server = await server_factory(worker_id)
                 reasoner = reasoner_factory(worker_id, device, replica, server)
                 return LiveReasonerWorker(worker_id, device, replica, reasoner, server)
             except BaseException as exc:
                 if server is not None:
-                    _close_server(server)
+                    await _close_partial_server(server, exc)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 raise WorkerStartupError(
                     worker_id=worker_id,
                     device=device,
@@ -193,15 +227,41 @@ class LiveReasonerPool:
                     cause=exc,
                 ) from exc
 
-        results = await asyncio.gather(
-            *(create_one(*binding) for binding in bindings), return_exceptions=True
-        )
+        tasks = [asyncio.create_task(create_one(*binding)) for binding in bindings]
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except BaseException as original:
+            # Cancelled during startup: stop the remaining startups, then close
+            # every client that finished before handing the cancellation back.
+
+            async def rollback():
+                for task in tasks:
+                    task.cancel()
+                completed = await asyncio.gather(*tasks, return_exceptions=True)
+                await _close_servers(
+                    [
+                        item.server
+                        for item in completed
+                        if isinstance(item, LiveReasonerWorker)
+                    ]
+                )
+
+            try:
+                await await_cleanup(
+                    asyncio.create_task(
+                        rollback(), name="pantograph-pool-startup-rollback"
+                    )
+                )
+            except BaseException as cleanup:
+                if isinstance(original, asyncio.CancelledError):
+                    original.add_note(f"Startup rollback also reported: {cleanup}")
+                else:
+                    raise
+            raise original
         workers = [result for result in results if isinstance(result, LiveReasonerWorker)]
         errors = [result for result in results if isinstance(result, BaseException)]
         if errors:
-            await _close_servers(
-                [worker.server for worker in workers], shutdown_timeout_s
-            )
+            await _close_servers([worker.server for worker in workers])
             raise errors[0]
 
         return cls(
@@ -227,10 +287,7 @@ class LiveReasonerPool:
         return self
 
     async def __aexit__(self, exc_type, exc, traceback) -> None:
-        try:
-            await self.close()
-        except asyncio.TimeoutError:
-            self.log("Warning: timed out while closing Pantograph worker servers.")
+        await self.close()
 
     @property
     def primary(self) -> Any:
@@ -244,14 +301,22 @@ class LiveReasonerPool:
         return [worker for worker in self.workers if worker.active]
 
     async def close(self) -> None:
-        """Close every current server once, bounded by the configured timeout."""
+        """Close every current client once; repeated calls join the same close."""
 
-        if self._closed:
-            return
-        self._closed = True
-        await _close_servers(
-            [worker.server for worker in self.workers], self.shutdown_timeout_s
-        )
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(
+                self._shutdown_pool(), name="pantograph-pool-close"
+            )
+        await await_cleanup(self._close_task)
+
+    async def _shutdown_pool(self) -> None:
+        # Join collection before snapshotting clients, so a replacement cannot
+        # publish a new process after the shutdown list has been taken.
+        if self._collection_task is not None:
+            self._collection_task.cancel()
+            await asyncio.gather(self._collection_task, return_exceptions=True)
+        await _close_servers([worker.server for worker in self.workers])
 
     def assert_generation(self, model_generation: int) -> None:
         """Require every active replica to contain the canonical snapshot."""
@@ -273,6 +338,10 @@ class LiveReasonerPool:
     def synchronize(self, model: torch.nn.Module, model_generation: int) -> float:
         """Copy the final canonical state to each distinct collection replica."""
 
+        if self._collecting:
+            raise PantographStateError(
+                "Cannot synchronize model weights during collection."
+            )
         if model is not self.canonical_model:
             raise ValueError("Replica synchronization requires the pool's canonical model.")
         if model_generation <= self.model_generation:
@@ -299,12 +368,14 @@ class LiveReasonerPool:
     async def _replacement_worker(
         self, worker: LiveReasonerWorker
     ) -> LiveReasonerWorker:
-        await _close_servers([worker.server], self.shutdown_timeout_s)
+        """Retire the complete client/reasoner binding and start a fresh one."""
+        if self._closed:
+            raise PantographStateError("Cannot replace a worker in a closing pool.")
+        await _close_servers([worker.server])
         server = None
         try:
-            server = await asyncio.wait_for(
-                self.server_factory(worker.worker_id), timeout=self.startup_timeout_s
-            )
+            async with asyncio.timeout(self.startup_timeout_s):
+                server = await self.server_factory(worker.worker_id)
             reasoner = self.reasoner_factory(
                 worker.worker_id, worker.device, worker.model, server
             )
@@ -319,8 +390,10 @@ class LiveReasonerPool:
             return replacement
         except BaseException as exc:
             if server is not None:
-                _close_server(server)
+                await _close_partial_server(server, exc)
             worker.active = False
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise WorkerStartupError(
                 worker_id=worker.worker_id,
                 device=worker.device,
@@ -336,7 +409,37 @@ class LiveReasonerPool:
         model_generation: int,
         greedy: bool = False,
     ) -> CollectionRound:
-        """Collect one bounded round and return records in input order."""
+        """Collect one bounded round and return records in input order.
+
+        The round runs as one task that shutdown can cancel and join, and the
+        pool rejects an overlapping round or a weight update while it runs.
+        """
+        if self._collecting:
+            raise PantographStateError("A pool supports one active collection round.")
+        self._collecting = True
+        self._collection_task = asyncio.create_task(
+            self._collect_round(
+                batch,
+                timeout_s=timeout_s,
+                model_generation=model_generation,
+                greedy=greedy,
+            ),
+            name="pantograph-pool-collection",
+        )
+        try:
+            return await self._collection_task
+        finally:
+            self._collecting = False
+            self._collection_task = None
+
+    async def _collect_round(
+        self,
+        batch: list[Any],
+        *,
+        timeout_s: float,
+        model_generation: int,
+        greedy: bool = False,
+    ) -> CollectionRound:
 
         if self._closed:
             raise RuntimeError("Cannot collect with a closed LiveReasonerPool.")
@@ -370,17 +473,16 @@ class LiveReasonerPool:
                 index, theorem, enqueued_at = item
                 search_started = time.perf_counter()
                 queue_wait = search_started - enqueued_at
+                backstop = asyncio.timeout(timeout_s * 1.25)
                 try:
                     cooperative_deadline = time.monotonic() + timeout_s
-                    result = await asyncio.wait_for(
-                        self.search_factory(
+                    async with backstop:
+                        result = await self.search_factory(
                             worker.reasoner,
                             theorem,
                             greedy,
                             cooperative_deadline,
-                        ),
-                        timeout=timeout_s * 1.25,
-                    )
+                        )
                     if self.is_cooperative_deadline(result):
                         outcome: CollectionOutcome = "cooperative_deadline"
                     else:
@@ -395,25 +497,33 @@ class LiveReasonerPool:
                             result=result,
                         )
                     )
-                except asyncio.TimeoutError as exc:
+                except (asyncio.TimeoutError, PantographTransportError) as exc:
+                    # The interrupted session may hold a request in flight, so
+                    # the whole client/reasoner binding is retired.
+                    hard_timeout = backstop.expired() or isinstance(
+                        exc, (asyncio.TimeoutError, PantographRequestTimeout)
+                    )
                     records.append(
                         CollectionRecord(
                             batch_index=index,
                             worker_id=worker.worker_id,
                             queue_wait_s=queue_wait,
                             search_s=time.perf_counter() - search_started,
-                            outcome="hard_timeout",
+                            outcome="hard_timeout" if hard_timeout else "error",
                             exception_category=type(exc).__name__,
                         )
                     )
                     self.log(
-                        f"  [collect worker={worker.worker_id}] hard timeout; "
+                        f"  [collect worker={worker.worker_id}] "
+                        f"{'hard timeout' if hard_timeout else type(exc).__name__}; "
                         "replacing Pantograph worker"
                     )
                     try:
                         worker = await self._replacement_worker(worker)
                         replacements[worker.worker_id] += 1
                     except WorkerStartupError as replacement_error:
+                        if isinstance(replacement_error.cause, FATAL_SESSION_ERRORS):
+                            raise replacement_error.cause
                         replacement_failures[worker.worker_id] += 1
                         active_count -= 1
                         self.log(f"  [collect worker={worker.worker_id}] {replacement_error}")
@@ -422,6 +532,8 @@ class LiveReasonerPool:
                                 "Every live collection worker became unavailable."
                             ) from replacement_error
                         return
+                except FATAL_SESSION_ERRORS:
+                    raise
                 except Exception as exc:
                     records.append(
                         CollectionRecord(
@@ -442,12 +554,26 @@ class LiveReasonerPool:
         tasks = [asyncio.create_task(run_worker(worker)) for worker in workers]
         try:
             await asyncio.gather(producer, *tasks)
-        except BaseException:
-            producer.cancel()
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(producer, *tasks, return_exceptions=True)
-            raise
+        except BaseException as original:
+
+            async def cancel_and_join():
+                producer.cancel()
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(producer, *tasks, return_exceptions=True)
+
+            try:
+                await await_cleanup(
+                    asyncio.create_task(
+                        cancel_and_join(), name="pantograph-pool-round-rollback"
+                    )
+                )
+            except BaseException as cleanup:
+                if isinstance(original, asyncio.CancelledError):
+                    original.add_note(f"Collection rollback also reported: {cleanup}")
+                else:
+                    raise
+            raise original
 
         records.sort(key=lambda record: record.batch_index)
         successful = [record for record in records if record.result is not None]

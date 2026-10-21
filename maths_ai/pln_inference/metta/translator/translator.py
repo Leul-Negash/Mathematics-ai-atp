@@ -63,13 +63,13 @@ This file is a backward-compatible re-export facade: any existing code doing
 `from translator import X` will continue to work.
 
 For direct module imports, use:
-    from translator_modules.constants import LEAN_TO_PETTA
-    from translator_modules.parser import parse_sexp_string
-    from translator_modules.renderer import render_formula
+    from maths_ai.pln_inference.metta.translator.translator_modules.constants import LEAN_TO_PETTA
+    from maths_ai.pln_inference.metta.translator.translator_modules.parser import parse_sexp_string
+    from maths_ai.pln_inference.metta.translator.translator_modules.renderer import render_formula
     etc.
 """
 
-from translator_modules import *  # noqa: F401, F403
+from maths_ai.pln_inference.metta.translator.translator_modules import *  # noqa: F401, F403
 
 if __name__ == "__main__":
     main()

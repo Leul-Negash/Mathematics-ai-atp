@@ -43,6 +43,7 @@ from maths_ai.hybrid_reasoner.joint_inference import (
     ExpansionResult,
     HybridReasoner,
 )
+from maths_ai.hybrid_reasoner.pantograph_protocol import PantographStateError
 
 from .actor_critic import ActorCriticWithArgsClassifier
 from .inference import _local_names_by_fv_label, _resolve_local_node_name
@@ -321,9 +322,6 @@ class RLHybridReasoner(HybridReasoner):
                     f"{result.value} cannot leave executable actions for node {node.id}"
                 )
 
-    def _on_materialization_invalidated(self, node: ProofNode) -> None:
-        self._pending.pop(node.id, None)
-
     def _flush_pending(self, key: int) -> None:
         """Convert one node's still-pending samples into failure records."""
         pending = self._pending.pop(key, None)
@@ -376,7 +374,12 @@ class RLHybridReasoner(HybridReasoner):
         ``deadline`` (a ``time.monotonic()`` timestamp) is forwarded to the base
         search loop, which stops cleanly between expansions / simulation batches
         and returns the partial graph.
+
+        An overlapping call is rejected before it can touch the running search's
+        pending actions, greedy mode, or result.
         """
+        if self._proving:
+            raise PantographStateError("A reasoner supports only one active search.")
         self._pending = {}
         self._greedy = greedy
         self._result = RLSearchResult(graph=None)  # graph attached after the base search
@@ -391,4 +394,5 @@ class RLHybridReasoner(HybridReasoner):
         finally:
             self._pending.clear()
             self._greedy = False
+            self._result = None
         return result

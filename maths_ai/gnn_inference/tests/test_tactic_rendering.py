@@ -1,12 +1,10 @@
-"""Tactic surface syntax and dead-server discrimination (no Lean, no subprocess).
-
-Two seams from the RL search log diagnosis:
+"""Tactic surface syntax and scoped replay (no Lean, no subprocess).
 
 * ``render_tactic_command`` — argument shape is per tactic. ``rw h`` is a parse
   error at the column where ``[`` was expected; the playable form is ``rw [h]``.
-* ``_server_is_dead`` / ``_start_state`` — a ``ServerError`` means either a
-  crashed REPL or a live REPL rejecting one goal. Only the first justifies a
-  restart; re-raising the second lets the search mark the node exhausted.
+* ``_start_state`` — replay runs inside the search's state scope. Typed goal,
+  transport, protocol, and state failures propagate once; there is no restart
+  or retry inside the reasoner.
 """
 
 from __future__ import annotations
@@ -14,13 +12,24 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from pantograph.server import ServerError
+from maths_ai.hybrid_reasoner.pantograph_protocol import (
+    PantographGoalRejected,
+    PantographTacticRejected,
+    PantographTransportError,
+    PantographProtocolError,
+    PantographStateError,
+)
+from maths_ai.gnn_inference.tests.model_helpers import FakeStateScope, ScopedFakeClient
 
-from maths_ai.data_models.proof_components import Goal, GoalLocal, LeanGoalSeed, TacticCandidate
+from maths_ai.data_models.proof_components import (
+    Goal,
+    GoalLocal,
+    LeanGoalSeed,
+    TacticCandidate,
+)
 from maths_ai.hybrid_reasoner.joint_inference import (
     HybridReasoner,
     PantographExecutor,
-    _server_is_dead,
     render_tactic_command,
 )
 
@@ -35,7 +44,8 @@ class RenderTacticCommandTests(unittest.TestCase):
 
     def test_multiple_rules_are_comma_separated(self):
         self.assertEqual(
-            render_tactic_command(_tactic("rw", "h", "Nat.add_comm")), "rw [h, Nat.add_comm]"
+            render_tactic_command(_tactic("rw", "h", "Nat.add_comm")),
+            "rw [h, Nat.add_comm]",
         )
 
     def test_bracket_required_tactic_without_usable_names_is_unplayable(self):
@@ -53,25 +63,33 @@ class RenderTacticCommandTests(unittest.TestCase):
 
     def test_bracket_optional_tactic_takes_brackets_with_rules(self):
         self.assertEqual(render_tactic_command(_tactic("simp", "h")), "simp [h]")
-        self.assertEqual(render_tactic_command(_tactic("linarith", "h1", "h2")), "linarith [h1, h2]")
+        self.assertEqual(
+            render_tactic_command(_tactic("linarith", "h1", "h2")), "linarith [h1, h2]"
+        )
 
     def test_ordinary_tactic_keeps_space_separated_arguments(self):
         self.assertEqual(render_tactic_command(_tactic("apply", "h")), "apply h")
         self.assertEqual(render_tactic_command(_tactic("intro", "p", "q")), "intro p q")
-        self.assertEqual(render_tactic_command(_tactic("exact", "Nat.le_refl")), "exact Nat.le_refl")
+        self.assertEqual(
+            render_tactic_command(_tactic("exact", "Nat.le_refl")), "exact Nat.le_refl"
+        )
 
     def test_bare_tactic_renders_as_its_name(self):
         self.assertEqual(render_tactic_command(_tactic("rfl")), "rfl")
 
     def test_trailing_colons_and_blanks_are_stripped(self):
         """Arguments arrive rendered from DAG nodes, which can carry a `name :` form."""
-        self.assertEqual(render_tactic_command(_tactic("apply", "h :", "  ")), "apply h")
+        self.assertEqual(
+            render_tactic_command(_tactic("apply", "h :", "  ")), "apply h"
+        )
 
     def test_names_with_lean_punctuation_are_usable_rules(self):
         self.assertEqual(render_tactic_command(_tactic("rw", "h'")), "rw [h']")
         self.assertEqual(render_tactic_command(_tactic("rw", "α")), "rw [α]")
-        self.assertEqual(render_tactic_command(_tactic("rw", "Nat.factorial_succ")),
-                         "rw [Nat.factorial_succ]")
+        self.assertEqual(
+            render_tactic_command(_tactic("rw", "Nat.factorial_succ")),
+            "rw [Nat.factorial_succ]",
+        )
 
 
 class _RecordingServer:
@@ -79,11 +97,12 @@ class _RecordingServer:
 
     def __init__(self):
         self.commands: list[str] = []
-        self.proc = object()
 
-    async def goal_tactic_async(self, state, tactic):
+    async def apply_tactic(self, state, tactic):
         self.commands.append(tactic)
-        raise ServerError("tactic failed")  # the return path is not what these tests check
+        raise PantographTacticRejected(
+            "tactic failed"
+        )  # the return path is not what these tests check
 
 
 class ExecutorRenderingTests(unittest.TestCase):
@@ -103,140 +122,51 @@ class ExecutorRenderingTests(unittest.TestCase):
         self.assertIn("bracketed rule list", outcome.error)
 
 
-class _FakeEnv:
-    """Stands in for PantographEnv, counting restarts."""
-
-    def __init__(self, server_factory):
-        self._server_factory = server_factory
-        self.restarts = 0
-
-    async def create_server(self):
-        self.restarts += 1
-        return self._server_factory()
-
-    def describe(self) -> str:
-        return "fake-env"
-
-
-class _CrashableServer:
-    """A REPL that raises on ``goal_start_async``.
-
-    ``dies=True`` reproduces ``run_async``'s behaviour on an empty read from a
-    panicked process: ``_close()`` first (which clears ``proc``), then raise.
-    ``dies=False`` is a live server rejecting one goal.
-    """
-
-    def __init__(self, *, dies: bool, error: Exception | None = None):
-        self.proc = object()
-        self._dies = dies
-        self._error = error or ServerError("elaboration failed")
-        self.closed = False
-
-    def _close(self):
-        self.proc = None
-        self.closed = True
-
-    async def goal_start_async(self, expression):
-        if self._dies:
-            self._close()
-        raise self._error
-
-    async def goal_tactic_async(self, state, tactic):
-        raise AssertionError("not reached")
-
-
-class _HealthyServer:
+class _HealthyClient(ScopedFakeClient):
     def __init__(self):
-        self.proc = object()
-        self.started: list[str] = []
+        self.started = []
 
-    def _close(self):
-        self.proc = None
-
-    async def goal_start_async(self, expression):
+    async def _start_goal(self, expression):
         self.started.append(expression)
         return "goal-state"
 
-    async def goal_tactic_async(self, state, tactic):
+    async def _apply_tactic(self, state, tactic):
         return f"{state}+{tactic}"
 
 
-def _reasoner(server, env) -> HybridReasoner:
-    """A reasoner with only the attributes ``_start_state`` reaches.
-
-    The full ``__init__`` builds a GNN engine and a PLN subprocess; the restart
-    seam depends on none of that.
-    """
+def _reasoner(client):
     reasoner = object.__new__(HybridReasoner)
-    reasoner.server = server
-    reasoner.executor = PantographExecutor(server)
-    reasoner._env = env
-    reasoner._create_server = env.create_server
-    reasoner._server_epoch = 0
-    reasoner._cached_root_materialization = None
+    reasoner.server = client
+    reasoner._scope = FakeStateScope(client)
     return reasoner
 
 
-class ServerIsDeadTests(unittest.TestCase):
-    def test_live_server_is_not_dead(self):
-        self.assertFalse(_server_is_dead(_HealthyServer()))
+class ScopedReplayTests(unittest.TestCase):
+    def test_typed_failures_propagate_without_restart_or_retry(self):
+        for error in (
+            PantographGoalRejected("bad goal"),
+            PantographTransportError("closed pipe"),
+            PantographProtocolError("bad contract"),
+            PantographStateError("stale state"),
+        ):
+            client = _HealthyClient()
+            calls = []
 
-    def test_closed_server_is_dead(self):
-        server = _HealthyServer()
-        server._close()
-        self.assertTrue(_server_is_dead(server))
+            async def reject(expression):
+                calls.append(expression)
+                raise error
 
-    def test_object_without_proc_attribute_reads_as_dead(self):
-        self.assertTrue(_server_is_dead(object()))
-
-
-class RestartDiscriminationTests(unittest.TestCase):
-    def test_live_rejection_is_reraised_without_restarting(self):
-        """An elaboration error is the search's business, not the supervisor's."""
-        server = _CrashableServer(dies=False)
-        env = _FakeEnv(_HealthyServer)
-        reasoner = _reasoner(server, env)
-        with self.assertRaises(ServerError):
-            asyncio.run(reasoner._start_state(LeanGoalSeed(expression="p → p")))
-        self.assertEqual(env.restarts, 0)
-
-    def test_crashed_server_triggers_restart_and_retry(self):
-        healthy = _HealthyServer()
-        env = _FakeEnv(lambda: healthy)
-        reasoner = _reasoner(_CrashableServer(dies=True), env)
-        state = asyncio.run(reasoner._start_state(LeanGoalSeed(expression="p → p")))
-        self.assertEqual(env.restarts, 1)
-        self.assertEqual(state, "goal-state+skip")
-        self.assertIs(reasoner.server, healthy)
-
-    def test_restart_reinstalls_server_on_the_executor(self):
-        """A stale executor would keep writing to the reaped subprocess."""
-        healthy = _HealthyServer()
-        env = _FakeEnv(lambda: healthy)
-        reasoner = _reasoner(_CrashableServer(dies=True), env)
-        asyncio.run(reasoner._start_state(LeanGoalSeed(expression="p → p")))
-        self.assertIs(reasoner.executor.server, healthy)
-
-    def test_assertion_error_from_reaped_process_triggers_restart(self):
-        """``run_async`` asserts ``self.proc`` on every call after the first crash."""
-        server = _CrashableServer(dies=False, error=AssertionError("Server not running."))
-        env = _FakeEnv(_HealthyServer)
-        reasoner = _reasoner(server, env)
-        asyncio.run(reasoner._start_state(LeanGoalSeed(expression="p → p")))
-        self.assertEqual(env.restarts, 1)
-
-    def test_broken_pipe_triggers_restart(self):
-        server = _CrashableServer(dies=False, error=BrokenPipeError())
-        env = _FakeEnv(_HealthyServer)
-        reasoner = _reasoner(server, env)
-        asyncio.run(reasoner._start_state(LeanGoalSeed(expression="p → p")))
-        self.assertEqual(env.restarts, 1)
+            client._start_goal = reject
+            with self.assertRaises(type(error)):
+                asyncio.run(
+                    _reasoner(client)._start_state(LeanGoalSeed(expression="p → p"))
+                )
+            self.assertEqual(len(calls), 1)
 
     def test_hypotheses_are_quantified_then_introduced(self):
-        healthy = _HealthyServer()
-        reasoner = _reasoner(healthy, _FakeEnv(lambda: healthy))
+        healthy = _HealthyClient()
         state = asyncio.run(
-            reasoner._start_state(
+            _reasoner(healthy)._start_state(
                 LeanGoalSeed(expression="q ∨ p", hypotheses=["p : Prop", "h : p ∨ q"])
             )
         )
@@ -244,25 +174,36 @@ class RestartDiscriminationTests(unittest.TestCase):
         self.assertEqual(state, "goal-state+intro p h")
 
     def test_structured_replay_preserves_binder_roles_and_local_let(self):
-        healthy = _HealthyServer()
-        reasoner = _reasoner(healthy, _FakeEnv(lambda: healthy))
+        healthy = _HealthyClient()
+        reasoner = _reasoner(healthy)
         goal = Goal(
             expression="x = x",
             goal_model_sexp="(:app (:c Eq) (:fv FV2) (:fv FV2))",
             locals=[
                 GoalLocal(
-                    user_name="α", context_index=0, binder_role=":implicit",
-                    type_pp="Type", type_model_sexp="(:sort 1)",
+                    user_name="α",
+                    context_index=0,
+                    binder_role=":implicit",
+                    type_pp="Type",
+                    type_model_sexp="(:sort 1)",
                 ),
                 GoalLocal(
-                    user_name="inst", context_index=1, binder_role=":instImplicit",
-                    is_instance=True, type_pp="Inhabited α",
+                    user_name="inst",
+                    context_index=1,
+                    binder_role=":instImplicit",
+                    is_instance=True,
+                    type_pp="Inhabited α",
                     type_model_sexp="(:app (:c Inhabited) (:fv FV0))",
                 ),
                 GoalLocal(
-                    user_name="x", context_index=2, binder_role=":explicit",
-                    is_let=True, type_pp="α", type_model_sexp="(:fv FV0)",
-                    value_pp="default", value_model_sexp="(:c default)",
+                    user_name="x",
+                    context_index=2,
+                    binder_role=":explicit",
+                    is_let=True,
+                    type_pp="α",
+                    type_model_sexp="(:fv FV0)",
+                    value_pp="default",
+                    value_model_sexp="(:c default)",
                 ),
             ],
             model_sexp_version=1,
@@ -275,7 +216,3 @@ class RestartDiscriminationTests(unittest.TestCase):
             ["∀ {α : Type}, ∀ [inst : Inhabited α], let x : α := default; x = x"],
         )
         self.assertEqual(state, "goal-state+intro α inst x")
-
-
-if __name__ == "__main__":
-    unittest.main()
