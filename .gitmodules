@@ -31,3 +31,7 @@
 	url = https://github.com/tsigemariamzewdu/trueagi-pln-experiment.git
 
 	branch = main
+[submodule "experiments/custom-client"]
+	path = experiments/custom-client
+	url = https://github.com/123nol/Pantograph-Client
+	branch = main
