@@ -51,9 +51,10 @@ from maths_ai.gnn_inference.atp_lean_gnn.model_spec import ModelSpec
 from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
 from maths_ai.gnn_inference.atp_lean_gnn.pln_reward import RewardConfig
 from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import (
+    supported_structural_labels,
     train_step_onpolicy,
 )
-from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab
+from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab_from_labels
 from maths_ai.gnn_inference.atp_lean_gnn.rl_reasoner import RLHybridReasoner
 
 
@@ -69,6 +70,10 @@ TACTIC_VOCAB = {
 # Seed theorem: identity. `intro h` then `exact h` (or `assumption`) closes it.
 SEED_GOAL = "p → p"
 SEED_HYPS = ["p : Prop"]
+# Bounds for successor states within the search depth; a state beyond them
+# still fails the training step's missing structural-label check.
+SMOKE_MAX_LOCALS = 8
+SMOKE_MAX_ARITY = 8
 
 
 def build_model(node_vocab: dict[str, int]) -> ActorCriticWithArgsClassifier:
@@ -109,7 +114,15 @@ async def run_smoke(env: PantographEnv, *, use_pln: bool = True, **search) -> No
             goals = execution_state_to_goals(seed_state)
         if len(goals) != 1:
             raise RuntimeError(f"Smoke seed serialized into {len(goals)} goals.")
-        node_vocab = build_vocab([model_goal_to_dag(goals[0])])
+        # Successor states add structural labels the seed goal lacks.
+        node_vocab = build_vocab_from_labels(
+            [
+                *(node.label for node in model_goal_to_dag(goals[0]).nodes),
+                *supported_structural_labels(
+                    max_locals=SMOKE_MAX_LOCALS, max_arity=SMOKE_MAX_ARITY
+                ),
+            ]
+        )
         model = build_model(node_vocab)
         executor = PantographExecutor(server)
 
