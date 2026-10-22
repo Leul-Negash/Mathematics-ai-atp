@@ -13,6 +13,14 @@ Can be run directly: python -m translator_modules.cli --input tests.json --outpu
 from __future__ import annotations
 
 import argparse
+import asyncio
+from pathlib import Path
+from pantograph_async import PantographEnv
+from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
+from pantograph_async import (
+    PantographGoalRejected,
+    PantographTacticRejected,
+)
 import json
 import os
 import shutil
@@ -50,206 +58,199 @@ def load_input_json(input_path: str) -> list[dict[str, Any]]:
     raise ValueError("Input JSON must be either an object or a list of objects.")
 
 
-def run_demo(
+async def run_demo(
     input_path: str,
     output_dir: str,
     *,
     depth: int = 10,
     runner_name: str = "run_all_generated.sh",
     stop_on_error: bool = False,
-    lean_imports: list[str] | None = None,
+    env: PantographEnv,
     normalize_variables: bool = False,
     axioms_path: str,
 ) -> dict[str, Any]:
+    env.verify()
     input_data = load_input_json(input_path)
+    if os.path.isdir(output_dir) and os.listdir(output_dir):
+        raise FileExistsError(
+            f"Refusing to overwrite nonempty translator output: {output_dir}"
+        )
+    async with await create_model_sexpr_client(env) as server:
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "use-module!.metta"), "w", encoding="utf-8"):
+            pass
+        generated_items: list[dict[str, Any]] = []
+        test_summaries: list[dict[str, Any]] = []
 
-    if os.path.exists(output_dir):
-        for filename in os.listdir(output_dir):
-            file_path = os.path.join(output_dir, filename)
-            try:
-                if os.path.isfile(file_path) or os.path.islink(file_path):
-                    os.unlink(file_path)
-                elif os.path.isdir(file_path):
-                    shutil.rmtree(file_path)
-            except Exception as e:
-                print(f"⚠️ Warning: Failed to delete {file_path}. Reason: {e}")
-    os.makedirs(output_dir, exist_ok=True)
+        for idx, test_case in enumerate(input_data):
+            test_name = test_case.get("name", f"test_{idx + 1}")
+            goal = test_case.get("goal")
+            tactics = test_case.get("tactics", [])
 
-    # Create an empty use-module!.metta file
-    use_module_path = os.path.join(output_dir, "use-module!.metta")
-    with open(use_module_path, "w", encoding="utf-8") as f:
-        pass
+            if not goal:
+                print(f"⚠️ Warning: Skipping '{test_name}' because no 'goal' was found.")
+                test_summaries.append(
+                    {
+                        "test_name": test_name,
+                        "status": "skipped_no_goal",
+                    }
+                )
+                continue
 
-    if lean_imports is None:
-        lean_imports = ["Init"]
-
-    print("Connecting to Lean 4 via Pantograph...")
-    try:
-        from pantograph.server import Server
-        server = Server(imports=lean_imports, options={"printExprAST": True})
-    except Exception as e:
-        raise RuntimeError(f"Error starting Pantograph server: {e}") from e
-
-    generated_items: list[dict[str, Any]] = []
-    test_summaries: list[dict[str, Any]] = []
-
-    for idx, test_case in enumerate(input_data):
-        test_name = test_case.get("name", f"test_{idx + 1}")
-        goal = test_case.get("goal")
-        tactics = test_case.get("tactics", [])
-
-        if not goal:
-            print(f"⚠️ Warning: Skipping '{test_name}' because no 'goal' was found.")
-            test_summaries.append({
-                "test_name": test_name,
-                "status": "skipped_no_goal",
-            })
-            continue
-
-        if not isinstance(tactics, list):
-            raise ValueError(f"Tactics for '{test_name}' must be a list of tactic strings.")
-
-        print(f"\n{'=' * 80}")
-        print(f"🚀 Running Test: {test_name}")
-        print(f"Loaded Goal: {goal}")
-        print(f"Loaded Tactics: {tactics}")
-
-        try:
-            state_after_tactics = proof_state_after_tactics(
-                server,
-                goal,
-                tactics,
-            )
-            plain = to_plain(state_after_tactics)
-            goals = plain.get("goals", []) if isinstance(plain, dict) else []
-
-        except Exception as e:
-            print(f"❌ Error processing '{test_name}' in Pantograph: {e}")
-            test_summaries.append({
-                "test_name": test_name,
-                "goal": goal,
-                "tactics": tactics,
-                "status": "pantograph_error",
-                "error": str(e),
-            })
-            continue
-
-        safe_test_name = safe_name(test_name)
-
-        if not goals:
-            complete_file_path = os.path.join(output_dir, f"{safe_test_name}_complete.metta")
-            with open(complete_file_path, "w", encoding="utf-8") as f:
-                f.write(
-                    "\n\n".join([
-                   "!(import! &self (library lib_import))",
-"!(git-import! \"https://github.com/rTreutlein/PeTTaChainer.git\") ",
-
-"!(import! &self (library PeTTaChainer \"pettachainer/metta/petta_chainer\"))",
-f"!(import! &self {axioms_path})",
-                        "; No subgoals remain. Proof complete!",
-                    ])
+            if not isinstance(tactics, list):
+                raise ValueError(
+                    f"Tactics for '{test_name}' must be a list of tactic strings."
                 )
 
-            print("✅ No subgoals remain. Proof complete.")
-            test_summaries.append({
+            print(f"\n{'=' * 80}")
+            print(f"🚀 Running Test: {test_name}")
+            print(f"Loaded Goal: {goal}")
+            print(f"Loaded Tactics: {tactics}")
+
+            try:
+                goals = await proof_state_after_tactics(
+                    server,
+                    goal,
+                    tactics,
+                )
+
+            except (PantographGoalRejected, PantographTacticRejected) as e:
+                print(f"❌ Error processing '{test_name}' in Pantograph: {e}")
+                test_summaries.append(
+                    {
+                        "test_name": test_name,
+                        "goal": goal,
+                        "tactics": tactics,
+                        "status": "pantograph_error",
+                        "error": str(e),
+                    }
+                )
+                continue
+
+            safe_test_name = safe_name(test_name)
+
+            if not goals:
+                complete_file_path = os.path.join(
+                    output_dir, f"{safe_test_name}_complete.metta"
+                )
+                with open(complete_file_path, "w", encoding="utf-8") as f:
+                    f.write(
+                        "\n\n".join(
+                            [
+                                "!(import! &self (library lib_import))",
+                                '!(git-import! "https://github.com/rTreutlein/PeTTaChainer.git") ',
+                                '!(import! &self (library PeTTaChainer "pettachainer/metta/petta_chainer"))',
+                                f"!(import! &self {axioms_path})",
+                                "; No subgoals remain. Proof complete!",
+                            ]
+                        )
+                    )
+
+                print("✅ No subgoals remain. Proof complete.")
+                test_summaries.append(
+                    {
+                        "test_name": test_name,
+                        "goal": goal,
+                        "tactics": tactics,
+                        "status": "proof_complete",
+                        "proof_complete_file": os.path.abspath(complete_file_path),
+                    }
+                )
+                continue
+
+            test_summary = {
                 "test_name": test_name,
                 "goal": goal,
                 "tactics": tactics,
-                "status": "proof_complete",
-                "proof_complete_file": os.path.abspath(complete_file_path),
-            })
-            continue
-
-        test_summary = {
-            "test_name": test_name,
-            "goal": goal,
-            "tactics": tactics,
-            "status": "generated",
-            "num_subgoals": len(goals),
-            "subgoals": [],
-        }
-
-        for i, g in enumerate(goals):
-            print(f"\nGoal {i} Processed:")
-
-            script, cleanup, hyp_records, query_formula = essentialize_subgoal(
-                g,
-                mode="dynamic",
-                depth=depth,
-                normalize_variables=normalize_variables,
-            )
-
-            print(script)
-
-            metta_file_name = f"{safe_test_name}_goal_{i}.metta"
-            metta_file_path = os.path.abspath(os.path.join(output_dir, metta_file_name))
-            log_file_path = os.path.abspath(os.path.join(output_dir, f"{safe_test_name}_goal_{i}.log"))
-
-            subgoal_script = [
-"!(import! &self (library lib_import))",
-"!(git-import! \"https://github.com/rTreutlein/PeTTaChainer.git\") ",
-"!(import! &self (library PeTTaChainer \"pettachainer/metta/petta_chainer\"))",
-f"!(import! &self {axioms_path})",
-                       
-                f"; === Test: {test_name} ===",
-                f"; === Goal index: {i} ===",
-                f"; === Target formula: {query_formula} ===",
-                "",
-                script,
-            ]
-
-            if cleanup:
-                subgoal_script.append(f"; --- Cleanup ---\n{cleanup}")
-
-            with open(metta_file_path, "w", encoding="utf-8") as f:
-                f.write("\n\n".join(subgoal_script))
-
-            item = {
-                "test_name": test_name,
-                "goal_index": i,
-                "metta_path": metta_file_path,
-                "log_path": log_file_path,
-                "target_formula": query_formula,
-                "hypotheses": hyp_records,
+                "status": "generated",
+                "num_subgoals": len(goals),
+                "subgoals": [],
             }
 
-            generated_items.append(item)
-            test_summary["subgoals"].append(item)
+            for i, g in enumerate(goals):
+                print(f"\nGoal {i} Processed:")
 
-            print(f"✅ Wrote subgoal file: {metta_file_path}")
-            print(f"📝 Expected log path: {log_file_path}")
+                script, cleanup, hyp_records, query_formula = essentialize_subgoal(
+                    g,
+                    mode="dynamic",
+                    depth=depth,
+                    normalize_variables=normalize_variables,
+                )
 
-        test_summaries.append(test_summary)
+                print(script)
 
-    runner_path = None
-    if generated_items:
-        runner_path = write_runner_script(
-            generated_items,
-            output_dir,
-            runner_name=runner_name,
-            stop_on_error=stop_on_error,
-        )
-        print("\n" + "=" * 80)
-        print(f"✅ Wrote runner script to: {runner_path}")
-        print(f"Run it with: bash {runner_path}")
+                metta_file_name = f"{safe_test_name}_goal_{i}.metta"
+                metta_file_path = os.path.abspath(
+                    os.path.join(output_dir, metta_file_name)
+                )
+                log_file_path = os.path.abspath(
+                    os.path.join(output_dir, f"{safe_test_name}_goal_{i}.log")
+                )
 
-    manifest = {
-        "input_path": os.path.abspath(input_path),
-        "output_dir": os.path.abspath(output_dir),
-        "runner_path": os.path.abspath(runner_path) if runner_path else None,
-        "depth": depth,
-        "normalize_variables": normalize_variables,
-        "generated_items": generated_items,
-        "tests": test_summaries,
-    }
+                subgoal_script = [
+                    "!(import! &self (library lib_import))",
+                    '!(git-import! "https://github.com/rTreutlein/PeTTaChainer.git") ',
+                    '!(import! &self (library PeTTaChainer "pettachainer/metta/petta_chainer"))',
+                    f"!(import! &self {axioms_path})",
+                    f"; === Test: {test_name} ===",
+                    f"; === Goal index: {i} ===",
+                    f"; === Target formula: {query_formula} ===",
+                    "",
+                    script,
+                ]
 
-    manifest_path = os.path.join(output_dir, "generated_manifest.json")
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2, ensure_ascii=False)
+                if cleanup:
+                    subgoal_script.append(f"; --- Cleanup ---\n{cleanup}")
 
-    print(f"✅ Wrote manifest to: {manifest_path}")
+                with open(metta_file_path, "w", encoding="utf-8") as f:
+                    f.write("\n\n".join(subgoal_script))
 
-    return manifest
+                item = {
+                    "test_name": test_name,
+                    "goal_index": i,
+                    "metta_path": metta_file_path,
+                    "log_path": log_file_path,
+                    "target_formula": query_formula,
+                    "hypotheses": hyp_records,
+                }
+
+                generated_items.append(item)
+                test_summary["subgoals"].append(item)
+
+                print(f"✅ Wrote subgoal file: {metta_file_path}")
+                print(f"📝 Expected log path: {log_file_path}")
+
+            test_summaries.append(test_summary)
+
+        runner_path = None
+        if generated_items:
+            runner_path = write_runner_script(
+                generated_items,
+                output_dir,
+                runner_name=runner_name,
+                stop_on_error=stop_on_error,
+            )
+            print("\n" + "=" * 80)
+            print(f"✅ Wrote runner script to: {runner_path}")
+            print(f"Run it with: bash {runner_path}")
+
+        manifest = {
+            "input_path": os.path.abspath(input_path),
+            "output_dir": os.path.abspath(output_dir),
+            "runner_path": os.path.abspath(runner_path) if runner_path else None,
+            "depth": depth,
+            "normalize_variables": normalize_variables,
+            "generated_items": generated_items,
+            "tests": test_summaries,
+        }
+
+        manifest_path = os.path.join(output_dir, "generated_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+
+        print(f"✅ Wrote manifest to: {manifest_path}")
+
+        return manifest
 
 
 def parse_args() -> argparse.Namespace:
@@ -270,14 +271,16 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "-i", "--input",
+        "-i",
+        "--input",
         type=str,
         default=None,
         help="Path to input JSON containing goal/tactics objects.",
     )
 
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         type=str,
         default=None,
         help="Output directory for generated .metta, .log, manifest, and runner files.",
@@ -409,6 +412,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument("--source-root", type=Path)
+    parser.add_argument("--pantograph-repl", type=Path)
     return parser.parse_args()
 
 
@@ -437,21 +442,38 @@ def main() -> None:
         print_ranked_results(ranked)
     else:
         if not args.input:
-            raise SystemExit("Error: --input is required unless --rank-manifest is used.")
+            raise SystemExit(
+                "Error: --input is required unless --rank-manifest is used."
+            )
         if not args.output:
-            raise SystemExit("Error: --output is required unless --rank-manifest is used.")
+            raise SystemExit(
+                "Error: --output is required unless --rank-manifest is used."
+            )
         if not args.axioms_path:
-            raise SystemExit("Error: --axioms-path is required unless --rank-manifest is used.")
+            raise SystemExit(
+                "Error: --axioms-path is required unless --rank-manifest is used."
+            )
 
-        run_demo(
-            args.input,
-            args.output,
-            depth=args.depth,
-            runner_name=args.runner_name,
-            stop_on_error=args.stop_on_error,
-            lean_imports=args.lean_import or ["Init"],
-            normalize_variables=args.normalize_variables,
-            axioms_path=args.axioms_path,
+        if args.source_root is None or args.pantograph_repl is None:
+            raise SystemExit(
+                "--source-root and --pantograph-repl are required for generation."
+            )
+        env = PantographEnv(
+            source_root=args.source_root,
+            pantograph_repl=args.pantograph_repl,
+            imports=tuple(args.lean_import or ["Mathlib"]),
+        )
+        asyncio.run(
+            run_demo(
+                args.input,
+                args.output,
+                depth=args.depth,
+                runner_name=args.runner_name,
+                stop_on_error=args.stop_on_error,
+                env=env,
+                normalize_variables=args.normalize_variables,
+                axioms_path=args.axioms_path,
+            )
         )
 
 

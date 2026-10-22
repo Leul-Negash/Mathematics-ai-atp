@@ -1,6 +1,6 @@
 """End-to-end PLN actor-critic RL: collect search trees (async) → train (sync).
 
-Two phases, cleanly separated by the ``asyncio.run`` boundary:
+Two phases share the caller's event loop; model updates begin after collection:
 
   * **collect** — run the hybrid reasoner's AND-OR search (async, PLN de-blocked via
     ``evaluate_async``) to produce ``ProofHypergraph`` s for a batch of theorems.
@@ -16,7 +16,6 @@ S-expression path used by live collection and both optimizer paths.
 
 from __future__ import annotations
 
-import asyncio
 import re
 from dataclasses import dataclass
 from typing import Callable
@@ -71,6 +70,34 @@ def _is_structural_label(label: str) -> bool:
         or label.startswith("ArgPosition:")
         or _FV_RE.fullmatch(label) is not None
     )
+
+
+# Roles the model serializer emits for binders, application arguments, and
+# context locals (``instance``/``let`` refine the local's binder role).
+_BINDER_ROLES = (":explicit", ":implicit", ":strict-implicit", ":instance-implicit")
+_ARG_ROLES = (":explicit", ":implicit", ":implicit-type", ":instance", ":proof")
+_HYP_ROLES = (*(role.removeprefix(":") for role in _BINDER_ROLES), "instance", "let")
+
+
+def supported_structural_labels(*, max_locals: int, max_arity: int) -> list[str]:
+    """Every structural label a state within these bounds can contain.
+
+    A vocabulary built from a seed goal alone lacks labels its successors
+    introduce, such as ``FV1`` after ``intro``. Vocabularies for synthetic runs
+    include this set; states beyond the bounds still fail the missing-label check.
+    """
+    if max_locals < 0 or max_arity < 0:
+        raise ValueError("Structural label bounds must be nonnegative.")
+    labels = [
+        *sorted(_STRUCTURAL_LABELS),
+        *(f"BinderRole:{role}" for role in _BINDER_ROLES),
+        *(f"ArgRole:{role}" for role in _ARG_ROLES),
+        *(f"ArgPosition:{position}" for position in range(max_arity)),
+        *(f"HypRole:{role}" for role in _HYP_ROLES),
+        *(f"FV{index}" for index in range(max_locals)),
+    ]
+    assert all(_is_structural_label(label) for label in labels)
+    return labels
 
 
 def _oov_metrics(datas: list[Data]) -> dict[str, float]:
@@ -523,21 +550,20 @@ def train_step(
 
 
 async def collect_batch(reasoner, theorems: list[dict]) -> list:
-    """Run the hybrid reasoner's AND-OR search concurrently over a batch of theorems.
+    """Run one shared reasoner sequentially over a batch of theorems.
 
     Each item is ``{"goal": str, "hypotheses": list[str]}``. Requires a live Pantograph
-    server + ``petta`` binary (env-gated); PLN is de-blocked via ``evaluate_async`` so the
-    searches overlap their Lean/PLN waits. Returns the finished ``ProofHypergraph`` s.
+    client + ``petta`` binary (env-gated). A reasoner runs one search at a time;
+    independent pool workers provide cross-theorem concurrency. Returns the finished
+    ``ProofHypergraph`` s.
     """
-    return await asyncio.gather(
-        *(
-            reasoner.prove(item["goal"], hypotheses=item.get("hypotheses"))
-            for item in theorems
-        )
-    )
+    return [
+        await reasoner.prove(item["goal"], hypotheses=item.get("hypotheses"))
+        for item in theorems
+    ]
 
 
-def collect_and_train(
+async def collect_and_train(
     reasoner,
     model: ActorCriticWithArgsClassifier,
     optimizer: torch.optim.Optimizer,
@@ -546,8 +572,8 @@ def collect_and_train(
     tactic_to_id: dict[str, int],
     **train_kwargs,
 ) -> dict[str, float]:
-    """One round: collect search graphs under ``asyncio.run`` (async), then train (sync)."""
-    graphs = asyncio.run(collect_batch(reasoner, theorems))
+    """Await collection on the owning loop, then perform one synchronous update."""
+    graphs = await collect_batch(reasoner, theorems)
     return train_step(model, optimizer, graphs, featurize, tactic_to_id, **train_kwargs)
 
 
@@ -652,7 +678,7 @@ async def collect_batch_onpolicy(reasoner, theorems: list[dict]) -> list:
     return results
 
 
-def collect_and_train_onpolicy(
+async def collect_and_train_onpolicy(
     reasoner,
     model: ActorCriticWithArgsClassifier,
     optimizer: torch.optim.Optimizer,
@@ -661,7 +687,7 @@ def collect_and_train_onpolicy(
     **train_kwargs,
 ) -> dict[str, float]:
     """One on-policy round: sequential collect (async) → one gradient step (sync)."""
-    results = asyncio.run(collect_batch_onpolicy(reasoner, theorems))
+    results = await collect_batch_onpolicy(reasoner, theorems)
     return train_step_onpolicy(model, optimizer, results, featurize, **train_kwargs)
 
 

@@ -12,6 +12,13 @@ from maths_ai.gnn_inference.atp_lean_gnn.rl_live_collection import (
     WorkerStartupError,
 )
 from maths_ai.gnn_inference.atp_lean_gnn.rl_resources import ResourcePlan
+from pantograph_async import (
+    PantographConfigurationError,
+    PantographProtocolError,
+    PantographRequestTimeout,
+    PantographStateError,
+    PantographTransportError,
+)
 
 
 class _Server:
@@ -19,7 +26,7 @@ class _Server:
         self.worker_id = worker_id
         self.closed = False
 
-    def _close(self) -> None:
+    async def aclose(self) -> None:
         self.closed = True
 
 
@@ -292,6 +299,232 @@ def test_replacement_failure_removes_only_the_affected_worker():
     assert [item.theorem for item in result.results] == ["solve-b", "solve-c"]
     assert result.stats["worker_replacement_failures"] == 1.0
     assert result.stats["worker_count"] == 1.0
+
+
+def test_transport_failure_is_not_harvested_and_replaces_before_next_search():
+    async def run():
+        pool, _model, servers = await _create_pool(workers=1)
+        seen = []
+
+        async def search(reasoner, theorem, greedy, deadline):
+            del greedy, deadline
+            seen.append(reasoner.server)
+            if theorem == "crash":
+                raise PantographTransportError("process exited")
+            return _Result(theorem)
+
+        pool.search_factory = search
+        async with pool:
+            result = await pool.collect_round(
+                ["crash", "solve-next"], timeout_s=1, model_generation=0
+            )
+            assert result.records[0].result is None
+            assert result.records[0].outcome == "error"
+            assert [r.theorem for r in result.results] == ["solve-next"]
+            assert result.stats["workers_replaced"] == 1
+            assert result.stats["searches_hard_timed_out"] == 0
+            assert seen[0] is not seen[1] and seen[0].closed
+            assert pool.workers[0].reasoner.server is pool.workers[0].server
+        assert all(server.closed for server in servers)
+
+    asyncio.run(run())
+
+
+def test_request_timeout_is_a_hard_timeout_that_retires_the_worker():
+    async def run():
+        pool, _model, servers = await _create_pool(workers=1)
+
+        async def search(reasoner, theorem, greedy, deadline):
+            del reasoner, greedy, deadline
+            if theorem == "slow-request":
+                raise PantographRequestTimeout("deadline exceeded for goal.tactic")
+            return _Result(theorem)
+
+        pool.search_factory = search
+        async with pool:
+            result = await pool.collect_round(
+                ["slow-request", "solve-next"], timeout_s=1, model_generation=0
+            )
+        return result, servers
+
+    result, servers = asyncio.run(run())
+    assert result.records[0].outcome == "hard_timeout"
+    assert result.records[0].exception_category == "PantographRequestTimeout"
+    assert result.stats["searches_hard_timed_out"] == 1
+    assert result.stats["workers_replaced"] == 1
+    assert len(servers) == 2 and all(server.closed for server in servers)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [PantographProtocolError, PantographStateError, PantographConfigurationError],
+)
+def test_fatal_contract_state_or_configuration_error_aborts_without_replacement(error):
+    async def run():
+        pool, _model, servers = await _create_pool(workers=1)
+
+        async def search(*_args):
+            raise error("fatal contract")
+
+        pool.search_factory = search
+        async with pool:
+            with pytest.raises(error):
+                await pool.collect_round(
+                    ["first", "second"], timeout_s=1, model_generation=0
+                )
+            assert len(servers) == 1
+        assert all(server.closed for server in servers)
+
+    asyncio.run(run())
+
+
+def test_cancelled_partial_startup_awaits_successful_worker_cleanup():
+    async def run():
+        servers = []
+        ready = asyncio.Event()
+
+        async def factory(worker_id):
+            if worker_id == 1:
+                await asyncio.Event().wait()
+            server = _Server(worker_id)
+            servers.append(server)
+            return server
+
+        def reasoner_factory(worker_id, device, model, server):
+            ready.set()
+            return _Reasoner(worker_id, model, server)
+
+        task = asyncio.create_task(
+            LiveReasonerPool.create(
+                model=torch.nn.Linear(2, 1),
+                plan=_plan(2),
+                server_factory=factory,
+                reasoner_factory=reasoner_factory,
+                search_factory=lambda *_args: None,
+                is_solved=lambda result: False,
+                is_cooperative_deadline=lambda result: False,
+                startup_timeout_s=1,
+                shutdown_timeout_s=1,
+            )
+        )
+        await ready.wait()
+        task.cancel("external startup abort")
+        with pytest.raises(asyncio.CancelledError) as error:
+            await task
+        assert error.value.args == ("external startup abort",)
+        assert servers and all(server.closed for server in servers)
+
+    asyncio.run(run())
+
+
+def test_reasoner_construction_failure_closes_its_new_client():
+    async def run():
+        servers = []
+
+        async def factory(worker_id):
+            server = _Server(worker_id)
+            servers.append(server)
+            return server
+
+        def fail(*_args):
+            raise ValueError("construction failed")
+
+        with pytest.raises(WorkerStartupError):
+            await LiveReasonerPool.create(
+                model=torch.nn.Linear(2, 1),
+                plan=_plan(2),
+                server_factory=factory,
+                reasoner_factory=fail,
+                search_factory=lambda *_args: None,
+                is_solved=lambda result: False,
+                is_cooperative_deadline=lambda result: False,
+                startup_timeout_s=1,
+                shutdown_timeout_s=1,
+            )
+        assert len(servers) == 2 and all(server.closed for server in servers)
+
+    asyncio.run(run())
+
+
+def test_model_synchronization_and_overlapping_rounds_are_rejected_during_collection():
+    async def run():
+        pool, model, _servers = await _create_pool(workers=2)
+        entered = asyncio.Event()
+
+        async def search(*_args):
+            entered.set()
+            await asyncio.Event().wait()
+
+        pool.search_factory = search
+        async with pool:
+            task = asyncio.create_task(
+                pool.collect_round(["a", "b"], timeout_s=1, model_generation=0)
+            )
+            await entered.wait()
+            with pytest.raises(PantographStateError):
+                pool.synchronize(model, 1)
+            with pytest.raises(PantographStateError):
+                await pool.collect_round([], timeout_s=1, model_generation=0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("during_replacement", [False, True])
+def test_close_joins_owned_collection_without_leaking_replacement_or_deadlocking_context(
+    during_replacement,
+):
+    async def run():
+        pool, _model, servers = await _create_pool(workers=1)
+        entered = asyncio.Event()
+        if during_replacement:
+
+            async def replacement(_worker_id):
+                entered.set()
+                await asyncio.Event().wait()
+
+            pool.server_factory = replacement
+
+        async def search(*_args):
+            if during_replacement:
+                raise PantographTransportError("replace this process")
+            entered.set()
+            await asyncio.Event().wait()
+
+        pool.search_factory = search
+
+        async def collect_in_context():
+            async with pool:
+                await pool.collect_round(
+                    ["first", "second"], timeout_s=10, model_generation=0
+                )
+
+        task = asyncio.create_task(collect_in_context())
+        await entered.wait()
+        await asyncio.wait_for(pool.close(), 2)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not pool._collecting and all(server.closed for server in servers)
+        assert not [
+            t
+            for t in asyncio.all_tasks()
+            if t.get_name().startswith("pantograph-pool-")
+        ]
+
+    asyncio.run(run())
+
+
+def test_concurrent_closes_join_one_shutdown():
+    async def run():
+        pool, _model, servers = await _create_pool(workers=2)
+        await asyncio.gather(pool.close(), pool.close(), pool.close())
+        assert all(server.closed for server in servers)
+        with pytest.raises(RuntimeError, match="closed"):
+            await pool.collect_round(["solve-a"], timeout_s=1, model_generation=0)
+
+    asyncio.run(run())
 
 
 def test_replica_sync_copies_final_state_and_advances_generation():

@@ -1,5 +1,5 @@
 """
-translator_modules — Modularized Lean/PyPantograph → PeTTaChainer translator.
+translator_modules — Modularized Lean/Pantograph → PeTTaChainer translator.
 
 This package re-exports all public symbols from its submodules so that
 ``from translator_modules import X`` works for any symbol that was previously

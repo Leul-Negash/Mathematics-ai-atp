@@ -1,5 +1,9 @@
 # Porting current AC infrastructure onto MCTS-AC-branch
 
+> Status: historical. Its upstream-client restart recommendations are superseded
+> by the port onto the standalone `pantograph-async-client` package; see
+> [owned_pantograph_client.md](../owned_pantograph_client.md).
+
 ## Goal
 
 Bring `MCTS-AC-branch` onto the current AC shared infrastructure without removing its

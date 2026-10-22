@@ -21,6 +21,7 @@ from .parser import (
     to_plain,
 )
 from .renderer import build_query, render_formula, validate_formula_shape
+from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_translator
 
 
 def is_nonlogical_type_expr(expr: Any) -> bool:
@@ -39,12 +40,14 @@ def extract_hypotheses(goal_data: Any, normalizer: VariableNormalizer) -> list[A
 
     for h in g.get("hypotheses", []):
         h_plain = to_plain(h)
-        h_type_source = h_plain.get("type") or h_plain.get("t") or h_plain.get("target") or h_plain
+        h_type_source = (
+            h_plain.get("type") or h_plain.get("t") or h_plain.get("target") or h_plain
+        )
         h_expr = normalize_logic(expr_from_field(h_type_source, normalizer))
         if not is_nonlogical_type_expr(h_expr) and not is_has_type_expr(h_expr):
             hyps.append(h_expr)
 
-    for v in g.get("variables", []):
+    for v in g.get("locals", []):
         v_plain = to_plain(v)
         t_source = v_plain.get("type") or v_plain.get("t")
         if t_source is None:
@@ -93,6 +96,9 @@ def essentialize_subgoal(
       query_formula: rendered target formula
     """
     normalizer = VariableNormalizer(normalize=normalize_variables)
+    for local in goal_data.get("locals", []):
+        if local["user_name"] and local["user_name"] != "_":
+            normalizer.local_names[local["internal_name"]] = local["user_name"]
     hyps = extract_hypotheses(goal_data, normalizer)
     target = extract_target(goal_data, normalizer)
     query_formula = render_formula(target)
@@ -114,25 +120,34 @@ def essentialize_subgoal(
             atom = f"(: {label} {formula} (STV 1.0 1.0))"
             output_lines.append(f"!(compileadd {kb} {atom})")
             cleanup_lines.append(f";; cleanup needed for {label}")
-            hyp_records.append({
-                "index": i,
-                "label": label,
-                "formula": formula,
-                "atom": atom,
-            })
+            hyp_records.append(
+                {
+                    "index": i,
+                    "label": label,
+                    "formula": formula,
+                    "atom": atom,
+                }
+            )
 
         query_cmd = build_query(target, kb=kb, depth=depth)
         output_lines.append(query_cmd)
 
-        return "\n".join(output_lines), "\n".join(cleanup_lines), hyp_records, query_formula
+        return (
+            "\n".join(output_lines),
+            "\n".join(cleanup_lines),
+            hyp_records,
+            query_formula,
+        )
 
     raise ValueError("mode must be 'recurry' or 'dynamic'")
 
 
-def proof_state_after_tactics(server, goal_type: str, tactics: list[str]):
-    state = server.goal_start(goal_type)
-
-    for tac in tactics:
-        state = server.goal_tactic(state, tactic=tac)
-
-    return state
+async def proof_state_after_tactics(client, goal_type: str, tactics: list[str]):
+    """Return owned raw-expression projections; no live handle escapes its scope."""
+    async with client.state_scope() as scope:
+        state = await scope.start_goal(goal_type)
+        for tactic in tactics or ["skip"]:
+            previous = state
+            state = await scope.apply_tactic(state, tactic)
+            await scope.release(previous)
+        return [execution_goal_to_translator(goal) for goal in state.goals]

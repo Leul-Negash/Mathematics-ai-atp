@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import unittest
 
 import torch
@@ -9,11 +11,14 @@ from maths_ai.data_models.proof_components import STV, TacticCandidate
 from maths_ai.hybrid_reasoner.hypergraph import BackupSource, ProofHypergraph, NodeStatus
 
 from maths_ai.gnn_inference.atp_lean_gnn.graph import dag_fingerprint, model_goal_to_dag
-from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab
+from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab, build_vocab_from_labels
 from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import ActorCriticWithArgsClassifier
 from maths_ai.gnn_inference.tests.model_helpers import actor_critic, structured_goal
 from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import (
+    _is_structural_label,
+    make_dag_featurizer,
     make_featurizer,
+    supported_structural_labels,
     train_step,
     train_step_htps_style,
     compute_transition_loss,
@@ -197,3 +202,74 @@ class HTPSStyleStepTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FIXTURES = Path(__file__).parent / "fixtures/pantograph"
+
+
+class StructuralVocabularyTests(unittest.TestCase):
+    def _successor(self):
+        """``intro p h`` on ``∀ (p : Prop), p → p``: locals FV0 and FV1."""
+        from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_goal
+        from pantograph_async import decode_execution_goal
+
+        contract = json.loads((FIXTURES / "future_contract.json").read_text())
+        wire = contract["successes"]["identity_intro"]["goals"][0]
+        return execution_goal_to_goal(decode_execution_goal(wire))
+
+    def _semantic_labels(self, goal):
+        return {
+            node.label
+            for node in model_goal_to_dag(goal).nodes
+            if not _is_structural_label(node.label)
+        }
+
+    def test_seed_only_vocabulary_rejects_an_introduced_local(self):
+        goal = self._successor()
+        seed_labels = {node.label for node in model_goal_to_dag(goal).nodes} - {"FV1"}
+        featurize = make_dag_featurizer(build_vocab_from_labels(seed_labels))
+        with self.assertRaisesRegex(ValueError, "structural labels: FV1"):
+            featurize(goal)
+
+    def test_supported_labels_cover_successors_within_their_bounds(self):
+        goal = self._successor()
+        vocab = build_vocab_from_labels(
+            [
+                *self._semantic_labels(goal),
+                *supported_structural_labels(max_locals=2, max_arity=0),
+            ]
+        )
+        _dag, data = make_dag_featurizer(vocab)(goal)
+        self.assertEqual(int(data.structural_unknown_label_count), 0)
+        narrow = build_vocab_from_labels(
+            [
+                *self._semantic_labels(goal),
+                *supported_structural_labels(max_locals=1, max_arity=0),
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "structural labels: FV1"):
+            make_dag_featurizer(narrow)(goal)
+
+    def test_supported_labels_follow_the_contract_and_serializer(self):
+        labels = supported_structural_labels(max_locals=3, max_arity=2)
+        self.assertEqual(len(labels), len(set(labels)))
+        self.assertTrue(all(_is_structural_label(label) for label in labels))
+        self.assertIn("FV2", labels)
+        self.assertNotIn("FV3", labels)
+        self.assertIn("ArgPosition:1", labels)
+        self.assertNotIn("ArgPosition:2", labels)
+        goldens = json.loads((FIXTURES / "canonical_graph_expectations.json").read_text())
+        observed = {
+            node["label"]
+            for goals in goldens["goals"].values()
+            for goal in goals
+            for node in goal["nodes"]
+            if _is_structural_label(node["label"])
+        }
+        self.assertTrue(observed)
+        self.assertLessEqual(
+            observed, set(supported_structural_labels(max_locals=8, max_arity=8))
+        )
+        with self.assertRaises(ValueError):
+            supported_structural_labels(max_locals=-1, max_arity=0)
+

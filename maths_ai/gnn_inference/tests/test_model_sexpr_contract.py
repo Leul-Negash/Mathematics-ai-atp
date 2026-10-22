@@ -5,7 +5,6 @@ import json
 import tempfile
 from pathlib import Path
 
-import pantograph.expr as expr_mod
 import torch
 from torch_geometric.data import Data
 
@@ -15,10 +14,10 @@ from maths_ai.gnn_inference.atp_lean_gnn.inference import (
     _local_names_by_fv_label,
     _resolve_local_node_name,
 )
-from maths_ai.hybrid_reasoner.pantograph_model_sexpr import (
-    PantographModelSExprProtocolError,
-    install_model_sexpr_pypantograph_patch,
-    pantograph_goal_to_goal,
+from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_goal
+from pantograph_async import (
+    PantographProtocolError,
+    decode_execution_goal,
 )
 from maths_ai.gnn_inference.scripts.migrate_prepared_graph_contract import (
     migrate_prepared_contract,
@@ -29,7 +28,7 @@ from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab
 
 
 def _expression(pp: str, model: str, version: int = 1) -> dict[str, object]:
-    return {"pp": pp, "modelSexp": model, "modelSexpVersion": version}
+    return {"pp": pp, "sexp": model, "modelSexp": model, "modelSexpVersion": version}
 
 
 def _payload() -> dict[str, object]:
@@ -37,6 +36,7 @@ def _payload() -> dict[str, object]:
         "name": "g0",
         "userName": "intro.zero",
         "fragment": "tactic",
+        "isConversion": False,
         "vars": [
             {
                 "name": "_uniq.1",
@@ -44,6 +44,7 @@ def _payload() -> dict[str, object]:
                 "contextIndex": 0,
                 "binderRole": ":explicit",
                 "isInstance": False,
+                "isInaccessible": False,
                 "isLet": False,
                 "type": _expression("P", "(:c P)"),
             },
@@ -51,8 +52,9 @@ def _payload() -> dict[str, object]:
                 "name": "_uniq.2",
                 "userName": "x",
                 "contextIndex": 1,
-                "binderRole": ":explicit",
+                "binderRole": ":let",
                 "isInstance": False,
+                "isInaccessible": False,
                 "isLet": True,
                 "type": _expression("α", "(:c Alpha)"),
                 "value": _expression("default", "(:c default)"),
@@ -64,9 +66,8 @@ def _payload() -> dict[str, object]:
 
 class StrictCodecTests(unittest.TestCase):
     def test_payload_preserves_pretty_and_model_views_and_case_tag(self):
-        install_model_sexpr_pypantograph_patch()
-        parsed = expr_mod.Goal.parse(_payload(), {"g0": 0})
-        goal = pantograph_goal_to_goal(parsed)
+        parsed = decode_execution_goal(_payload())
+        goal = execution_goal_to_goal(parsed)
 
         self.assertEqual(goal.expression, "h = h")
         self.assertEqual(goal.goal_model_sexp, "(:app (:c Eq) (:fv FV0) (:fv FV0))")
@@ -76,31 +77,30 @@ class StrictCodecTests(unittest.TestCase):
         self.assertNotIn("intro.zero", goal.hypotheses)
 
     def test_missing_required_expression_field_raises(self):
-        install_model_sexpr_pypantograph_patch()
         payload = _payload()
         payload["target"] = {"pp": "h = h", "modelSexpVersion": 1}
-        with self.assertRaises(PantographModelSExprProtocolError):
-            expr_mod.Goal.parse(payload, {"g0": 0})
+        with self.assertRaises(PantographProtocolError):
+            decode_execution_goal(payload)
 
     def test_unsupported_expression_version_raises(self):
-        install_model_sexpr_pypantograph_patch()
         payload = _payload()
         payload["target"] = _expression("h = h", "(:c Bad)", version=2)
-        with self.assertRaises(PantographModelSExprProtocolError):
-            expr_mod.Goal.parse(payload, {"g0": 0})
+        with self.assertRaises(PantographProtocolError):
+            decode_execution_goal(payload)
 
 
 class NormalizedGraphTests(unittest.TestCase):
     def test_four_child_hyp_and_shared_fv_identity(self):
-        install_model_sexpr_pypantograph_patch()
-        goal = pantograph_goal_to_goal(expr_mod.Goal.parse(_payload(), {"g0": 0}))
+        goal = execution_goal_to_goal(decode_execution_goal(_payload()))
         dag = model_goal_to_dag(goal)
 
         hyp = next(node for node in dag.nodes if node.label == "Hyp")
         self.assertEqual(len(hyp.children), 4)
         child_labels = [dag.nodes[index].label for index in hyp.children]
         self.assertEqual(child_labels[:3], ["FV0", "h", "HypRole:explicit"])
-        fv_nodes = [index for index, node in enumerate(dag.nodes) if node.label == "FV0"]
+        fv_nodes = [
+            index for index, node in enumerate(dag.nodes) if node.label == "FV0"
+        ]
         self.assertEqual(len(fv_nodes), 1)
         fv_id = fv_nodes[0]
         eq_app = next(node for node in dag.nodes if node.label == ":app")
@@ -108,7 +108,9 @@ class NormalizedGraphTests(unittest.TestCase):
 
         local_names = _local_names_by_fv_label(dag)
         self.assertEqual(_resolve_local_node_name(hyp, dag, local_names), "h")
-        self.assertEqual(_resolve_local_node_name(dag.nodes[fv_id], dag, local_names), "h")
+        self.assertEqual(
+            _resolve_local_node_name(dag.nodes[fv_id], dag, local_names), "h"
+        )
 
     def test_goal_root_does_not_depend_on_last_allocated_expression_node(self):
         goal = Goal(
