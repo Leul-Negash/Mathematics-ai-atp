@@ -215,6 +215,13 @@ def test_projection_placeholders_are_inferred_and_match_anything():
     validate_replay(seed, spec, target, replayed)
 
 
+def test_a_nested_application_head_is_flattened():
+    seed = seed_from_records("(((:c HAdd.hAdd) (:c Nat) (:c Nat)) (:c Nat) (:c inst) (:lit 1) (:lit 2))", [])
+    assert render_replay(seed).expression == (
+        "(@HAdd.hAdd @Nat @Nat @Nat @inst (nat_lit 1) (nat_lit 2))"
+    )
+
+
 def test_local_definition_value_is_replayed():
     seed = seed_from_records(
         "((:c Eq) (:c Nat) (:fv _y) (:fv _y))",

@@ -184,8 +184,6 @@ def decode_expr(node: SExpr, field: str | None = None) -> RawExpr:
         return _decode_tagged(head, node, field)
     # An application: Pantograph prints `(fn arg...)` with the head unapplied.
     fn = decode_expr(head, field)
-    if isinstance(fn, App):
-        raise _fail(ReplayFailure.MALFORMED_STRUCTURED, "Nested application head.", field)
     if len(node) < 2:
         raise _fail(ReplayFailure.MALFORMED_STRUCTURED, "Application without arguments.", field)
     args = []
@@ -200,6 +198,10 @@ def decode_expr(node: SExpr, field: str | None = None) -> RawExpr:
             args.append(Placeholder())
         else:
             args.append(decode_expr(arg, field))
+    if isinstance(fn, App):
+        # Metadata around a partial application hides it from getAppFn, so
+        # Pantograph prints `((f a) b)`; dropping the metadata leaves `(f a b)`.
+        return App(fn.fn, fn.args + tuple(args))
     return App(fn, tuple(args))
 
 
