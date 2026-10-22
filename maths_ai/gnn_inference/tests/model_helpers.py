@@ -70,12 +70,14 @@ def structured_goal(
                 binder_role=":explicit",
                 type_pp=type_pp.strip(),
                 type_model_sexp=f"(:c Test.Type{index})",
+                type_sexp=f"(:c Test.Type{index})",
             )
         )
     digest = hashlib.sha256(expression.encode("utf-8")).hexdigest()[:12]
     return Goal(
         expression=expression,
         goal_model_sexp=f"(:c Test.Goal{digest})",
+        goal_sexp=f"(:c Test.Goal{digest})",
         locals=locals_,
         model_sexp_version=1,
     )
@@ -84,8 +86,10 @@ def structured_goal(
 def pantograph_goal(goal: Goal) -> ExecutionGoal:
     goal.require_model_state()
 
-    def expr(pp, model):
-        return WireExpression(pp=pp, sexp=model, model_sexp=model, model_sexp_version=1)
+    def expr(pp, model, raw=None):
+        return WireExpression(
+            pp=pp, sexp=raw or model, model_sexp=model, model_sexp_version=1
+        )
 
     locals_ = tuple(
         ExecutionLocal(
@@ -96,9 +100,11 @@ def pantograph_goal(goal: Goal) -> ExecutionGoal:
             is_instance=local.is_instance,
             is_let=local.is_let,
             is_inaccessible=False,
-            type=expr(local.type_pp, local.type_model_sexp),
+            type=expr(local.type_pp, local.type_model_sexp, local.type_sexp),
             value=(
-                expr(local.value_pp, local.value_model_sexp) if local.is_let else None
+                expr(local.value_pp, local.value_model_sexp, local.value_sexp)
+                if local.is_let
+                else None
             ),
         )
         for local in goal.locals or []
@@ -108,7 +114,7 @@ def pantograph_goal(goal: Goal) -> ExecutionGoal:
         case_tag=goal.case_tag,
         is_conversion=False,
         fragment="tactic",
-        target=expr(goal.expression, goal.goal_model_sexp),
+        target=expr(goal.expression, goal.goal_model_sexp, goal.goal_sexp),
         locals=locals_,
     )
 
@@ -129,7 +135,8 @@ class FakeStateScope:
         self.allocations.clear()
         self.is_usable = False
 
-    async def start_goal(self, expression):
+    async def start_goal(self, expression, *, levels=()):
+        self.client.started_levels = tuple(levels)
         state = await self.client._start_goal(expression)
         self.allocations[id(state)] = state
         return state

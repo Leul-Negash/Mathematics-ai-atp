@@ -14,6 +14,7 @@ from torch.optim import AdamW
 from torch_geometric.data import Batch
 
 from maths_ai.data_models.proof_components import STV, TacticCandidate
+from maths_ai.lean_replay import ReplayFailure, ReplayInputError, seed_from_text
 from maths_ai.hybrid_reasoner.hypergraph import (
     NodeClosureReason,
     SearchEndReason,
@@ -229,7 +230,7 @@ class DecodeTests(unittest.TestCase):
 
 class RolloutTests(unittest.TestCase):
     def _prove(self, reasoner):
-        return asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        return asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
 
     def test_qed_rollout_stash_migrates_to_edge_ids(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
@@ -275,8 +276,12 @@ class RolloutTests(unittest.TestCase):
 
     def test_elaboration_failure_discards_unexecuted_actions(self):
         reasoner, _model, _vocab = _make_reasoner(_ElaborationExecutor())
-        with self.assertRaises(PantographGoalRejected):
+        with self.assertRaises(ReplayInputError) as error:
             self._prove(reasoner)
+        self.assertIs(error.exception.reason, ReplayFailure.LEAN_REJECTED)
+        self.assertIsInstance(error.exception.__cause__, PantographGoalRejected)
+        self.assertEqual(reasoner._pending, {})
+        self.assertIsNone(reasoner._result)
 
     def test_infrastructure_failure_discards_unobserved_actions(self):
         reasoner, _model, _vocab = _make_reasoner(_InfrastructureFailureExecutor())
@@ -306,7 +311,7 @@ class RolloutTests(unittest.TestCase):
         reasoner, _model, _vocab = _make_reasoner(executor)
 
         async def cancel_search():
-            task = asyncio.create_task(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+            task = asyncio.create_task(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
             await executor.started.wait()
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
@@ -337,7 +342,7 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_train_step_onpolicy_updates_params(self):
         reasoner, model, _vocab = _make_reasoner(_QEDExecutor())
-        result = asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        result = asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
 
         optimizer = AdamW(model.parameters(), lr=0.01)
         before = [p.detach().clone() for p in model.parameters()]
@@ -359,7 +364,7 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_failure_only_batch_is_actor_only(self):
         reasoner, model, _vocab = _make_reasoner(_RejectExecutor())
-        result = asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        result = asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
         self.assertGreater(len(result.failure_actions), 0)
 
         loss_result = compute_onpolicy_loss(
@@ -381,7 +386,7 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_graph_fingerprint_mismatch_fails_before_policy_recompute(self):
         reasoner, model, _vocab = _make_reasoner(_QEDExecutor())
-        result = asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        result = asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
         transitions = extract_actor_transitions(
             result.graph,
             RewardConfig(step_penalty=0.0),
@@ -402,7 +407,7 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_multiplicity_weights_actor_term(self):
         reasoner, model, _vocab = _make_reasoner(_QEDExecutor())
-        result = asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        result = asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
         transitions = extract_actor_transitions(
             result.graph,
             RewardConfig(step_penalty=0.0),
@@ -463,7 +468,7 @@ class PLNDisabledTests(unittest.TestCase):
         return reasoner, model, node_vocab
 
     def _prove(self, reasoner):
-        return asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        return asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
 
     def test_pln_objects_are_none(self):
         """use_pln=False means neither petta_chainer nor dts_sampler is constructed."""

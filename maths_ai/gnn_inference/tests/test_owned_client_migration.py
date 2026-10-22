@@ -15,6 +15,7 @@ from maths_ai.gnn_inference.atp_lean_gnn.inference import InferencePipeline
 from maths_ai.gnn_inference.tests.model_helpers import structured_goal, pantograph_goal
 from maths_ai.hybrid_reasoner.joint_inference import HybridReasoner, PantographExecutor
 from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_translator
+from maths_ai.lean_replay import seed_from_text
 from pantograph_async import PantographStateError
 
 
@@ -66,7 +67,7 @@ def test_overlapping_prove_is_rejected_before_changing_search_state():
 
     async def run():
         with pytest.raises(PantographStateError):
-            await reasoner.prove("True")
+            await reasoner.prove(seed_from_text(goal="True"))
 
     asyncio.run(run())
     assert reasoner._proving is True

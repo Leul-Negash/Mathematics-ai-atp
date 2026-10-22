@@ -32,6 +32,7 @@ from torch_geometric.data import Batch
 from maths_ai.data_models.proof_components import Goal, TacticCandidate
 from maths_ai.hybrid_reasoner.hypergraph import ProofHypergraph, ProofNode
 from maths_ai.hybrid_reasoner.joint_inference import ExpansionResult, HybridReasoner
+from maths_ai.lean_replay import LeanGoalSeed
 from pantograph_async import PantographStateError
 
 from .actor_critic import ActorCriticWithArgsClassifier
@@ -252,9 +253,8 @@ class RLHybridReasoner(HybridReasoner):
 
     async def prove(
         self,
-        goal: str,
+        seed: LeanGoalSeed,
         *,
-        hypotheses: Optional[List[str]] = None,
         greedy: bool = False,
     ) -> RLSearchResult:
         """Run the search and return ``RLSearchResult(graph, edge_actions, failure_actions)``.
@@ -277,7 +277,7 @@ class RLHybridReasoner(HybridReasoner):
         )  # graph attached after the base search
         result = None
         try:
-            graph = await super().prove(goal, hypotheses=hypotheses)
+            graph = await super().prove(seed)
             self._result.graph = graph
             result, self._result = self._result, None
         finally:

@@ -41,6 +41,7 @@ from .search_harvest import (
 )
 
 from maths_ai.data_models.proof_components import Goal
+from maths_ai.lean_replay import LeanGoalSeed
 
 
 _STRUCTURAL_LABELS = {
@@ -514,24 +515,21 @@ def train_step(
     return metrics
 
 
-async def collect_batch(reasoner, theorems: list[dict]) -> list:
-    """Run one shared reasoner sequentially over a batch of theorems.
+async def collect_batch(reasoner, theorems: list[LeanGoalSeed]) -> list:
+    """Run one shared reasoner sequentially over a batch of theorem seeds.
 
-    Each item is ``{"goal": str, "hypotheses": list[str]}``. Requires a live Pantograph
+    Requires a live Pantograph
     server + ``petta`` binary (env-gated); PLN is de-blocked via ``evaluate_async`` so the
     independent pool workers provide cross-theorem concurrency. Returns finished graphs.
     """
-    return [
-        await reasoner.prove(item["goal"], hypotheses=item.get("hypotheses"))
-        for item in theorems
-    ]
+    return [await reasoner.prove(seed) for seed in theorems]
 
 
 async def collect_and_train(
     reasoner,
     model: ActorCriticWithArgsClassifier,
     optimizer: torch.optim.Optimizer,
-    theorems: list[dict],
+    theorems: list[LeanGoalSeed],
     featurize: Callable[[Goal], Data],
     tactic_to_id: dict[str, int],
     **train_kwargs,
@@ -641,7 +639,7 @@ def train_step_onpolicy(
     return metrics
 
 
-async def collect_batch_onpolicy(reasoner, theorems: list[dict]) -> list:
+async def collect_batch_onpolicy(reasoner, theorems: list[LeanGoalSeed]) -> list:
     """Run the RL reasoner SEQUENTIALLY over the batch and return its ``RLSearchResult`` s.
 
     Sequential because one reasoner instance holds one action stash at a time
@@ -650,10 +648,8 @@ async def collect_batch_onpolicy(reasoner, theorems: list[dict]) -> list:
     and is deferred.
     """
     results = []
-    for item in theorems:
-        results.append(
-            await reasoner.prove(item["goal"], hypotheses=item.get("hypotheses"))
-        )
+    for seed in theorems:
+        results.append(await reasoner.prove(seed))
     return results
 
 
@@ -661,7 +657,7 @@ async def collect_and_train_onpolicy(
     reasoner,
     model: ActorCriticWithArgsClassifier,
     optimizer: torch.optim.Optimizer,
-    theorems: list[dict],
+    theorems: list[LeanGoalSeed],
     featurize: Callable[[Goal], Data],
     **train_kwargs,
 ) -> dict[str, float]:

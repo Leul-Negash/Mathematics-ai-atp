@@ -2,30 +2,28 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
-from dataclasses import dataclass
 from typing import List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-
-class LeanGoalSeed(BaseModel):
-    """Pretty-printed Lean source that has not yet been serialized by Pantograph."""
-
-    expression: str
-    hypotheses: List[str] = Field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class GoalReplaySpec:
-    """Lean source used to reconstruct and serialize one proof state."""
-
-    expression: str
-    local_names: tuple[str, ...]
+from maths_ai.lean_replay import (
+    GoalReplaySpec,
+    LeanGoalSeed,
+    ReplayFailure,
+    ReplayInputError,
+    StructuredLocal,
+    render_replay,
+    seed_from_records,
+)
 
 
 class GoalLocal(BaseModel):
-    """One serialized Lean local declaration and its normalized model view."""
+    """One serialized Lean local declaration and its normalized model view.
+
+    ``type_sexp``/``value_sexp`` are Pantograph's raw expressions, kept only to
+    replay the goal. They are execution metadata: the fingerprint and graph
+    record ignore them.
+    """
 
     user_name: str
     internal_name: str = ""
@@ -38,6 +36,8 @@ class GoalLocal(BaseModel):
     value_pp: Optional[str] = None
     value_model_sexp: Optional[str] = None
     model_sexp_version: int = 1
+    type_sexp: Optional[str] = None
+    value_sexp: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_local(self) -> "GoalLocal":
@@ -82,11 +82,13 @@ class Goal(BaseModel):
 
     ``expression`` is the Lean target formula (the text after ``⊢``);
     ``hypotheses`` are the local context entries available to prove it.
+    ``goal_sexp`` is the target's raw expression, kept for replay only.
     """
 
     expression: str
     hypotheses: List[str] = Field(default_factory=list)
     goal_model_sexp: Optional[str] = None
+    goal_sexp: Optional[str] = None
     locals: Optional[List[GoalLocal]] = None
     case_tag: Optional[str] = None
     model_sexp_version: Optional[int] = None
@@ -150,59 +152,37 @@ class Goal(BaseModel):
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def replay_spec(self) -> GoalReplaySpec:
-        """Render the structured local context back into closed Lean source."""
+    def replay_seed(self) -> LeanGoalSeed:
+        """The structured seed that recreates this goal from its raw expressions."""
         self.require_model_state()
-        expression = self.expression
-        local_names: list[str] = []
-        for local in reversed(self.locals or []):
-            name = local.user_name or "_"
-            local_names.append(name)
-            if local.is_let:
-                expression = (
-                    f"let {name} : {local.type_pp} := {local.value_pp}; {expression}"
-                )
-                continue
-            if local.is_instance or local.binder_role in {
-                ":instImplicit",
-                "instImplicit",
-                "instance",
-            }:
-                binder = f"[{name} : {local.type_pp}]"
-            elif local.binder_role in {":implicit", "implicit"}:
-                binder = f"{{{name} : {local.type_pp}}}"
-            elif local.binder_role in {
-                ":strictImplicit",
-                "strictImplicit",
-                "strict-implicit",
-            }:
-                binder = f"{{{{{name} : {local.type_pp}}}}}"
-            else:
-                binder = f"({name} : {local.type_pp})"
-            expression = f"∀ {binder}, {expression}"
-        local_names.reverse()
-        return GoalReplaySpec(expression=expression, local_names=tuple(local_names))
-
-
-_SEED_LOCAL_RE = re.compile(r"^\s*([^:]+?)\s*:\s*(.+?)\s*$", re.DOTALL)
-
-
-def seed_replay_spec(seed: LeanGoalSeed) -> GoalReplaySpec:
-    """Render a text theorem seed as explicit binders for first serialization."""
-    expression = seed.expression
-    local_names: list[str] = []
-    for hypothesis in reversed(seed.hypotheses):
-        match = _SEED_LOCAL_RE.match(hypothesis)
-        if match is None:
-            raise ValueError(
-                f"Cannot replay hypothesis {hypothesis!r}; expected 'name : type'."
+        locals_ = self.locals or []
+        if self.goal_sexp is None or any(local.type_sexp is None for local in locals_):
+            raise ReplayInputError(
+                ReplayFailure.MISSING_CONTEXT,
+                "This goal has no raw execution expressions to replay.",
             )
-        name, type_pp = match.groups()
-        name = name.strip()
-        local_names.append(name)
-        expression = f"∀ ({name} : {type_pp.strip()}), {expression}"
-    local_names.reverse()
-    return GoalReplaySpec(expression=expression, local_names=tuple(local_names))
+        records = [
+            StructuredLocal(
+                internal_id=local.internal_name,
+                name=local.user_name or "_",
+                context_index=local.context_index,
+                binder_role=local.binder_role,
+                is_instance=local.is_instance,
+                is_let=local.is_let,
+                type_sexp=local.type_sexp,
+                value_sexp=local.value_sexp,
+            )
+            for local in locals_
+        ]
+        return seed_from_records(
+            self.goal_sexp,
+            records,
+            source={"origin": "canonical-goal", "state": self.state_fingerprint()},
+        )
+
+    def replay_spec(self) -> GoalReplaySpec:
+        """Render the goal back into a closed Lean statement."""
+        return render_replay(self.replay_seed())
 
 
 class GoalState(BaseModel):
