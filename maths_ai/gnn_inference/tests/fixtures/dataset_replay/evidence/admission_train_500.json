@@ -1,0 +1,1041 @@
+{
+  "source": {
+    "kind": "dataset",
+    "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+    "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+    "split": "train",
+    "max_scan_rows": 500
+  },
+  "renderer": "lean-replay-v1",
+  "environment": {
+    "client": {
+      "url": "file:///home/leul/Icog/Maths%20AI/client-levels",
+      "dir_info": {}
+    },
+    "repl_sha256": "ffc2a91985137f9183c4cc1571c08ece182996484feecf44b5e5d22d932d7dc0",
+    "imports": [
+      "Mathlib"
+    ],
+    "source_root": "/home/leul/lean-env/mathlib4",
+    "lake_manifest_sha256": "b283d36205658ac130fcc9a5de33a134a79e23a5bb568f734c288d010d8bb5de",
+    "lean_toolchain_sha256": "423ae714bbbb56154fe3934bc715dee2bd624ac1337c47b7cd4719fc155086c8"
+  },
+  "scanned": 500,
+  "candidates": 391,
+  "admitted": 320,
+  "quarantined": {
+    "missing-context": 46,
+    "unresolved-term": 3,
+    "unresolved-universe": 9,
+    "unsupported-syntax": 51
+  },
+  "skipped": {
+    "over-size-replay": 63,
+    "replay-repl-failure": 8
+  },
+  "cache_hits": 0,
+  "admitted_with_name_drift": 0,
+  "admitted_with_context_index_shift": 289,
+  "stopped_by": "source-exhausted",
+  "preflight_s": 310.766,
+  "examples": {
+    "unresolved-universe": [
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 0,
+          "theorem": "Algebra.intTrace_eq_trace",
+          "file_path": "Mathlib/RingTheory/IntegralRestrict.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-universe",
+          "detail": "Universe level metavariable _uniq.319125 has no recorded assignment.",
+          "span": null,
+          "field": "local 18 (Aₘ)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 1,
+          "theorem": "Algebra.intTrace_eq_trace",
+          "file_path": "Mathlib/RingTheory/IntegralRestrict.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-universe",
+          "detail": "Universe level metavariable _uniq.319125 has no recorded assignment.",
+          "span": null,
+          "field": "local 18 (Aₘ)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 2,
+          "theorem": "Algebra.intTrace_eq_trace",
+          "file_path": "Mathlib/RingTheory/IntegralRestrict.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-universe",
+          "detail": "Universe level metavariable _uniq.319125 has no recorded assignment.",
+          "span": null,
+          "field": "local 18 (Aₘ)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 3,
+          "theorem": "Algebra.intTrace_eq_trace",
+          "file_path": "Mathlib/RingTheory/IntegralRestrict.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-universe",
+          "detail": "Universe level metavariable _uniq.319125 has no recorded assignment.",
+          "span": null,
+          "field": "local 18 (Aₘ)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 4,
+          "theorem": "Algebra.intTrace_eq_trace",
+          "file_path": "Mathlib/RingTheory/IntegralRestrict.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-universe",
+          "detail": "Universe level metavariable _uniq.319125 has no recorded assignment.",
+          "span": null,
+          "field": "local 18 (Aₘ)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 17,
+          "theorem": "Algebra.algebraMap_intTrace_fractionRing",
+          "file_path": "Mathlib/RingTheory/IntegralRestrict.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-universe",
+          "detail": "Universe level metavariable _uniq.292271 has no recorded assignment.",
+          "span": null,
+          "field": "local 18 (Aₘ)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 18,
+          "theorem": "Algebra.algebraMap_intTrace_fractionRing",
+          "file_path": "Mathlib/RingTheory/IntegralRestrict.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-universe",
+          "detail": "Universe level metavariable _uniq.292271 has no recorded assignment.",
+          "span": null,
+          "field": "local 18 (Aₘ)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 19,
+          "theorem": "Algebra.algebraMap_intTrace_fractionRing",
+          "file_path": "Mathlib/RingTheory/IntegralRestrict.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-universe",
+          "detail": "Universe level metavariable _uniq.292271 has no recorded assignment.",
+          "span": null,
+          "field": "local 18 (Aₘ)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 20,
+          "theorem": "Algebra.algebraMap_intTrace_fractionRing",
+          "file_path": "Mathlib/RingTheory/IntegralRestrict.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-universe",
+          "detail": "Universe level metavariable _uniq.292271 has no recorded assignment.",
+          "span": null,
+          "field": "local 18 (Aₘ)"
+        }
+      }
+    ],
+    "missing-context": [
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 27,
+          "theorem": "TopologicalSpace.isTopologicalBasis_of_subbasis",
+          "file_path": "Mathlib/Topology/Bases.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 5 (this)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 28,
+          "theorem": "TopologicalSpace.isTopologicalBasis_of_subbasis",
+          "file_path": "Mathlib/Topology/Bases.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 5 (this)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 29,
+          "theorem": "TopologicalSpace.isTopologicalBasis_of_subbasis",
+          "file_path": "Mathlib/Topology/Bases.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 5 (this)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 30,
+          "theorem": "TopologicalSpace.isTopologicalBasis_of_subbasis",
+          "file_path": "Mathlib/Topology/Bases.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 5 (this)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 31,
+          "theorem": "TopologicalSpace.isTopologicalBasis_of_subbasis",
+          "file_path": "Mathlib/Topology/Bases.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 5 (this)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 32,
+          "theorem": "TopologicalSpace.isTopologicalBasis_of_subbasis",
+          "file_path": "Mathlib/Topology/Bases.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 5 (this)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 33,
+          "theorem": "TopologicalSpace.isTopologicalBasis_of_subbasis",
+          "file_path": "Mathlib/Topology/Bases.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 5 (this)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 34,
+          "theorem": "TopologicalSpace.isTopologicalBasis_of_subbasis",
+          "file_path": "Mathlib/Topology/Bases.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 5 (this)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 35,
+          "theorem": "TopologicalSpace.isTopologicalBasis_of_subbasis",
+          "file_path": "Mathlib/Topology/Bases.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 5 (this)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 219,
+          "theorem": "MvQPF.Cofix.abs_repr",
+          "file_path": "Mathlib/Data/QPF/Multivariate/Constructions/Cofix.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 7 (R)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 220,
+          "theorem": "MvQPF.Cofix.abs_repr",
+          "file_path": "Mathlib/Data/QPF/Multivariate/Constructions/Cofix.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 7 (R)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 221,
+          "theorem": "MvQPF.Cofix.abs_repr",
+          "file_path": "Mathlib/Data/QPF/Multivariate/Constructions/Cofix.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 6 (R)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 222,
+          "theorem": "MvQPF.Cofix.abs_repr",
+          "file_path": "Mathlib/Data/QPF/Multivariate/Constructions/Cofix.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 6 (R)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 223,
+          "theorem": "MvQPF.Cofix.abs_repr",
+          "file_path": "Mathlib/Data/QPF/Multivariate/Constructions/Cofix.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 6 (R)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 224,
+          "theorem": "MvQPF.Cofix.abs_repr",
+          "file_path": "Mathlib/Data/QPF/Multivariate/Constructions/Cofix.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 6 (R)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 225,
+          "theorem": "MvQPF.Cofix.abs_repr",
+          "file_path": "Mathlib/Data/QPF/Multivariate/Constructions/Cofix.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 6 (R)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 226,
+          "theorem": "MvQPF.Cofix.abs_repr",
+          "file_path": "Mathlib/Data/QPF/Multivariate/Constructions/Cofix.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 6 (R)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 227,
+          "theorem": "MvQPF.Cofix.abs_repr",
+          "file_path": "Mathlib/Data/QPF/Multivariate/Constructions/Cofix.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 6 (R)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 228,
+          "theorem": "MvQPF.Cofix.abs_repr",
+          "file_path": "Mathlib/Data/QPF/Multivariate/Constructions/Cofix.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 6 (R)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 229,
+          "theorem": "MvQPF.Cofix.abs_repr",
+          "file_path": "Mathlib/Data/QPF/Multivariate/Constructions/Cofix.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "missing-context",
+          "detail": "A local definition has no recorded value.",
+          "span": null,
+          "field": "local 6 (R)"
+        }
+      }
+    ],
+    "replay-repl-failure": [
+      {
+        "source": {
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5",
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "file_path": "Mathlib/MeasureTheory/Measure/Haar/OfBasis.lean",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "row_index": 84,
+          "split": "train",
+          "theorem": "parallelepiped_single"
+        },
+        "replay_chars": 1593,
+        "error": "Unsolicited REPL stdout; command=('/usr/bin/gnustdbuf', '-oL', '/home/leul/lean-env/Pantograph/.lake/build/bin/repl', 'Mathlib') source_root=/home/leul/lean-env/mathlib4 phase=READY stderr=''"
+      },
+      {
+        "source": {
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5",
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "file_path": "Mathlib/LinearAlgebra/TensorProduct/Vanishing.lean",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "row_index": 124,
+          "split": "train",
+          "theorem": "TensorProduct.forall_vanishesTrivially_iff_forall_rTensor_injective"
+        },
+        "replay_chars": 14702,
+        "error": "Unsolicited REPL stdout; command=('/usr/bin/gnustdbuf', '-oL', '/home/leul/lean-env/Pantograph/.lake/build/bin/repl', 'Mathlib') source_root=/home/leul/lean-env/mathlib4 phase=READY stderr=''"
+      },
+      {
+        "source": {
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5",
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "file_path": "Mathlib/Analysis/InnerProductSpace/Adjoint.lean",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "row_index": 161,
+          "split": "train",
+          "theorem": "LinearMap.adjoint_inner_left"
+        },
+        "replay_chars": 38432,
+        "error": "Unsolicited REPL stdout; command=('/usr/bin/gnustdbuf', '-oL', '/home/leul/lean-env/Pantograph/.lake/build/bin/repl', 'Mathlib') source_root=/home/leul/lean-env/mathlib4 phase=READY stderr=''"
+      },
+      {
+        "source": {
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5",
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "file_path": "Mathlib/CategoryTheory/Adjunction/Basic.lean",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "row_index": 201,
+          "split": "train",
+          "theorem": "CategoryTheory.Adjunction.CoreHomEquiv.homEquiv_naturality_right_symm"
+        },
+        "replay_chars": 10354,
+        "error": "Unsolicited REPL stdout; command=('/usr/bin/gnustdbuf', '-oL', '/home/leul/lean-env/Pantograph/.lake/build/bin/repl', 'Mathlib') source_root=/home/leul/lean-env/mathlib4 phase=READY stderr=''"
+      },
+      {
+        "source": {
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5",
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "file_path": "Mathlib/GroupTheory/PushoutI.lean",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "row_index": 307,
+          "split": "train",
+          "theorem": "Monoid.PushoutI.induction_on"
+        },
+        "replay_chars": 19094,
+        "error": "Unsolicited REPL stdout; command=('/usr/bin/gnustdbuf', '-oL', '/home/leul/lean-env/Pantograph/.lake/build/bin/repl', 'Mathlib') source_root=/home/leul/lean-env/mathlib4 phase=READY stderr=''"
+      },
+      {
+        "source": {
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5",
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "file_path": "Mathlib/RingTheory/IntegralRestrict.lean",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "row_index": 392,
+          "split": "train",
+          "theorem": "Algebra.intTrace_eq_of_isLocalization"
+        },
+        "replay_chars": 13418,
+        "error": "Unsolicited REPL stdout; command=('/usr/bin/gnustdbuf', '-oL', '/home/leul/lean-env/Pantograph/.lake/build/bin/repl', 'Mathlib') source_root=/home/leul/lean-env/mathlib4 phase=READY stderr=''"
+      },
+      {
+        "source": {
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5",
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "file_path": "Mathlib/Probability/Kernel/Disintegration/Density.lean",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "row_index": 433,
+          "split": "train",
+          "theorem": "ProbabilityTheory.kernel.densityProcess_antitone_kernel_right"
+        },
+        "replay_chars": 26917,
+        "error": "Unsolicited REPL stdout; command=('/usr/bin/gnustdbuf', '-oL', '/home/leul/lean-env/Pantograph/.lake/build/bin/repl', 'Mathlib') source_root=/home/leul/lean-env/mathlib4 phase=READY stderr=''"
+      },
+      {
+        "source": {
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5",
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "file_path": "Mathlib/Probability/Kernel/Disintegration/Density.lean",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "row_index": 441,
+          "split": "train",
+          "theorem": "ProbabilityTheory.kernel.densityProcess_antitone_kernel_right"
+        },
+        "replay_chars": 24137,
+        "error": "Unsolicited REPL stdout; command=('/usr/bin/gnustdbuf', '-oL', '/home/leul/lean-env/Pantograph/.lake/build/bin/repl', 'Mathlib') source_root=/home/leul/lean-env/mathlib4 phase=READY stderr=''"
+      }
+    ],
+    "unsupported-syntax": [
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 244,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 245,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 246,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 247,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 248,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 249,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 250,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 251,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 252,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 253,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 254,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 255,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 256,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 257,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 258,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 259,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 260,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 262,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 263,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 264,
+          "theorem": "MeasureTheory.SignedMeasure.exists_subset_restrict_nonpos",
+          "file_path": "Mathlib/MeasureTheory/Decomposition/SignedHahn.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unsupported-syntax",
+          "detail": "Constant _private.Mathlib.MeasureTheory.Decomposition.SignedHahn.0.MeasureTheory.SignedMeasure.restrictNonposSeq cannot be named in Lean source.",
+          "span": null,
+          "field": "local 13 (hn)"
+        }
+      }
+    ],
+    "unresolved-term": [
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 339,
+          "theorem": "KummerDedekind.normalizedFactors_ideal_map_eq_normalizedFactors_min_poly_mk_map",
+          "file_path": "Mathlib/NumberTheory/KummerDedekind.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-term",
+          "detail": "Term metavariable _uniq.128881 has no recorded assignment.",
+          "span": null,
+          "field": "target"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 457,
+          "theorem": "Ordnode.insertWith.valid_aux",
+          "file_path": "Mathlib/Data/Ordmap/Ordset.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-term",
+          "detail": "Term metavariable _uniq.312402 has no recorded assignment.",
+          "span": null,
+          "field": "local 20 (H)"
+        }
+      },
+      {
+        "source": {
+          "dataset": "jajostrains/Mathlib-Normalized-Sexpr",
+          "revision": "f44841f98193c09b20c6092198a22e98ff2cd7a8",
+          "split": "train",
+          "row_index": 463,
+          "theorem": "Ordnode.insertWith.valid_aux",
+          "file_path": "Mathlib/Data/Ordmap/Ordset.lean",
+          "commit": "29dcec074de168ac2bf835a77ef68bbe069194c5"
+        },
+        "error": {
+          "reason": "unresolved-term",
+          "detail": "Term metavariable _uniq.312922 has no recorded assignment.",
+          "span": null,
+          "field": "local 20 (H)"
+        }
+      }
+    ]
+  }
+}
