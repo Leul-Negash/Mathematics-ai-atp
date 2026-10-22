@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,11 @@ def dataset_row(key):
         dataset_name=FIXTURE["dataset"],
         dataset_revision=FIXTURE["revision"],
     )
+
+
+def remap_context(model_sexp: str, indices: dict[int, int]) -> str:
+    """Renumber `(:fv FVi)` from source context indices to replayed ones."""
+    return re.sub(r"\(:fv FV(\d+)\)", lambda m: f"(:fv FV{indices[int(m.group(1))]})", model_sexp)
 
 
 def failure(call) -> ReplayFailure | None:
@@ -130,6 +136,18 @@ def test_live_replay_repairs_supported_rows_and_rejects_the_rest(mathlib_env):
                         for l, s in zip(goal.locals, seed.locals)
                         if s.name not in renamed
                     )
+                    # The GNN input matches the dataset's normalized expressions;
+                    # only free-variable context indices are renumbered.
+                    raw = ROWS[key]
+                    if raw["origin"] == "original":
+                        indices = {
+                            s.context_index: l.context_index
+                            for s, l in zip(seed.locals, goal.locals)
+                        }
+                        assert remap_context(raw["model_goal_sexp"], indices) == goal.goal_model_sexp
+                        for source, replayed in zip(json.loads(raw["model_hyp_sexps"]), goal.locals):
+                            assert remap_context(source["sexp"], indices) == replayed.type_model_sexp
+                            assert source["binder_role"] == replayed.binder_role
                     # The canonical goal replays through the same rules.
                     reason, again, _ = await outcome(scope, goal.replay_seed())
                     assert reason is None and again.state_fingerprint() == goal.state_fingerprint()
@@ -158,7 +176,31 @@ def test_live_replay_repairs_supported_rows_and_rejects_the_rest(mathlib_env):
                 reason, replayed, _ = await outcome(scope, canonical.replay_seed())
                 assert reason is None
                 assert replayed.state_fingerprint() == canonical.state_fingerprint()
+
+                # Alternative branches from one state each replay to their own goals.
+                start = await scope.start_goal("∀ (p q : Prop), p ∧ q → q ∧ p", levels=())
+                parent = await scope.apply_tactic(start, "intro p q h")
+                for tactic, count in (("constructor", 2), ("obtain ⟨hp, hq⟩ := h", 1)):
+                    branch = await scope.apply_tactic(parent, tactic)
+                    assert len(branch.goals) == count
+                    for execution in branch.goals:
+                        child = execution_goal_to_goal(execution)
+                        reason, again, _ = await outcome(scope, child.replay_seed())
+                        assert reason is None
+                        assert again.state_fingerprint() == child.state_fingerprint()
             assert (await client.stat()).n_goals == baseline
+
+            # Cancelling a replay leaves nothing allocated, or retires the session.
+            async with client.state_scope() as scope:
+                task = asyncio.create_task(
+                    materialize_seed(scope, dataset_row(41).structured_seed())
+                )
+                await asyncio.sleep(0)  # let the replay start its request
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            if client.is_usable:
+                assert (await client.stat()).n_goals == baseline
         assert client.phase.value == "CLOSED"
 
     asyncio.run(run())

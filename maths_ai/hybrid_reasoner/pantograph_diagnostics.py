@@ -46,7 +46,7 @@ async def verify_canonical_graphs(client: PantographClient) -> list[str]:
     goldens = json.loads(GOLDEN_PATH.read_text())["goals"]
     async with client.state_scope() as scope:
         for label, expression, tactic in GRAPH_CASES:
-            root = await scope.start_goal(expression)
+            root = await scope.start_goal(expression, levels=())
             state = await scope.apply_tactic(root, tactic)
             require(
                 len(state.goals) == len(goldens[label]),
@@ -91,7 +91,7 @@ async def verify_canonical_graphs(client: PantographClient) -> list[str]:
                 "exact h",
             ),
         ):
-            start = await scope.start_goal(expression)
+            start = await scope.start_goal(expression, levels=())
             state = await scope.apply_tactic(start, intro)
             goal = execution_goal_to_goal(state.goals[0])
             require(

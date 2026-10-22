@@ -476,6 +476,9 @@ class PoolTests(unittest.TestCase):
         # Schema 4 records no let values: the row is quarantined, not guessed.
         self.assertEqual(report["quarantined"], {"missing-context": 1})
         self.assertEqual((report["scanned"], report["admitted"]), (2, 1))
+        self.assertEqual(
+            report["coverage"]["size:<=200"], {"admitted": 1, "quarantined": 1}
+        )
 
     def test_file_mode_pool(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -620,6 +623,46 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(len(pool.train_items), 1)
         self.assertEqual(report["skipped"], {"over-size-replay": 1})
         self.assertEqual(client.started, ["True"])
+
+    def test_validation_cache_is_reused_only_for_the_same_identity(self):
+        from maths_ai.gnn_inference.atp_lean_gnn.seed_admission import ValidationCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            identity = {"repl_sha256": "a", "client": {"commit": "c"}}
+            cache = ValidationCache(path, identity)
+            cache.add("fingerprint")
+            cache.save()
+            self.assertIn("fingerprint", ValidationCache(path, identity))
+            changed = dict(identity, repl_sha256="b")
+            self.assertNotIn("fingerprint", ValidationCache(path, changed))
+
+    def test_cached_seeds_are_admitted_without_a_replay(self):
+        client = _ReplayClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rows = [{"goal": "p → p", "hypotheses": ["p : Prop"]}]
+            cfg = _write_config(
+                tmp,
+                data_source="file",
+                theorem_file=_write_theorems(tmp, rows),
+                seed_cache_path=tmp / "cache.json",
+                eval_pool_size=0,
+            )
+            for _ in range(2):
+                asyncio.run(
+                    build_theorem_pool(
+                        cfg, _env(tmp), report_dir=tmp / "admission", client_factory=_factory(client)
+                    )
+                )
+            reports = [
+                json.loads(path.read_text())
+                for path in sorted((tmp / "admission").iterdir())
+            ]
+        # Two runs wrote two reports; the second reused the validation.
+        self.assertEqual(len(reports), 2)
+        self.assertEqual([r["cache_hits"] for r in reports], [0, 1])
+        self.assertEqual(len(client.started), 1)
 
     def test_no_validated_seed_is_an_error_not_an_empty_pool(self):
         with tempfile.TemporaryDirectory() as tmp:

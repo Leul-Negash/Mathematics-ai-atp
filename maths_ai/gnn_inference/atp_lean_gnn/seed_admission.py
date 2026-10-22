@@ -47,6 +47,23 @@ from maths_ai.lean_replay import (
 from .dataset import iter_dataset_rows
 
 EXAMPLES_PER_REASON = 20
+# Printed-state size buckets (characters) for coverage reporting.
+SIZE_BUCKETS = (200, 400, 800, 1600)
+
+
+def _domain(source: dict[str, object]) -> str:
+    """The Mathlib area of a row (``Mathlib/RingTheory``), or its input kind."""
+    path = source.get("file_path")
+    if isinstance(path, str) and path:
+        return "/".join(path.split("/")[:2]).removesuffix(".lean")
+    return "file" if "file" in source else "unknown"
+
+
+def _size_bucket(size: int) -> str:
+    for limit in SIZE_BUCKETS:
+        if size <= limit:
+            return f"<={limit}"
+    return f">{SIZE_BUCKETS[-1]}"
 
 
 @dataclass
@@ -68,15 +85,24 @@ class AdmissionReport:
     skipped: Counter = field(default_factory=Counter)
     quarantined: Counter = field(default_factory=Counter)
     examples: dict[str, list[dict[str, object]]] = field(default_factory=dict)
+    coverage: dict[str, Counter] = field(default_factory=dict)
     name_drift: int = 0
     context_index_shift: int = 0
     stopped_by: str = "source-exhausted"
     preflight_s: float = 0.0
     environment: dict[str, object] = field(default_factory=dict)
 
-    def quarantine(self, seed_source: dict[str, object], error: ReplayInputError, **extra) -> None:
+    def cover(self, source: dict[str, object], size: int, outcome: str) -> None:
+        """Count an outcome by domain and by size, to show what the pool covers."""
+        for key in (f"domain:{_domain(source)}", f"size:{_size_bucket(size)}"):
+            self.coverage.setdefault(key, Counter())[outcome] += 1
+
+    def quarantine(
+        self, seed_source: dict[str, object], error: ReplayInputError, size: int, **extra
+    ) -> None:
         reason = error.reason.value
         self.quarantined[reason] += 1
+        self.cover(seed_source, size, "quarantined")
         bucket = self.examples.setdefault(reason, [])
         if len(bucket) < EXAMPLES_PER_REASON:
             bucket.append({"source": seed_source, "error": error.as_dict(), **extra})
@@ -92,6 +118,7 @@ class AdmissionReport:
             "quarantined": dict(sorted(self.quarantined.items())),
             "skipped": dict(sorted(self.skipped.items())),
             "cache_hits": self.cache_hits,
+            "coverage": {key: dict(value) for key, value in sorted(self.coverage.items())},
             "admitted_with_name_drift": self.name_drift,
             "admitted_with_context_index_shift": self.context_index_shift,
             "stopped_by": self.stopped_by,
@@ -130,12 +157,13 @@ def _admit_offline(
     report.scanned += 1
     if max_state_chars is not None and size > max_state_chars:
         report.skipped["over-size"] += 1
+        report.cover(source, size, "skipped")
         return None
     try:
         seed = seed_factory()
         render_replay(seed)
     except ReplayInputError as exc:
-        report.quarantine(source, exc)
+        report.quarantine(source, exc, size)
         return None
     report.candidates += 1
     return TheoremItem(seed=seed, tactic_label=tactic, size=size)
@@ -300,6 +328,7 @@ async def preflight(
             replay = render_replay(item.seed)
             if max_replay_chars is not None and len(replay.expression) > max_replay_chars:
                 report.skipped["over-size-replay"] += 1
+                report.cover(item.seed.source_dict, item.size, "skipped")
                 continue
             fingerprint = replay.fingerprint
             if cache is not None and fingerprint in cache:
@@ -309,7 +338,9 @@ async def preflight(
                     async with client.state_scope() as scope:
                         _, _, validation = await materialize_seed(scope, item.seed)
                 except ReplayInputError as exc:
-                    report.quarantine(item.seed.source_dict, exc, replay=replay.as_dict())
+                    report.quarantine(
+                        item.seed.source_dict, exc, item.size, replay=replay.as_dict()
+                    )
                     continue
                 except (PantographRequestTimeout, PantographProtocolError) as exc:
                     if client.is_usable:
@@ -320,6 +351,7 @@ async def preflight(
                         else "replay-repl-failure"
                     )
                     report.skipped[kind] += 1
+                    report.cover(item.seed.source_dict, item.size, "skipped")
                     bucket = report.examples.setdefault(kind, [])
                     if len(bucket) < EXAMPLES_PER_REASON:
                         bucket.append(
@@ -339,6 +371,7 @@ async def preflight(
                 if cache is not None:
                     cache.add(fingerprint)
             report.admitted += 1
+            report.cover(item.seed.source_dict, item.size, "admitted")
             admitted.append(item)
     finally:
         try:

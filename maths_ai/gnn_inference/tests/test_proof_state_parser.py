@@ -55,6 +55,12 @@ def test_grouped_names_values_colons_strings_and_comments():
     assert state.hypotheses[0].names == ("n", "m")
 
 
+def test_quoted_names_keep_their_spaces_and_colons():
+    state = parse_state("«h : x» : 1 = 1\n⊢ «h : x» = «h : x»")
+    assert [(h.name, h.type_expr) for h in state.hypotheses] == [("«h : x»", "1 = 1")]
+    assert state.goal == "«h : x» = «h : x»"
+
+
 def test_several_goals_are_reported_not_merged():
     text = "case a\nn : Nat\n⊢ n = n\n\ncase b\n⊢ True"
     assert [s.case_tag for s in parse_states(text)] == ["a", "b"]
