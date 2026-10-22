@@ -749,7 +749,7 @@ requires-dist = [
     { name = "datasets", specifier = ">=5.0.1" },
     { name = "faiss-cpu", specifier = ">=1.14.2" },
     { name = "graphviz", specifier = ">=0.21" },
-    { name = "pantograph-async-client", git = "https://github.com/Leul-Negash/Pantograph-Client?rev=455f8a352d9d72a796e5b3e5cedf643c0909f954" },
+    { name = "pantograph-async-client", git = "https://github.com/123nol/Pantograph-Client?rev=d1dac7e8a8ea296192e7a5b2616114b73e0812b7" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "torch", specifier = ">=2.12.0" },
@@ -1211,7 +1211,7 @@ wheels = [
 [[package]]
 name = "pantograph-async-client"
 version = "0.1.1"
-source = { git = "https://github.com/Leul-Negash/Pantograph-Client?rev=455f8a352d9d72a796e5b3e5cedf643c0909f954#455f8a352d9d72a796e5b3e5cedf643c0909f954" }
+source = { git = "https://github.com/123nol/Pantograph-Client?rev=d1dac7e8a8ea296192e7a5b2616114b73e0812b7#d1dac7e8a8ea296192e7a5b2616114b73e0812b7" }
 
 [[package]]
 name = "pluggy"

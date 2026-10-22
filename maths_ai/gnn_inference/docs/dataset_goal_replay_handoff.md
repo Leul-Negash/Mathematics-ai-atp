@@ -9,7 +9,7 @@ still open.
 | Input | Identity |
 | --- | --- |
 | Application base | `AC-branch` at `59148bbf495b0b0dc7fa303169c42c7c9633931e` |
-| Client | `pantograph-async-client` 0.1.1, `Leul-Negash/Pantograph-Client@455f8a352d9d72a796e5b3e5cedf643c0909f954` (adds `start_goal(levels=...)`; not yet merged into `123nol/Pantograph-Client`) |
+| Client | `pantograph-async-client` 0.1.1, `123nol/Pantograph-Client@d1dac7e8a8ea296192e7a5b2616114b73e0812b7` (merge of PR #2, which adds `start_goal(levels=...)`) |
 | Companion REPL | `jajos12/Pantograph@0dd5d222` plus the client's patch, binary sha256 `ffc2a91985137f9183c4cc1571c08ece182996484feecf44b5e5d22d932d7dc0` |
 | Lean / Mathlib | `leanprover/lean4:v4.10.0-rc1`, Mathlib `29dcec074de168ac2bf835a77ef68bbe069194c5` |
 | Dataset | `jajostrains/Mathlib-Normalized-Sexpr` (now `iCogLabs-Dev/Mathlib-Normalized-Sexpr`), revision `f44841f98193c09b20c6092198a22e98ff2cd7a8`, raw schema 4 |
@@ -95,7 +95,8 @@ Tests, run with GNU `stdbuf` first on `PATH`:
 | Translator `test_imports` | passed |
 | Client suite | 425 with live tests (3 skipped without a companion checkout), sdist/wheel check, 427 from the sdist against the wheel |
 
-The client used here was installed from a clean checkout of `455f8a3`.
+The evidence run used the PR commit `455f8a3`; the merged pin `d1dac7e` adds only a CI
+change, and the suites and live tests above were rerun with it installed from the pin.
 
 ## Decisions
 
@@ -132,9 +133,6 @@ digest in the client's extraction manifest.
 
 ## Open
 
-- The client change is on my fork. After it is merged into
-  `123nol/Pantograph-Client`, the pin in `pyproject.toml` and `uv.lock` moves
-  to the merged commit.
 - Raw schema 4 records no `let` values, so rows with local definitions are
   quarantined (about one in ten of the sampled rows). Recording `value_sexp`
   in `local_context` or `raw_hyp_sexps` would admit them.
