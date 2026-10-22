@@ -267,7 +267,10 @@ def _row_state_to_goal(state_str: str) -> LeanGoalSeed:
     parsed = parse_state(state_str)
     return LeanGoalSeed(
         expression=parsed.goal,
-        hypotheses=[f"{h.name} : {h.type_expr}" for h in parsed.hypotheses],
+        hypotheses=[
+            f"{h.name} : {h.type_expr}" + (f" := {h.value}" if h.value else "")
+            for h in parsed.hypotheses
+        ],
     )
 
 
