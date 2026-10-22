@@ -52,6 +52,25 @@ Lean must not insert them again. Constants keep their qualified names
 environment, nat literals are `nat_lit`, and a projection's `_` parameters are
 left for Lean to infer.
 
+Supported raw grammar (Pantograph `serializeExpressionSexp`):
+
+| Form | Rendered as |
+| --- | --- |
+| `(:c Name)`, quoted `"Foo.«a b»"` | `@Name` |
+| `(:fv id)` | `@local` from the context mapping |
+| bound index `n` | `@name` from the scoped binder environment |
+| `(:sort level)` with numerals, params, `(+ l k)`, `(:max a b)`, `(:imax a b)` | `(Sort level)` |
+| `(f a …)`, including `((f a) b)` from metadata | `(@f a …)` |
+| `(:forall x T b [info])`, `(:lambda …)` with the four binder infos | `(∀ (x : T), b)`, `(fun {x : T} => b)`, … |
+| `(:let x T v b)` | `(let x : T := v; b)` |
+| `(:lit n)`, `(:lit "s")` | `(nat_lit n)`, an escaped string |
+| `_` argument of a constant (projection parameter) | `_`, inferred by Lean |
+
+Rejected: `(:mv …)` and `(:mvd …)` (`unresolved-term`), a level `(:mv …)`
+(`unresolved-universe`), `(:subst …)`, `_private` or macro-scoped constants
+(`unsupported-syntax`), and a quoted atom that does not end at a delimiter
+(`malformed-structured`).
+
 Inaccessible locals (`inst✝²`) are bound under their base name and introduced
 with `_`, so Lean prints the same names again. A local is renamed only when a
 later local rebinds its name and something after that still refers to it; a
@@ -108,8 +127,9 @@ Training builds its pool through `seed_admission`: at most `max_scan_rows`
 rows are decoded and rendered offline, then a dedicated preflight client replays
 candidates until `max_pool_size` pass or `admission_time_budget_s` runs out. The
 pool holds only Lean-validated seeds; a run with none stops with an error. Each
-run writes `admission/admission-<time>.json` with counts per reason, bounded
-examples with source identity and rendered input, and the environment identity.
+run writes `admission/admission-<time>.json` with counts per reason, coverage
+by Mathlib area and printed-state size, bounded examples with source identity
+and rendered input, and the environment identity.
 
 Validated fingerprints can be cached with `seed_cache_path`. The cache is keyed
 by the renderer version, the client distribution, the REPL digest, the imports

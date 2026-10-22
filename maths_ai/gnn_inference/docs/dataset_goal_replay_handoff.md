@@ -53,9 +53,33 @@ On this branch the other 180 rows are reported, not searched:
 | skipped `replay-repl-failure` (REPL printed a heartbeat error) | 8 |
 
 All 320 admitted goals printed the predicted local names (no name drift);
-288 have context-index gaps the dense replay closes. Offline, on 400 sampled
+289 have context-index gaps the dense replay closes. Admitted rows span 17
+Mathlib areas (most from `Data`, `MeasureTheory`, `RingTheory`, `Algebra`,
+`Topology`); every row over 1,600 printed characters was quarantined, and the
+report lists coverage by area and size. Offline, on 400 sampled
 rows, 115 of 348 renderable seeds rename at least one local (352 of 6,023
 locals, almost all earlier `inst` instances).
+
+### Model input
+
+On the live fixture rows (5, 7, 41) the replayed goal's normalized target and
+local types are identical to the dataset's `model_goal_sexp` and
+`model_hyp_sexps`, and the binder roles match, once free-variable context
+indices are renumbered. Two differences reach the GNN, and both need review
+before long RL training:
+
+- Context indices: 289 of the 320 admitted rows have gaps in their source
+  context (hidden declarations the dataset does not list), and the replay is
+  dense, so `FV` labels shift relative to the prepared supervised data. Nothing
+  compacts them in code; Lean's rebuilt context simply has no hidden locals.
+- Renamed locals: a local renamed to avoid capture (`inst_1✝` instead of
+  `inst✝²`) is a new name label. Tactic arguments resolve against the live
+  goal, so they use the replayed names consistently.
+
+Existing graph and canonical goldens are unchanged, and no vocabulary or
+checkpoint was modified.
+
+### Text parser
 
 Printed text compared with the old parser on the 400 sampled source states:
 329 identical, 22 where a multiline type had been split into extra locals,
@@ -65,13 +89,46 @@ Tests, run with GNU `stdbuf` first on `PATH`:
 
 | Run | Result |
 | --- | --- |
-| `maths_ai` and `tests` | 385 passed, 4 skipped, 5 failed; the same 5 fail at the base (worker-count config test, `stdbuf` path test on this host, 3 Thompson-sampler tests) |
-| Live with Mathlib (`--run-pantograph-live`) | `test_pantograph_client_live.py` 2 passed, `test_dataset_replay.py` 1 passed |
+| `maths_ai` and `tests` | 388 passed, 4 skipped, 5 failed; the same 5 fail at the base (worker-count config test, `stdbuf` path test on this host, 3 Thompson-sampler tests) |
+| Live with Mathlib (`--run-pantograph-live`) | `test_pantograph_client_live.py` 2 passed; `test_dataset_replay.py` 1 passed (structured repairs, text rejections, universes, model-input equality, canonical, branch and cancelled replays, cleanup) |
 | `rl_smoke` (live) | one on-policy optimizer step, finite losses |
 | Translator `test_imports` | passed |
-| Client suite | 420 offline, 5 live, sdist/wheel check, 427 from the sdist against the wheel |
+| Client suite | 425 with live tests (3 skipped without a companion checkout), sdist/wheel check, 427 from the sdist against the wheel |
 
 The client used here was installed from a clean checkout of `455f8a3`.
+
+## Decisions
+
+- Universe names that the client can send are kept (`u_1` stays `u_1`); only
+  names it cannot send get a `replay_uN` alias. The plan's example aliases every
+  name, which would change every printed goal without changing what Lean
+  checks; the mapping is recorded either way in `level_map`.
+- A shadowed local that is still referenced is renamed rather than found by
+  type: `‹Ring R›` left tactic metavariables that Mathlib's unifier could not
+  resolve within the heartbeat limit on row 41.
+- Client callers that start fixed goals without universes (the client's own
+  probes and example) keep the default `levels=()`; every application caller
+  passes its levels explicitly.
+
+## For the MCTS port
+
+MCTS-AC-branch needs the same cutover, not a separate mechanism:
+
+- the client pin with `levels`, and the `lean_replay` package;
+- `prove(seed)` as the only entry point, so `SearchFactory` and the pool pass
+  `TheoremItem.seed`;
+- MCTS node re-materialization through `materialize_seed(goal.replay_seed())`
+  (it replays canonical goals the same way `_materialize_goal` does here);
+- pool admission through `seed_admission`, and the `inadmissible` outcome kept
+  out of `N`/`W`, HTPS data and the anneal clocks, as it is kept out of the
+  solve rate here.
+
+## Known, unrelated
+
+Visible and unchanged: the worker-count config test (expects one worker, the
+config has four), the `stdbuf` path test on hosts where `/usr/bin/stdbuf` is
+uutils, three Thompson-sampler tests, and the stale `tests/test_protocol.py`
+digest in the client's extraction manifest.
 
 ## Open
 

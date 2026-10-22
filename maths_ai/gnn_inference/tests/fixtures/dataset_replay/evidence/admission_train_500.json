@@ -34,10 +34,101 @@
     "replay-repl-failure": 8
   },
   "cache_hits": 0,
+  "coverage": {
+    "domain:.lake/packages": {
+      "admitted": 2
+    },
+    "domain:Mathlib/Algebra": {
+      "admitted": 31
+    },
+    "domain:Mathlib/AlgebraicTopology": {
+      "admitted": 1,
+      "skipped": 3
+    },
+    "domain:Mathlib/Analysis": {
+      "admitted": 9,
+      "skipped": 3
+    },
+    "domain:Mathlib/CategoryTheory": {
+      "admitted": 21,
+      "skipped": 19,
+      "quarantined": 2
+    },
+    "domain:Mathlib/Data": {
+      "admitted": 68,
+      "quarantined": 14
+    },
+    "domain:Mathlib/Geometry": {
+      "admitted": 3,
+      "skipped": 11
+    },
+    "domain:Mathlib/GroupTheory": {
+      "admitted": 17,
+      "skipped": 1
+    },
+    "domain:Mathlib/LinearAlgebra": {
+      "admitted": 22,
+      "skipped": 1
+    },
+    "domain:Mathlib/MeasureTheory": {
+      "admitted": 46,
+      "skipped": 1,
+      "quarantined": 49
+    },
+    "domain:Mathlib/NumberTheory": {
+      "admitted": 8,
+      "skipped": 19,
+      "quarantined": 1
+    },
+    "domain:Mathlib/Order": {
+      "admitted": 7
+    },
+    "domain:Mathlib/Probability": {
+      "admitted": 16,
+      "skipped": 2
+    },
+    "domain:Mathlib/RepresentationTheory": {
+      "admitted": 2
+    },
+    "domain:Mathlib/RingTheory": {
+      "quarantined": 32,
+      "admitted": 34,
+      "skipped": 11
+    },
+    "domain:Mathlib/SetTheory": {
+      "admitted": 8
+    },
+    "domain:Mathlib/Topology": {
+      "admitted": 25,
+      "quarantined": 11
+    },
+    "size:<=1600": {
+      "quarantined": 63,
+      "skipped": 12,
+      "admitted": 5
+    },
+    "size:<=200": {
+      "admitted": 94,
+      "quarantined": 8
+    },
+    "size:<=400": {
+      "admitted": 161,
+      "skipped": 14,
+      "quarantined": 10
+    },
+    "size:<=800": {
+      "quarantined": 13,
+      "admitted": 60,
+      "skipped": 45
+    },
+    "size:>1600": {
+      "quarantined": 15
+    }
+  },
   "admitted_with_name_drift": 0,
   "admitted_with_context_index_shift": 289,
   "stopped_by": "source-exhausted",
-  "preflight_s": 310.766,
+  "preflight_s": 307.832,
   "examples": {
     "unresolved-universe": [
       {
