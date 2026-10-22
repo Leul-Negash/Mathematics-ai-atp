@@ -13,6 +13,7 @@ from pantograph_async import (
     ExecutionLocal,
     PantographEnv,
     PantographGoalRejected,
+    PantographProtocolError,
     PantographTransportError,
     WireExpression,
 )
@@ -546,6 +547,79 @@ class PoolTests(unittest.TestCase):
         with self.assertRaises(ReplayInputError) as error:
             render_replay(seed)
         self.assertIs(error.exception.reason, ReplayFailure.UNRESOLVED_UNIVERSE)
+
+    def test_a_replay_that_loses_the_client_is_skipped_on_a_fresh_one(self):
+        """A heavy row whose replay kills the session (the REPL printing an
+        uncaught heartbeat error) is skipped and a fresh client continues."""
+
+        class _DyingClient(_ReplayClient):
+            async def _start_goal(self, expression):
+                if "boom" in expression:
+                    self.is_usable = False
+                    raise PantographProtocolError("Unsolicited REPL stdout")
+                return await super()._start_goal(expression)
+
+        created = []
+
+        async def factory():
+            created.append(_DyingClient())
+            return created[-1]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rows = [{"goal": "boom", "hypotheses": []}, {"goal": "p → p", "hypotheses": ["p : Prop"]}]
+            cfg = _write_config(
+                tmp, data_source="file", theorem_file=_write_theorems(tmp, rows), eval_pool_size=0
+            )
+            pool = asyncio.run(
+                build_theorem_pool(
+                    cfg, _env(tmp), report_dir=tmp / "admission", client_factory=factory
+                )
+            )
+            report = _report(tmp / "admission")
+            self.assertEqual(len(pool.train_items), 1)
+            self.assertEqual(report["skipped"], {"replay-repl-failure": 1})
+            self.assertEqual(report["quarantined"], {})
+            self.assertEqual(len(created), 2)
+
+            # Consecutive heavy rows of one proof are each skipped, not fatal.
+            many = tmp / "many"
+            many.mkdir()
+            rows = [{"goal": "boom", "hypotheses": []}] * 3 + [{"goal": "True", "hypotheses": []}]
+            cfg = _write_config(
+                many, data_source="file", theorem_file=_write_theorems(many, rows), eval_pool_size=0
+            )
+            pool = asyncio.run(build_theorem_pool(cfg, _env(many), client_factory=factory))
+            self.assertEqual(len(pool.train_items), 1)
+
+            # A client that cannot start ends admission.
+            async def broken():
+                raise PantographProtocolError("probe failed")
+
+            with self.assertRaises(PantographProtocolError):
+                asyncio.run(build_theorem_pool(cfg, _env(many), client_factory=broken))
+
+    def test_oversized_replays_are_skipped_before_sending(self):
+        client = _ReplayClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rows = [{"goal": "x = " + "x" * 300, "hypotheses": []}, {"goal": "True", "hypotheses": []}]
+            cfg = _write_config(
+                tmp,
+                data_source="file",
+                theorem_file=_write_theorems(tmp, rows),
+                max_replay_chars=100,
+                eval_pool_size=0,
+            )
+            pool = asyncio.run(
+                build_theorem_pool(
+                    cfg, _env(tmp), report_dir=tmp / "admission", client_factory=_factory(client)
+                )
+            )
+            report = _report(tmp / "admission")
+        self.assertEqual(len(pool.train_items), 1)
+        self.assertEqual(report["skipped"], {"over-size-replay": 1})
+        self.assertEqual(client.started, ["True"])
 
     def test_no_validated_seed_is_an_error_not_an_empty_pool(self):
         with tempfile.TemporaryDirectory() as tmp:

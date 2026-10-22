@@ -85,6 +85,7 @@ class RLTrainingConfig:
     # Admission: rows read from the source, independent of the pool size, and
     # the wall-clock budget for replaying candidates in Lean before training.
     max_scan_rows: int = 20000
+    max_replay_chars: int | None = 50000
     admission_time_budget_s: float = 1800.0
     seed_cache_path: Path | None = None
     eval_pool_size: int = 200
@@ -341,6 +342,7 @@ async def build_theorem_pool(
         time_budget_s=cfg.admission_time_budget_s,
         report=report,
         cache=cache,
+        max_replay_chars=cfg.max_replay_chars,
     )
     console_print(report.summary())
     if report_dir is not None:

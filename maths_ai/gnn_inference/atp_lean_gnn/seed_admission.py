@@ -5,8 +5,11 @@ admitted only after one scoped client has replayed it and the goal Lean built
 matched the seed. Everything else is quarantined with its typed reason and
 source identity, so a reconstruction failure is never counted as a failed
 proof and never reaches training. Client, protocol and transport failures are
-infrastructure and abort the preflight instead of labelling rows; a replay that
-outruns the request timeout is skipped as over budget.
+infrastructure and are never used as row labels. A single replay that costs the
+client its session (a request timeout, or the REPL printing an uncaught Lean
+exception such as a heartbeat limit instead of a JSON reply) is skipped and the
+preflight continues on a fresh client. A broken environment still stops it,
+because every fresh client runs the startup probes.
 
 Training and ``scripts/validate_rl_seeds.py`` use these same functions, so a
 record gets the same classification in both.
@@ -24,7 +27,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Iterable, Iterator
 
-from pantograph_async import PantographClient, PantographEnv, PantographRequestTimeout
+from pantograph_async import (
+    PantographClient,
+    PantographEnv,
+    PantographProtocolError,
+    PantographRequestTimeout,
+)
 from pantograph_async.diagnostics import distribution_source
 
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import materialize_seed
@@ -266,13 +274,15 @@ async def preflight(
     time_budget_s: float,
     report: AdmissionReport,
     cache: ValidationCache | None = None,
+    max_replay_chars: int | None = None,
 ) -> list[TheoremItem]:
     """Replay candidates in their own scopes until the pool or budget is full.
 
-    The preflight owns one client at a time. A replay that exceeds the
-    client's request timeout closes that client; the candidate is skipped as
-    over budget (it says nothing about the row's correctness) and a fresh
-    client continues. Every other client failure ends the preflight.
+    The preflight owns one client at a time. A replay that closes the client
+    (request timeout, or unsolicited REPL output) is skipped (it says nothing
+    about the row's correctness) and a fresh, re-probed client continues.
+    Replays longer than ``max_replay_chars`` are skipped before sending.
+    Other failures end the preflight.
     """
     admitted: list[TheoremItem] = []
     started = time.monotonic()
@@ -288,6 +298,9 @@ async def preflight(
                 report.stopped_by = "time-budget"
                 break
             replay = render_replay(item.seed)
+            if max_replay_chars is not None and len(replay.expression) > max_replay_chars:
+                report.skipped["over-size-replay"] += 1
+                continue
             fingerprint = replay.fingerprint
             if cache is not None and fingerprint in cache:
                 report.cache_hits += 1
@@ -298,12 +311,23 @@ async def preflight(
                 except ReplayInputError as exc:
                     report.quarantine(item.seed.source_dict, exc, replay=replay.as_dict())
                     continue
-                except PantographRequestTimeout:
-                    report.skipped["replay-timeout"] += 1
-                    bucket = report.examples.setdefault("replay-timeout", [])
+                except (PantographRequestTimeout, PantographProtocolError) as exc:
+                    if client.is_usable:
+                        raise
+                    kind = (
+                        "replay-timeout"
+                        if isinstance(exc, PantographRequestTimeout)
+                        else "replay-repl-failure"
+                    )
+                    report.skipped[kind] += 1
+                    bucket = report.examples.setdefault(kind, [])
                     if len(bucket) < EXAMPLES_PER_REASON:
                         bucket.append(
-                            {"source": item.seed.source_dict, "replay_chars": len(replay.expression)}
+                            {
+                                "source": item.seed.source_dict,
+                                "replay_chars": len(replay.expression),
+                                "error": str(exc)[:300],
+                            }
                         )
                     await client.aclose()
                     client = await client_factory()

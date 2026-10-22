@@ -92,9 +92,15 @@ declarations, and the replay is always dense. The report counts these.
 | `semantic-mismatch` | Lean built a different goal than the seed describes |
 | `lean-rejected` | Lean refused the replay, for example an unknown printed name |
 
-Client, protocol and transport failures are infrastructure and stop admission. A
-replay that runs past the request timeout is skipped as over budget
-(`replay-timeout`), and the preflight continues on a fresh client.
+Client, protocol and transport failures are infrastructure, never row labels.
+A single replay that costs the client its session is skipped and admission
+continues on a fresh client: `replay-timeout` when it runs past the request
+timeout, `replay-repl-failure` when the REPL prints an uncaught Lean exception
+(such as a heartbeat limit) instead of a JSON reply. A broken environment still
+stops admission, because each fresh client runs the startup probes. Replays
+longer than `max_replay_chars` (default 50,000) are skipped before sending as
+`over-size-replay`; consecutive dataset rows often come from one proof, so a
+very large goal tends to repeat.
 
 ## Admission
 

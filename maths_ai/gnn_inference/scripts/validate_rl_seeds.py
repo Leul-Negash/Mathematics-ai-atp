@@ -58,6 +58,7 @@ async def run(args) -> AdmissionReport:
         time_budget_s=args.time_budget,
         report=report,
         cache=ValidationCache(args.cache, report.environment),
+        max_replay_chars=args.max_replay_chars,
     )
     return report
 
@@ -75,6 +76,7 @@ def main(argv=None) -> int:
     parser.add_argument("--max-scan-rows", type=int, default=1000)
     parser.add_argument("--max-admitted", type=int, default=1000)
     parser.add_argument("--max-state-chars", type=int, default=None)
+    parser.add_argument("--max-replay-chars", type=int, default=50000)
     parser.add_argument("--time-budget", type=float, default=1800.0)
     parser.add_argument("--request-timeout", type=int, default=120)
     parser.add_argument("--start-timeout", type=float, default=600.0)
