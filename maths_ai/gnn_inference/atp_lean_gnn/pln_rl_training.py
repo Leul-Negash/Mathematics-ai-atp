@@ -75,6 +75,34 @@ def _is_structural_label(label: str) -> bool:
     )
 
 
+# Roles the model serializer emits for binders, application arguments, and
+# context locals (``instance``/``let`` refine the local's binder role).
+_BINDER_ROLES = (":explicit", ":implicit", ":strict-implicit", ":instance-implicit")
+_ARG_ROLES = (":explicit", ":implicit", ":implicit-type", ":instance", ":proof")
+_HYP_ROLES = (*(role.removeprefix(":") for role in _BINDER_ROLES), "instance", "let")
+
+
+def supported_structural_labels(*, max_locals: int, max_arity: int) -> list[str]:
+    """Every structural label a state within these bounds can contain.
+
+    A vocabulary built from a seed goal alone lacks labels its successors
+    introduce, such as ``FV1`` after ``intro``. Vocabularies for synthetic runs
+    include this set; states beyond the bounds still fail the missing-label check.
+    """
+    if max_locals < 0 or max_arity < 0:
+        raise ValueError("Structural label bounds must be nonnegative.")
+    labels = [
+        *sorted(_STRUCTURAL_LABELS),
+        *(f"BinderRole:{role}" for role in _BINDER_ROLES),
+        *(f"ArgRole:{role}" for role in _ARG_ROLES),
+        *(f"ArgPosition:{position}" for position in range(max_arity)),
+        *(f"HypRole:{role}" for role in _HYP_ROLES),
+        *(f"FV{index}" for index in range(max_locals)),
+    ]
+    assert all(_is_structural_label(label) for label in labels)
+    return labels
+
+
 def _validate_update_size(
     datas: list[Data],
     *,
