@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import dataclass
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
+
+from maths_ai.core.git_worktree import StatusEntry, git_output, read_status
 
 from pantograph_async import PantographEnv, compatibility
 from pantograph_async.diagnostics import distribution_version, verify_live_client
@@ -28,7 +32,7 @@ LEAN_TOOLCHAIN = COMPANION["toolchain"]
 
 
 def _require_stdbuf() -> str:
-    """Return the GNU line-buffering launcher required by the custom REPL."""
+    """Resolve the launcher path; client startup separately validates GNU identity."""
     executable = shutil.which("stdbuf")
     if executable is None:
         raise RuntimeError(
@@ -49,16 +53,6 @@ def _output(*command: str, cwd: Path | None = None) -> str:
     ).stdout.strip()
 
 
-def _status_porcelain(repository: Path) -> str:
-    return subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-
-
 def _ensure_toolchain(toolchain: str) -> None:
     installed = {
         line.split()[0]
@@ -71,48 +65,142 @@ def _ensure_toolchain(toolchain: str) -> None:
     _run("elan", "toolchain", "install", toolchain)
 
 
-def _changed_paths(repository: Path) -> set[str]:
-    status = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    return {line[3:] for line in status.splitlines() if len(line) > 3}
+@dataclass(frozen=True)
+class CheckoutInspection:
+    destination: Path
+    origin: str
+    commit: str
+    head: str | None
+    status: tuple[StatusEntry, ...]
+    index: bytes
+    refs: bytes
+    config: bytes
+    companion: bool
+    patched: bool = False
 
 
-def _checkout(url: str, commit: str, destination: Path) -> None:
-    """Fetch and detach a clean checkout; never discard local modifications."""
+def _inspect(
+    url: str, commit: str, destination: Path, *, companion: bool = False
+) -> CheckoutInspection:
+    """Inspect without changing files, refs, index or remotes.
+
+    Origins must match exactly, including URL spelling. Repair is a user action.
+    Symlinked destinations or ancestors are refused before resolving the path.
+    """
+    destination = destination.absolute()
+    if any(part.is_symlink() for part in (destination, *destination.parents)):
+        raise RuntimeError(f"Refusing symlink checkout destination: {destination}")
     if not destination.exists():
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _run("git", "clone", "--filter=blob:none", "--no-checkout", url, str(destination))
-    if not (destination / ".git").exists():
-        raise RuntimeError(f"Refusing to reuse non-git directory: {destination}")
-    current_origin = _output("git", "remote", "get-url", "origin", cwd=destination)
-    if current_origin != url:
-        _run("git", "remote", "set-url", "origin", url, cwd=destination)
-    worktree_is_empty = not any(path.name != ".git" for path in destination.iterdir())
-    if _status_porcelain(destination) and not worktree_is_empty:
-        raise RuntimeError(
-            f"Checkout has local modifications; refusing to overwrite: {destination}"
+        return CheckoutInspection(
+            destination, url, commit, None, (), b"", b"", b"", companion
         )
-    _run("git", "fetch", "--depth=1", "origin", commit, cwd=destination)
-    _run("git", "checkout", "--detach", commit, cwd=destination)
+    try:
+        root = Path(
+            os.fsdecode(
+                git_output(destination, "rev-parse", "--show-toplevel")
+            ).removesuffix("\n")
+        )
+        if root != destination:
+            raise RuntimeError(f"Destination is not the repository root: {destination}")
+        origin = os.fsdecode(
+            git_output(destination, "remote", "get-url", "origin")
+        ).removesuffix("\n")
+        if origin != url:
+            raise RuntimeError(
+                f"Refusing origin mismatch at {destination}: expected {url!r}, actual {origin!r}"
+            )
+        head = (
+            git_output(destination, "rev-parse", "HEAD")
+            .decode("ascii")
+            .removesuffix("\n")
+        )
+        status = read_status(destination)
+        index_path = Path(
+            os.fsdecode(
+                git_output(destination, "rev-parse", "--git-path", "index")
+            ).removesuffix("\n")
+        )
+        index = (destination / index_path).read_bytes()
+        refs = (
+            git_output(destination, "show-ref", "--head")
+            + b"\0"
+            + git_output(destination, "rev-parse", "--symbolic-full-name", "HEAD")
+        )
+        config = git_output(destination, "config", "--local", "--null", "--list")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            f"Refusing invalid checkout or missing origin: {destination}: {exc}"
+        ) from exc
+    patched = False
+    if status:
+        if (
+            companion
+            and head == commit
+            and {entry.path for entry in status} == compatibility.companion_files()
+            and all(
+                (entry.index_status, entry.worktree_status) in ((" ", "M"), ("?", "?"))
+                and entry.original_path is None
+                and not any(
+                    part.is_symlink()
+                    for part in (
+                        (destination / entry.path),
+                        *(destination / entry.path).parents,
+                    )
+                )
+                and (destination / entry.path).is_file()
+                for entry in status
+            )
+        ):
+            compatibility.verify_companion_sources(destination)
+            patched = True
+        else:
+            raise RuntimeError(
+                f"Checkout has local modifications; refusing to overwrite: {destination}"
+            )
+    return CheckoutInspection(
+        destination, url, commit, head, status, index, refs, config, companion, patched
+    )
 
 
-def _prepare_companion(destination: Path) -> None:
-    """Apply the client's companion patch, or reuse an exact earlier application."""
-    if (
-        (destination / ".git").exists()
-        and _status_porcelain(destination)
-        and _output("git", "rev-parse", "HEAD", cwd=destination) == PANTOGRAPH_COMMIT
-        and _changed_paths(destination) == compatibility.companion_files()
-    ):
-        compatibility.verify_companion_sources(destination)
+def _recheck(inspection: CheckoutInspection) -> None:
+    current = _inspect(
+        inspection.origin,
+        inspection.commit,
+        inspection.destination,
+        companion=inspection.companion,
+    )
+    if current != inspection:
+        raise RuntimeError(
+            f"Checkout changed after inspection: {inspection.destination}"
+        )
+
+
+def _checkout(inspection: CheckoutInspection) -> None:
+    _recheck(inspection)
+    destination = inspection.destination
+    if inspection.patched:
+        return
+    if inspection.head is None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _run(
+            "git",
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            inspection.origin,
+            str(destination),
+        )
+    _run("git", "fetch", "--depth=1", "origin", inspection.commit, cwd=destination)
+    _run("git", "checkout", "--detach", inspection.commit, cwd=destination)
+
+
+def _prepare_companion(inspection: CheckoutInspection) -> None:
+    """Apply the client's patch, or reuse an exact verified application."""
+    destination = inspection.destination
+    _checkout(inspection)
+    if inspection.patched:
         print(f"Companion sources are already applied: {destination}")
         return
-    _checkout(PANTOGRAPH_URL, PANTOGRAPH_COMMIT, destination)
     patch = compatibility.companion_patch()
     for check in (("--check",), ()):
         print("+ git apply", *check, "<companion patch>", flush=True)
@@ -145,7 +233,9 @@ def _smoke(mathlib: Path, repl: Path) -> dict:
     """Run the installed client's live gate against the newly built executable."""
     report = asyncio.run(
         verify_live_client(
-            PantographEnv(source_root=mathlib, pantograph_repl=repl, imports=("Mathlib",))
+            PantographEnv(
+                source_root=mathlib, pantograph_repl=repl, imports=("Mathlib",)
+            )
         )
     )
     return {
@@ -173,14 +263,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     stdbuf = _require_stdbuf()
-    output_root = args.output_root.resolve()
+    output_root = args.output_root.absolute()
     mathlib = output_root / "mathlib4"
     pantograph = output_root / "Pantograph"
+    mathlib_inspection = _inspect(MATHLIB_URL, MATHLIB_COMMIT, mathlib)
+    pantograph_inspection = _inspect(
+        PANTOGRAPH_URL, PANTOGRAPH_COMMIT, pantograph, companion=True
+    )
     _ensure_toolchain(LEAN_TOOLCHAIN)
-    _checkout(MATHLIB_URL, MATHLIB_COMMIT, mathlib)
+    _recheck(pantograph_inspection)
+    _checkout(mathlib_inspection)
     if not args.skip_mathlib_cache:
         _run("lake", "exe", "cache", "get", cwd=mathlib)
-    _prepare_companion(pantograph)
+    _prepare_companion(pantograph_inspection)
     _run("lake", "build", "repl", cwd=pantograph)
 
     repl = pantograph / ".lake" / "build" / "bin" / "repl"

@@ -22,6 +22,7 @@ from pantograph_async import PantographClient, PantographEnv, PantographProtocol
 from pantograph_async.diagnostics import distribution_source
 from pantograph_async.probes import require
 
+from maths_ai.core.git_worktree import dirty_provenance, read_status
 from maths_ai.data_models.proof_components import TacticCandidate
 
 from .hypergraph import EdgeStatus, NodeStatus, SearchEndReason
@@ -459,14 +460,7 @@ def _target_identity() -> dict:
             ["git", *args], cwd=root, text=True, timeout=5
         ).strip()
 
-    # Paths that differ from the revision, with the digests actually run.
-    dirty = {}
-    for line in git("status", "--porcelain", "--untracked-files=all").splitlines():
-        name = line[3:].split(" -> ")[-1].strip('"')
-        path = root / name
-        dirty[name] = (
-            hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
-        )
+    dirty, entries = dirty_provenance(root, read_status(root))
     return {
         "target_branch": TARGET_BRANCH,
         "target_base_commit": TARGET_BASE_COMMIT,
@@ -475,6 +469,7 @@ def _target_identity() -> dict:
         "repository_revision": git("rev-parse", "HEAD"),
         "worktree_clean": not dirty,
         "dirty_sha256": dirty,
+        "dirty_entries": entries,
         "search_sources_sha256": {
             name: hashlib.sha256((root / name).read_bytes()).hexdigest()
             for name in SEARCH_SOURCES

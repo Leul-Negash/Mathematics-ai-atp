@@ -116,28 +116,39 @@ class CompanionCheckoutTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+    def prepare_companion(self):
+        _prepare_companion(
+            setup._inspect(
+                setup.PANTOGRAPH_URL, self.commit, self.destination, companion=True
+            )
+        )
+
     def test_fresh_checkout_applies_and_verifies_the_patch(self):
-        _prepare_companion(self.destination)
+        self.prepare_companion()
         self.assertEqual(_git("rev-parse", "HEAD", cwd=self.destination), self.commit)
-        self.assertEqual((self.destination / "Repl.lean").read_text(), "def main := 1\n")
+        self.assertEqual(
+            (self.destination / "Repl.lean").read_text(), "def main := 1\n"
+        )
         self.assertTrue((self.destination / "Validation.lean").is_file())
 
     def test_rerun_reuses_an_exact_application_without_touching_files(self):
-        _prepare_companion(self.destination)
+        self.prepare_companion()
         before = (self.destination / "Repl.lean").stat().st_mtime_ns
-        _prepare_companion(self.destination)
+        self.prepare_companion()
         self.assertEqual((self.destination / "Repl.lean").stat().st_mtime_ns, before)
 
     def test_user_changes_are_refused_and_preserved(self):
-        _prepare_companion(self.destination)
+        self.prepare_companion()
         (self.destination / "Notes.lean").write_text("-- mine\n")
         with self.assertRaisesRegex(RuntimeError, "refusing to overwrite"):
-            _prepare_companion(self.destination)
+            self.prepare_companion()
         self.assertEqual((self.destination / "Notes.lean").read_text(), "-- mine\n")
-        self.assertEqual((self.destination / "Repl.lean").read_text(), "def main := 1\n")
+        self.assertEqual(
+            (self.destination / "Repl.lean").read_text(), "def main := 1\n"
+        )
 
     def test_build_manifest_records_source_and_binary_identities(self):
-        _prepare_companion(self.destination)
+        self.prepare_companion()
         repl = self.destination / ".lake" / "build" / "bin" / "repl"
         repl.parent.mkdir(parents=True)
         repl.write_bytes(b"built")
@@ -149,11 +160,231 @@ class CompanionCheckoutTests(unittest.TestCase):
         self.assertEqual(manifest["patch_sha256"], setup.COMPANION["patch_sha256"])
 
     def test_edited_companion_file_is_refused_and_preserved(self):
-        _prepare_companion(self.destination)
+        self.prepare_companion()
         (self.destination / "Repl.lean").write_text("def main := 2\n")
         with self.assertRaises(PantographConfigurationError):
-            _prepare_companion(self.destination)
-        self.assertEqual((self.destination / "Repl.lean").read_text(), "def main := 2\n")
+            self.prepare_companion()
+        self.assertEqual(
+            (self.destination / "Repl.lean").read_text(), "def main := 2\n"
+        )
+
+
+class CheckoutRefusalTests(CompanionCheckoutTests):
+    """Refusals preserve repository bytes and never run mutation commands."""
+
+    def snapshot(self):
+        return {
+            str(path.relative_to(self.destination)): path.read_bytes()
+            for path in self.destination.rglob("*")
+            if path.is_file()
+        }
+
+    def assert_refusal_preserves(self, operation, pattern="Refusing|refusing"):
+        before = self.snapshot()
+        with patch.object(setup, "_run") as run:
+            with self.assertRaisesRegex(RuntimeError, pattern):
+                operation()
+            run.assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+
+    def clone_clean(self):
+        setup._checkout(
+            setup._inspect(setup.PANTOGRAPH_URL, self.commit, self.destination)
+        )
+
+    def checkout(self):
+        setup._checkout(
+            setup._inspect(setup.PANTOGRAPH_URL, self.commit, self.destination)
+        )
+
+    def test_dirty_matching_origin(self):
+        self.clone_clean()
+        (self.destination / "Repl.lean").write_text("-- user edit")
+        self.assert_refusal_preserves(self.checkout)
+
+    def test_mismatched_origin_dirty_and_clean(self):
+        self.clone_clean()
+        _git("remote", "set-url", "origin", "wrong-origin", cwd=self.destination)
+        self.assert_refusal_preserves(self.checkout)
+        (self.destination / "Repl.lean").write_text("-- user edit")
+        self.assert_refusal_preserves(self.checkout)
+
+    def test_missing_origin(self):
+        self.clone_clean()
+        _git("remote", "remove", "origin", cwd=self.destination)
+        self.assert_refusal_preserves(self.checkout)
+
+    def test_staged_deletion_even_with_empty_worktree(self):
+        self.clone_clean()
+        _git("rm", "-q", "Repl.lean", "lean-toolchain", cwd=self.destination)
+        self.assert_refusal_preserves(self.checkout)
+
+    def test_companion_reuse_requires_matching_origin(self):
+        self.prepare_companion()
+        _git("remote", "set-url", "origin", "wrong-origin", cwd=self.destination)
+        self.assert_refusal_preserves(lambda: self.prepare_companion())
+
+    def test_staged_companion_rejected(self):
+        self.prepare_companion()
+        _git("add", ".", cwd=self.destination)
+        self.assert_refusal_preserves(lambda: self.prepare_companion())
+
+    def test_archive_and_nested_root_rejected(self):
+        self.destination.mkdir()
+        (self.destination / "user-data").write_text("preserve")
+        self.assert_refusal_preserves(self.checkout)
+        self.clone_into_parent_and_check_nested()
+
+    def clone_into_parent_and_check_nested(self):
+        _git("init", "-q", cwd=self.destination)
+        nested = self.destination / "nested"
+        nested.mkdir()
+        self.assert_refusal_preserves(
+            lambda: setup._checkout(
+                setup._inspect(setup.PANTOGRAPH_URL, self.commit, nested)
+            ),
+            "repository root",
+        )
+
+    def test_symlink_destination_rejected(self):
+        self.clone_clean()
+        link = self.root / "link"
+        link.symlink_to(self.destination, target_is_directory=True)
+        self.assert_refusal_preserves(
+            lambda: setup._checkout(
+                setup._inspect(setup.PANTOGRAPH_URL, self.commit, link)
+            ),
+            "symlink",
+        )
+
+    def test_snapshot_change_stops_materialization(self):
+        self.clone_clean()
+        inspection = setup._inspect(setup.PANTOGRAPH_URL, self.commit, self.destination)
+        _git("config", "user.name", "concurrent-editor", cwd=self.destination)
+        self.assert_refusal_preserves(
+            lambda: setup._checkout(inspection), "changed after inspection"
+        )
+
+    def test_both_destinations_inspected_before_toolchain_or_checkout(self):
+        output = self.root / "output"
+        output.mkdir()
+        pantograph = output / "Pantograph"
+        setup._checkout(setup._inspect(setup.PANTOGRAPH_URL, self.commit, pantograph))
+        (pantograph / "Notes").write_text("mine")
+        with (
+            patch.object(setup, "_ensure_toolchain") as toolchain,
+            patch.object(setup, "_run") as run,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "refusing to overwrite"):
+                setup.main(["--output-root", str(output)])
+            toolchain.assert_not_called()
+            run.assert_not_called()
+        self.assertFalse((output / "mathlib4").exists())
+
+    def test_clean_checkout_can_be_reused(self):
+        self.clone_clean()
+        self.checkout()
+        self.assertEqual(_git("rev-parse", "HEAD", cwd=self.destination), self.commit)
+        self.assertEqual(setup.read_status(self.destination), ())
+
+    def test_linked_worktree_with_git_file_is_supported(self):
+        self.clone_clean()
+        linked = self.root / "linked"
+        _git(
+            "worktree",
+            "add",
+            "--detach",
+            str(linked),
+            self.commit,
+            cwd=self.destination,
+        )
+        self.assertTrue((linked / ".git").is_file())
+        inspection = setup._inspect(setup.PANTOGRAPH_URL, self.commit, linked)
+        setup._checkout(inspection)
+        self.assertEqual(_git("rev-parse", "HEAD", cwd=linked), self.commit)
+
+    def test_dirty_submodule_cannot_be_hidden_by_ignore_config(self):
+        self.clone_clean()
+        _git(
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            setup.PANTOGRAPH_URL,
+            "sub",
+            cwd=self.destination,
+        )
+        _git(
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qam",
+            "submodule",
+            cwd=self.destination,
+        )
+        _git("config", "submodule.sub.ignore", "all", cwd=self.destination)
+        (self.destination / "sub/Repl.lean").write_text("-- changed")
+        self.assert_refusal_preserves(self.checkout)
+
+    def test_companion_rename_is_refused(self):
+        self.prepare_companion()
+        _git("mv", "Repl.lean", "Renamed.lean", cwd=self.destination)
+        self.assert_refusal_preserves(self.prepare_companion)
+
+    def test_companion_wrong_base_is_refused(self):
+        self.prepare_companion()
+        _git(
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "different base",
+            cwd=self.destination,
+        )
+        self.assert_refusal_preserves(self.prepare_companion)
+
+    def test_index_flag_change_is_detected_after_inspection(self):
+        self.clone_clean()
+        inspection = setup._inspect(setup.PANTOGRAPH_URL, self.commit, self.destination)
+        _git("update-index", "--assume-unchanged", "Repl.lean", cwd=self.destination)
+        self.assert_refusal_preserves(
+            lambda: setup._checkout(inspection), "changed after inspection"
+        )
+
+    def test_merge_conflict_is_refused(self):
+        self.clone_clean()
+        _git("config", "user.name", "Test", cwd=self.destination)
+        _git("config", "user.email", "test@example.com", cwd=self.destination)
+        _git("checkout", "-qb", "other", cwd=self.destination)
+        (self.destination / "Repl.lean").write_text("other branch")
+        _git("commit", "-qam", "other", cwd=self.destination)
+        _git("checkout", "--detach", self.commit, cwd=self.destination)
+        (self.destination / "Repl.lean").write_text("current branch")
+        _git("commit", "-qam", "current", cwd=self.destination)
+        result = subprocess.run(
+            ["git", "merge", "other"], cwd=self.destination, capture_output=True
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_refusal_preserves(self.checkout)
+
+    def test_symbolic_head_change_at_same_commit_is_detected(self):
+        self.clone_clean()
+        inspection = setup._inspect(setup.PANTOGRAPH_URL, self.commit, self.destination)
+        branch_ref = _git(
+            "for-each-ref", "--format=%(refname)", "refs/heads/", cwd=self.destination
+        ).splitlines()[0]
+        _git("symbolic-ref", "HEAD", branch_ref, cwd=self.destination)
+        self.assertEqual(
+            _git("rev-parse", "HEAD", cwd=self.destination), inspection.head
+        )
+        self.assert_refusal_preserves(
+            lambda: setup._checkout(inspection), "changed after inspection"
+        )
 
 
 if __name__ == "__main__":

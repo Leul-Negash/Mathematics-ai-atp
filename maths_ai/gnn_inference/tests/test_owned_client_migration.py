@@ -171,7 +171,7 @@ def test_dependency_is_the_pinned_client_and_not_pypantograph():
 MANIFEST = Path(__file__).parent / "fixtures/pantograph/mcts_owned_client/source_manifest.json"
 
 
-def test_copied_files_match_the_pinned_application_source():
+def test_port_sources_match_the_recorded_lineage_and_current_adaptations():
     import hashlib
     import json
 
@@ -181,6 +181,14 @@ def test_copied_files_match_the_pinned_application_source():
         "72c82ce13d62f132ee1939d8e92641c100f4c418"
     )
     assert manifest["copied"]
-    for entry in manifest["copied"]:
-        data = (root / entry["path"]).read_bytes()
-        assert hashlib.sha256(data).hexdigest() == entry["sha256"], entry["path"]
+    current = json.loads(
+        (MANIFEST.parent.parent / "mcts_client_safety/source_manifest.json").read_text()
+    )
+    assert current["application_base_commit"] == "f1c3501b2c571ea6b2b25b2d9ccfb97c0e84a538"
+    expected = {entry["path"]: entry["sha256"] for entry in manifest["copied"]}
+    for entry in current["sources"]:
+        if entry["path"] in expected:
+            assert entry["port_source_sha256"] == expected[entry["path"]]
+        expected[entry["path"]] = entry["sha256"]
+    for path, digest in expected.items():
+        assert hashlib.sha256((root / path).read_bytes()).hexdigest() == digest, path
