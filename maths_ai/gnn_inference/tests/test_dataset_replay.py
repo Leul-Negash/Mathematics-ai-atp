@@ -78,6 +78,7 @@ def test_fixture_rows_are_marked_original_or_synthetic():
         (7, None, None),
         (27, ReplayFailure.MISSING_CONTEXT, None),
         (41, None, None),
+        (74, None, None),
         (468, None, None),
         (PI, None, None),
     ],
@@ -93,6 +94,11 @@ def test_structured_and_text_contexts_agree_once_multiline_types_parse():
     structured = row.structured_seed()
     text = seed_from_text(row.state)
     assert [local.name for local in text.locals] == [local.name for local in structured.locals]
+
+
+def test_a_renamed_local_keeps_its_source_name_for_the_model():
+    # Row 74: a nested `∀ x` refers to the local `x`, so Lean gets an alias.
+    assert render_replay(dataset_row(74).structured_seed()).name_map == (("x", "x_1"),)
 
 
 def test_raw_constants_replace_environment_dependent_printed_names():
@@ -138,7 +144,7 @@ def test_live_replay_repairs_supported_rows_and_rejects_the_rest(mathlib_env):
             baseline = (await client.stat()).n_goals
             async with client.state_scope() as scope:
                 # Rows whose raw columns are complete replay exactly, names included.
-                for key in (5, 7, 41, PI):
+                for key in (5, 7, 41, 74, PI):
                     seed = dataset_row(key).structured_seed()
                     reason, goal, validation = await outcome(scope, seed)
                     assert reason is None, (key, reason)
@@ -160,6 +166,9 @@ def test_live_replay_repairs_supported_rows_and_rejects_the_rest(mathlib_env):
 
                         row = dataset_row(key)
                         assert graph_view(model_goal_to_dag(goal)) == graph_view(prepared_graph(row))
+                        if key == 74:
+                            # The model sees `x`; tactics name the live local `x_1`.
+                            assert goal.execution_names() == {"x": "x_1"}
                         assert goal.goal_model_sexp == row.model_goal_sexp
                         assert [
                             {k: l.graph_record()[k] for k in ("name", "context_index", "sexp")}

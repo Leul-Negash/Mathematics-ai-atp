@@ -71,8 +71,9 @@ this: a replay whose model expressions differ from the source's is rejected as
 `model-mismatch` (row 468).
 
 The mapping is carried to successor goals and through re-materialization, and
-tactic arguments are translated back to live names; live tests cover a gapped
-row (5) and the instance-heavy row 41, a successor with a new local, a
+tactic arguments are translated back to live names; live tests cover gapped
+rows (5, 7), the instance-heavy row 41, row 74 (its local `x` is renamed for
+Lean because a nested `∀ x` refers to it, while the model keeps `x`), a successor with a new local, a
 re-materialized successor, and a full search whose root and child nodes keep
 the source identity. Offline, on 400 sampled rows, 20 of 348 renderable seeds
 rename a local (21 locals in all), each to keep a nested binder's name, and
@@ -111,7 +112,7 @@ Tests, run with GNU `stdbuf` first on `PATH`:
 
 | Run | Result |
 | --- | --- |
-| `maths_ai` and `tests` | 407 passed, 8 skipped, 5 failed; the same 5 fail at the base (worker-count config test, `stdbuf` path test on this host, 3 Thompson-sampler tests) |
+| `maths_ai` and `tests` | 409 passed, 8 skipped, 5 failed; the same 5 fail at the base (worker-count config test, `stdbuf` path test on this host, 3 Thompson-sampler tests) |
 | Live with Mathlib (`--run-pantograph-live`) | `test_pantograph_client_live.py` 2 passed; `test_dataset_replay.py` 4 passed, 1 skipped without prepared artifacts (structured repairs and rejections, exact prepared graphs, successors and re-materialization, capture checks, a full search, universes, canonical, branch and cancelled replays, cleanup) |
 | `rl_smoke` (live) | one on-policy optimizer step, finite losses |
 | Translator `test_imports` | passed |
@@ -139,6 +140,30 @@ change, and the suites and live tests above were rerun with it installed from th
 - Client callers that start fixed goals without universes (the client's own
   probes and example) keep the default `levels=()`; every application caller
   passes its levels explicitly.
+
+## Model identity: alternatives considered
+
+The model-identity mapping adds `execution_name` and `execution_index` to
+`GoalLocal` and changes which identity the graph reads, so it needs an explicit
+decision. The options were:
+
+| Option | Effect | Status |
+| --- | --- | --- |
+| Map source model identity onto replayed goals (`model_identity.py`) | Prepared-data features unchanged: 319 of 319 admitted graphs identical to the prepared ones; tactics use live names | Implemented; needs approval and the prepared-artifact check |
+| Accept Lean's dense indices and replayed names as the new model input | No mapping code, but `FV` labels shift on most rows (31 of 319 identical) | Would be a new feature contract: a separately reviewed prepared-data and checkpoint migration |
+| Re-prepare the supervised data from replayed goals | Training and RL see the same dense contexts | Same migration, plus re-extracting every row; out of scope |
+| Recreate the source's hidden declarations in the replay | Indices would match without a mapping | Not possible: the dataset does not record them |
+
+## Validation limits
+
+- Text seeds are checked for locals, roles and local definitions, not for the
+  target expression: printed text has no raw form to compare against. Text
+  replay renames nothing (it only quotes `✝` names), so the statement Lean
+  elaborates is the input text read as Lean source. Dataset rows never use
+  this path; they are validated against their raw expressions and, where
+  recorded, their model expressions.
+- The prepared-vocabulary and checkpoint check has only run against a stand-in
+  vocabulary and checkpoint here; it has to be run where the real artifacts are.
 
 ## For the MCTS port
 
