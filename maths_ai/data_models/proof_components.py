@@ -20,9 +20,11 @@ from maths_ai.lean_replay import (
 class GoalLocal(BaseModel):
     """One serialized Lean local declaration and its normalized model view.
 
-    ``type_sexp``/``value_sexp`` are Pantograph's raw expressions, kept only to
-    replay the goal. They are execution metadata: the fingerprint and graph
-    record ignore them.
+    ``user_name``, ``context_index`` and the model S-expressions are the model
+    identity the graph and fingerprint read. ``internal_name`` and the
+    ``execution_*`` fields are the live Lean identity (``None`` when it equals
+    the model one); see ``model_identity``. ``type_sexp``/``value_sexp`` are
+    Pantograph's raw expressions, kept only to replay the goal.
     """
 
     user_name: str
@@ -38,6 +40,16 @@ class GoalLocal(BaseModel):
     model_sexp_version: int = 1
     type_sexp: Optional[str] = None
     value_sexp: Optional[str] = None
+    execution_name: Optional[str] = None
+    execution_index: Optional[int] = None
+
+    @property
+    def execution_or_live_name(self) -> str:
+        return self.execution_name if self.execution_name is not None else self.user_name
+
+    @property
+    def execution_or_live_index(self) -> int:
+        return self.execution_index if self.execution_index is not None else self.context_index
 
     @model_validator(mode="after")
     def _validate_local(self) -> "GoalLocal":
@@ -152,8 +164,20 @@ class Goal(BaseModel):
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
+    def execution_names(self) -> dict[str, str]:
+        """Model local names whose live Lean name differs, mapped to the live one."""
+        return {
+            local.user_name: local.execution_name
+            for local in self.locals or []
+            if local.execution_name is not None
+        }
+
     def replay_seed(self) -> LeanGoalSeed:
-        """The structured seed that recreates this goal from its raw expressions."""
+        """The structured seed that recreates this goal from its raw expressions.
+
+        Replay uses the live names and indices; the model identity rides along
+        so the replayed goal shows the model the same context.
+        """
         self.require_model_state()
         locals_ = self.locals or []
         if self.goal_sexp is None or any(local.type_sexp is None for local in locals_):
@@ -164,13 +188,16 @@ class Goal(BaseModel):
         records = [
             StructuredLocal(
                 internal_id=local.internal_name,
-                name=local.user_name or "_",
-                context_index=local.context_index,
+                name=local.execution_or_live_name or "_",
+                context_index=local.execution_or_live_index,
                 binder_role=local.binder_role,
                 is_instance=local.is_instance,
                 is_let=local.is_let,
                 type_sexp=local.type_sexp,
                 value_sexp=local.value_sexp,
+                model_name=local.user_name,
+                model_index=local.context_index,
+                model_type_sexp=local.type_model_sexp,
             )
             for local in locals_
         ]
@@ -178,6 +205,7 @@ class Goal(BaseModel):
             self.goal_sexp,
             records,
             source={"origin": "canonical-goal", "state": self.state_fingerprint()},
+            model_target=self.goal_model_sexp,
         )
 
     def replay_spec(self) -> GoalReplaySpec:

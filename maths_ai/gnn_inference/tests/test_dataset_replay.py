@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
-import re
 from pathlib import Path
 
 import pytest
@@ -21,7 +21,7 @@ from maths_ai.lean_replay import (
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures/dataset_replay/rows.json").read_text(encoding="utf-8")
 )
-ROWS = {row["theorem"] if row["origin"] == "synthetic" else row["row_index"]: row for row in FIXTURE["rows"]}
+ROWS = {row["theorem"] if row["origin"] == "synthetic" else row["position"]: row for row in FIXTURE["rows"]}
 PI = "synthetic.printed_pi"
 
 
@@ -30,15 +30,31 @@ def dataset_row(key):
     return _dataset_row_from_sample(
         row,
         split=row["split"],
-        row_index=row["row_index"],
+        row_index=row.get("position", row["row_index"]),
         dataset_name=FIXTURE["dataset"],
         dataset_revision=FIXTURE["revision"],
     )
 
 
-def remap_context(model_sexp: str, indices: dict[int, int]) -> str:
-    """Renumber `(:fv FVi)` from source context indices to replayed ones."""
-    return re.sub(r"\(:fv FV(\d+)\)", lambda m: f"(:fv FV{indices[int(m.group(1))]})", model_sexp)
+def prepared_graph(row):
+    """The graph the prepared data holds for a row: its model columns, as stored."""
+    from maths_ai.gnn_inference.atp_lean_gnn.graph import proof_state_to_dag
+
+    return proof_state_to_dag(
+        row.state, goal_sexp=row.model_goal_sexp, hyp_sexps=list(row.model_hyp_sexps)
+    )
+
+
+def graph_view(dag):
+    from maths_ai.gnn_inference.atp_lean_gnn.graph import dag_fingerprint
+
+    return (
+        dag_fingerprint(dag),
+        [node.as_dict() for node in dag.nodes],
+        [list(edge) for edge in dag.edges],
+        dag.expression_root_id,
+        dag.state_root_id,
+    )
 
 
 def failure(call) -> ReplayFailure | None:
@@ -62,6 +78,7 @@ def test_fixture_rows_are_marked_original_or_synthetic():
         (7, None, None),
         (27, ReplayFailure.MISSING_CONTEXT, None),
         (41, None, None),
+        (468, None, None),
         (PI, None, None),
     ],
 )
@@ -125,32 +142,39 @@ def test_live_replay_repairs_supported_rows_and_rejects_the_rest(mathlib_env):
                     seed = dataset_row(key).structured_seed()
                     reason, goal, validation = await outcome(scope, seed)
                     assert reason is None, (key, reason)
-                    # Lean prints exactly the names the replay predicted; any
-                    # rename is listed in the replay's name map.
+                    # Lean prints exactly the names the replay predicted, and the
+                    # model keeps the source names and indices regardless.
                     assert validation.name_drift == ()
                     replay = render_replay(seed)
-                    assert [l.user_name for l in goal.locals] == list(replay.expected_names)
-                    renamed = {source for source, _ in replay.name_map}
-                    assert all(
-                        l.user_name == s.name
-                        for l, s in zip(goal.locals, seed.locals)
-                        if s.name not in renamed
+                    assert [l.execution_or_live_name for l in goal.locals] == list(
+                        replay.expected_names
                     )
-                    # The GNN input matches the dataset's normalized expressions;
-                    # only free-variable context indices are renumbered.
+                    assert [(l.user_name, l.context_index) for l in goal.locals] == [
+                        (s.name, s.context_index) for s in seed.locals
+                    ]
+                    # The graph given to the model is the prepared graph of the
+                    # row: source names and gapped context indices, unchanged.
                     raw = ROWS[key]
                     if raw["origin"] == "original":
-                        indices = {
-                            s.context_index: l.context_index
-                            for s, l in zip(seed.locals, goal.locals)
-                        }
-                        assert remap_context(raw["model_goal_sexp"], indices) == goal.goal_model_sexp
-                        for source, replayed in zip(json.loads(raw["model_hyp_sexps"]), goal.locals):
-                            assert remap_context(source["sexp"], indices) == replayed.type_model_sexp
-                            assert source["binder_role"] == replayed.binder_role
+                        from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
+
+                        row = dataset_row(key)
+                        assert graph_view(model_goal_to_dag(goal)) == graph_view(prepared_graph(row))
+                        assert goal.goal_model_sexp == row.model_goal_sexp
+                        assert [
+                            {k: l.graph_record()[k] for k in ("name", "context_index", "sexp")}
+                            for l in goal.locals
+                        ] == [
+                            {k: h[k] for k in ("name", "context_index", "sexp")}
+                            for h in row.model_hyp_sexps
+                        ]
                     # The canonical goal replays through the same rules.
                     reason, again, _ = await outcome(scope, goal.replay_seed())
                     assert reason is None and again.state_fingerprint() == goal.state_fingerprint()
+
+                # Lean rebuilds row 468, but its model input would differ.
+                reason, _, _ = await outcome(scope, dataset_row(468).structured_seed())
+                assert reason is ReplayFailure.MODEL_MISMATCH
 
                 # Printed names that need the source file's `open` fail in Lean.
                 for key in (41, PI):
@@ -167,7 +191,8 @@ def test_live_replay_repairs_supported_rows_and_rejects_the_rest(mathlib_env):
 
                 # A canonical goal with a local definition and an instance.
                 start = await scope.start_goal(
-                    "∀ (α : Type) [inst : Inhabited α] (n : Nat), let x := n; x = x"
+                    "∀ (α : Type) [inst : Inhabited α] (n : Nat), let x := n; x = x",
+                    levels=(),
                 )
                 state = await scope.apply_tactic(start, "intro α inst n x")
                 from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_goal
@@ -201,6 +226,187 @@ def test_live_replay_repairs_supported_rows_and_rejects_the_rest(mathlib_env):
                     await task
             if client.is_usable:
                 assert (await client.stat()).n_goals == baseline
+        assert client.phase.value == "CLOSED"
+
+    asyncio.run(run())
+
+
+async def _with_scope(env, body):
+    from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
+
+    client = await create_model_sexpr_client(env)
+    async with client:
+        baseline = (await client.stat()).n_goals
+        async with client.state_scope() as scope:
+            await body(scope)
+        assert (await client.stat()).n_goals == baseline
+    assert client.phase.value == "CLOSED"
+
+
+@pytest.mark.pantograph_live
+def test_live_successors_and_rematerialized_goals_keep_the_source_identity(mathlib_env):
+    from maths_ai.data_models.model_identity import carry_model_identity
+    from maths_ai.hybrid_reasoner.pantograph_adapter import execution_state_to_goals
+    from maths_ai.hybrid_reasoner.pantograph_model_sexpr import materialize_seed
+
+    async def body(scope):
+        # Row 5 has a context gap; row 41 has a renamed instance.
+        for key in (5, 41):
+            state, root, _ = await materialize_seed(scope, dataset_row(key).structured_seed())
+            successor = await scope.apply_tactic(state, "have hnew : True := trivial")
+            (child,) = execution_state_to_goals(successor)
+            child = carry_model_identity(root, child)
+            *carried, new = child.locals
+            assert [(l.user_name, l.context_index, l.type_model_sexp) for l in carried] == [
+                (l.user_name, l.context_index, l.type_model_sexp) for l in root.locals
+            ]
+            assert (new.user_name, new.context_index) == ("hnew", root.locals[-1].context_index + 1)
+            # Replaying the successor (as search does for a later expansion)
+            # gives Lean new IDs but the model the same goal.
+            _, again, _ = await materialize_seed(scope, child.replay_seed())
+            assert again.state_fingerprint() == child.state_fingerprint()
+            assert [l.context_index for l in again.locals] == [l.context_index for l in child.locals]
+
+    asyncio.run(_with_scope(mathlib_env, body))
+
+
+@pytest.mark.pantograph_live
+def test_live_replay_refers_to_the_outer_local_not_a_nested_binder(mathlib_env):
+    from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_structured_locals
+    from maths_ai.hybrid_reasoner.pantograph_model_sexpr import (
+        materialize_replay,
+        materialize_seed,
+    )
+    from maths_ai.lean_replay import StructuredLocal, seed_from_records, validate_replay
+
+    def record(internal, name, index):
+        return StructuredLocal(internal, name, index, ":explicit", False, False, "(:c Nat)")
+
+    # (fun x_1 => x✝) 0 = x✝ with a later x: true by rfl only if the body is the
+    # outer local.
+    seed = seed_from_records(
+        "((:c Eq) (:c Nat) ((:lambda x_1 (:c Nat) (:fv _a)) (:lit 0)) (:fv _a))",
+        [record("_a", "x✝", 0), record("_b", "x", 1)],
+    )
+    replay = render_replay(seed)
+
+    async def body(scope):
+        state, _, _ = await materialize_seed(scope, seed)
+        assert not (await scope.apply_tactic(state, "rfl")).goals
+        # The reconstruction the review found: the nested binder captures it.
+        captured = dataclasses.replace(
+            replay, expression=replay.expression.replace("=> @«x✝»", "=> @x_1")
+        )
+        assert captured.expression != replay.expression
+        wrong = await materialize_replay(scope, captured)
+        goal = wrong.goals[0]
+        with pytest.raises(ReplayInputError) as error:
+            validate_replay(seed, captured, goal.target.sexp, execution_goal_to_structured_locals(goal))
+        assert error.value.reason is ReplayFailure.SEMANTIC_MISMATCH
+        from pantograph_async import PantographTacticRejected
+
+        with pytest.raises(PantographTacticRejected):
+            await scope.apply_tactic(wrong, "rfl")
+        # Text is replayed verbatim, so its scoping is Lean's own.
+        text, _, _ = await materialize_seed(
+            scope, seed_from_text("x : Nat\n⊢ (fun x_1 : Nat => x) 0 = x")
+        )
+        assert not (await scope.apply_tactic(text, "rfl")).goals
+
+    asyncio.run(_with_scope(mathlib_env, body))
+
+
+@pytest.fixture
+def prepared_artifacts():
+    prepared = os.environ.get("PANTOGRAPH_TEST_PREPARED_ROOT")
+    checkpoint = os.environ.get("PANTOGRAPH_TEST_CHECKPOINT")
+    if not prepared or not checkpoint:
+        pytest.skip("Set PANTOGRAPH_TEST_PREPARED_ROOT and PANTOGRAPH_TEST_CHECKPOINT.")
+    return Path(prepared), Path(checkpoint)
+
+
+@pytest.mark.pantograph_live
+def test_live_replayed_graphs_fit_the_prepared_vocabulary_and_checkpoint(
+    mathlib_env, prepared_artifacts
+):
+    """Run where the supervised artifacts exist (for example JupyterHub)."""
+    import torch
+    from torch_geometric.data import Batch
+
+    from maths_ai.gnn_inference.atp_lean_gnn.checkpointing import build_model_from_checkpoint
+    from maths_ai.gnn_inference.atp_lean_gnn.graph_contract import require_graph_representation
+    from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import make_dag_featurizer
+    from maths_ai.gnn_inference.atp_lean_gnn.training import load_prepared_metadata
+    from maths_ai.hybrid_reasoner.pantograph_model_sexpr import materialize_seed
+
+    prepared_root, checkpoint_path = prepared_artifacts
+    metadata = load_prepared_metadata(prepared_root)
+    require_graph_representation(metadata.graph_representation)
+    model, _, _ = build_model_from_checkpoint(
+        torch.load(checkpoint_path, map_location="cpu", weights_only=False),
+        node_vocab=metadata.node_vocab,
+        tactic_vocab=metadata.tactic_vocab,
+        graph_representation=metadata.graph_representation,
+        expected_model_kind="actor_critic_with_args",
+    )
+    model.eval()
+    featurize = make_dag_featurizer(metadata.node_vocab)
+    id_to_tactic = {index: name for name, index in metadata.tactic_vocab.items()}
+
+    async def body(scope):
+        for key in (5, 7, 41):
+            _, goal, _ = await materialize_seed(scope, dataset_row(key).structured_seed())
+            # Raises on any structural label the prepared vocabulary lacks.
+            _, replayed = featurize(goal)
+            assert torch.equal(replayed.x, _prepared_features(dataset_row(key), metadata.node_vocab))
+            with torch.no_grad():
+                sample = model.act(Batch.from_data_list([replayed]), id_to_tactic=id_to_tactic, greedy=True)
+            assert torch.isfinite(sample.value).all()
+
+    asyncio.run(_with_scope(mathlib_env, body))
+
+
+def _prepared_features(row, node_vocab):
+    from maths_ai.gnn_inference.atp_lean_gnn.pyg import dag_to_pyg
+
+    return dag_to_pyg(prepared_graph(row), node_vocab, add_reverse_edges=True).x
+
+
+@pytest.mark.pantograph_live
+def test_live_search_nodes_see_the_source_identity(mathlib_env):
+    from maths_ai.data_models.proof_components import TacticCandidate
+    from maths_ai.hybrid_reasoner.joint_inference import HybridReasoner, PantographExecutor
+    from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
+
+    class OneStep(HybridReasoner):
+        def _build_gnn_engine(self, **_kwargs):
+            return None
+
+        def predict_next_tactic(self, goal):
+            return [
+                TacticCandidate(
+                    tactic_name="have hnew : True := trivial", arguments=[], probability=1.0
+                )
+            ]
+
+    seed = dataset_row(5).structured_seed()
+    source = [(local.name, local.context_index) for local in seed.locals]
+
+    async def run():
+        client = await create_model_sexpr_client(mathlib_env)
+        async with client:
+            reasoner = OneStep(
+                None, None, None, executor=PantographExecutor(client), use_pln=False,
+                max_depth=1, max_nodes=4,
+            )
+            graph = await reasoner.prove(seed)
+            root = graph.nodes[graph.root_id].goal
+            assert [(l.user_name, l.context_index) for l in root.locals] == source
+            children = [node.goal for node in graph.nodes.values() if node.id != graph.root_id]
+            assert children
+            for child in children:
+                assert [(l.user_name, l.context_index) for l in child.locals][:-1] == source
+                assert child.locals[-1].context_index == source[-1][1] + 1
         assert client.phase.value == "CLOSED"
 
     asyncio.run(run())

@@ -42,7 +42,7 @@ def test_prediction_is_synchronous_canonical_and_gradient_free_in_active_loop():
     seen = []
     pipeline = object.__new__(InferencePipeline)
 
-    def predict(dag, *, top_k):
+    def predict(dag, *, top_k, execution_names):
         seen.append(
             (torch.is_grad_enabled(), (parameter * 2).requires_grad, dag.state_root_id)
         )

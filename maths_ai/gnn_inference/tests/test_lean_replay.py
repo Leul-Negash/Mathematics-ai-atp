@@ -83,22 +83,49 @@ def test_level_and_term_metavariables_are_distinguished():
     assert reason(lambda: render_replay(term)) is ReplayFailure.UNRESOLVED_TERM
 
 
-# Inaccessible and shadowed names ------------------------------------------------
+# Names in printed text ------------------------------------------------------------
 
 
-def test_inaccessible_locals_are_introduced_anonymously_under_their_base_name():
+def test_locals_are_bound_and_introduced_under_their_exact_display_names():
     spec = render_replay(seed_from_text("inst✝¹ : Inhabited Nat\ninst✝ : Inhabited Nat\n⊢ True"))
-    assert spec.expression == "∀ (inst : Inhabited Nat), ∀ (inst : Inhabited Nat), True"
-    assert spec.local_names == ("_", "_")
+    assert spec.expression == "∀ («inst✝¹» : Inhabited Nat), ∀ («inst✝» : Inhabited Nat), True"
+    assert spec.local_names == ("«inst✝¹»", "«inst✝»")
     assert spec.expected_names == ("inst✝¹", "inst✝")
     assert spec.name_map == ()
 
 
-def test_a_shadowed_local_referenced_later_is_renamed_and_recorded():
-    spec = render_replay(seed_from_text("x✝ : Nat\nx : Nat\n⊢ x✝ = x"))
-    assert spec.expression == "∀ (x_1 : Nat), ∀ (x : Nat), x_1 = x"
-    assert spec.local_names == ("_", "x")
-    assert spec.name_map == (("x✝", "x_1✝"),)
+def test_review_case_refers_to_the_outer_local():
+    # Renaming `x✝` to `x_1` would be captured by the nested `fun x_1`; quoting
+    # the printed name changes no binder at all.
+    spec = render_replay(seed_from_text("x✝ : Nat\nx : Nat\n⊢ (fun x_1 : Nat => x✝) 0 = x✝"))
+    assert spec.expression == (
+        "∀ («x✝» : Nat), ∀ (x : Nat), (fun x_1 : Nat => «x✝») 0 = «x✝»"
+    )
+    assert spec.local_names == ("«x✝»", "x") and spec.name_map == ()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "(fun x_1 : Nat => x✝ + x_1) 0 = x✝",
+        "∀ x_1 : Nat, x✝ + x_1 = x_1 + x✝",
+        "(let x_1 : Nat := x✝; x_1) = x✝",
+        "∀ x ∈ s, x = x✝",
+    ],
+)
+def test_nested_binders_keep_their_names_and_references_keep_their_binders(target):
+    spec = render_replay(seed_from_text(f"x✝ : Nat\ns : Set Nat\nx : Nat\n⊢ {target}"))
+    assert spec.expression.endswith(", " + target.replace("x✝", "«x✝»"))
+
+
+def test_text_is_rendered_verbatim_apart_from_quoting_and_universe_aliases():
+    text = "x : Nat\nh : ∀ x, x = x\n⊢ (fun x_1 : Nat => x) 0 = x"
+    spec = render_replay(seed_from_text(text))
+    assert spec.expression == "∀ (x : Nat), ∀ (h : ∀ x, x = x), (fun x_1 : Nat => x) 0 = x"
+    assert spec.name_map == () and spec.local_names == ("x", "h")
+    assert render_replay(seed_from_text("h : P h✝.symm\n⊢ True")).expression == (
+        "∀ (h : P «h✝».symm), True"
+    )
 
 
 # Structured records -------------------------------------------------------------
@@ -113,10 +140,10 @@ TARGET = "((:c Eq) (:fv _a) (:fv _x) ((:c Inhabited.default) (:fv _a) (:fv _i)))
 def test_structured_seed_renders_explicit_terms_roles_and_levels():
     spec = render_replay(seed_from_records(TARGET, [ALPHA, INST, X]))
     assert spec.expression == (
-        "∀ {α : (Sort (u_1+1))}, ∀ [inst : (@Inhabited @α)], ∀ (x : @α), "
-        "(@Eq @α @x (@Inhabited.default @α @inst))"
+        "∀ {α : (Sort (u_1+1))}, ∀ [«inst✝» : (@Inhabited @α)], ∀ (x : @α), "
+        "(@Eq @α @x (@Inhabited.default @α @«inst✝»))"
     )
-    assert spec.local_names == ("α", "_", "x")
+    assert spec.local_names == ("α", "«inst✝»", "x")
     assert spec.universe_levels == ("u_1",)
 
 
@@ -143,9 +170,9 @@ def test_structured_validation_compares_by_position_and_reports_name_drift():
     )
 
 
-def test_shadowed_instances_referenced_later_are_renamed():
+def test_instances_that_share_a_base_name_keep_their_exact_names():
     # `[Ring R] [AddCommGroup M] [Module R M]`: every instance is `inst`, and the
-    # module instance refers to both earlier ones after they are shadowed.
+    # module instance refers to both earlier ones; their display names differ.
     seed = seed_from_records(
         "(:c True)",
         [
@@ -163,44 +190,76 @@ def test_shadowed_instances_referenced_later_are_renamed():
         ],
     )
     spec = render_replay(seed)
-    # Only the ring instance is used after `inst` is rebound; the additive
-    # group instance is used before the last rebinding and keeps its name.
-    assert "∀ [inst_1 : (@Ring @R)], ∀ [inst : (@AddCommGroup @M)]" in spec.expression
-    assert "[inst : (@Module @R @M @inst_1 @inst)]" in spec.expression
-    assert spec.local_names == ("R", "M", "_", "_", "_")
-    assert spec.expected_names == ("R", "M", "inst_1✝", "inst✝¹", "inst✝")
-    assert spec.name_map == (("inst✝²", "inst_1✝"),)
+    assert "[«inst✝» : (@Module @R @M @«inst✝²» @«inst✝¹»)]" in spec.expression
+    assert spec.local_names == ("R", "M", "«inst✝²»", "«inst✝¹»", "«inst✝»")
+    assert spec.expected_names == ("R", "M", "inst✝²", "inst✝¹", "inst✝")
+    assert spec.name_map == ()
 
 
-def test_a_shadowed_raw_local_referenced_later_is_renamed():
-    seed = seed_from_records(
-        "((:c Eq) (:c Nat) (:fv _a) (:fv _b))",
-        [local("_a", "x✝", "(:c Nat)", 0), local("_b", "x", "(:c Nat)", 1)],
+SHADOWED = [local("_a", "x✝", "(:c Nat)", 0), local("_b", "x", "(:c Nat)", 1)]
+
+
+def test_a_shadowed_local_is_referred_to_by_its_own_display_name():
+    spec = render_replay(seed_from_records("((:c Eq) (:c Nat) (:fv _a) (:fv _b))", SHADOWED))
+    assert spec.expression == "∀ («x✝» : @Nat), ∀ (x : @Nat), (@Eq @Nat @«x✝» @x)"
+    assert spec.name_map == ()
+
+
+@pytest.mark.parametrize(
+    "target,expected",
+    [
+        (
+            "((:c Eq) (:c Nat) ((:lambda x_1 (:c Nat) (:fv _a)) (:lit 0)) (:fv _a))",
+            "((fun (x_1 : @Nat) => @«x✝») (nat_lit 0))",
+        ),
+        (
+            "(:forall x_1 (:c Nat) ((:c Eq) (:c Nat) 0 (:fv _a)))",
+            "(∀ (x_1 : @Nat), (@Eq @Nat @x_1 @«x✝»))",
+        ),
+        (
+            "(:let x_1 (:c Nat) (:fv _a) ((:c Eq) (:c Nat) 0 (:fv _a)))",
+            "(let x_1 : @Nat := @«x✝»; (@Eq @Nat @x_1 @«x✝»))",
+        ),
+    ],
+)
+def test_nested_binders_named_like_aliases_cannot_capture_a_local(target, expected):
+    spec = render_replay(seed_from_records(target, SHADOWED))
+    assert spec.expression.startswith("∀ («x✝» : @Nat), ∀ (x : @Nat), ")
+    assert expected in spec.expression
+    assert spec.name_map == ()
+
+
+def test_a_local_is_renamed_rather_than_the_nested_binder_that_would_capture_it():
+    # The nested binder `x` refers to the local `x` inside its own scope. The
+    # local is renamed (its model name is kept separately); the binder name the
+    # model reads stays `x`, and the alias also avoids the nested `x_1`.
+    target = "(:lambda x_1 (:c Nat) (:lambda x (:c Nat) (:fv _b)))"
+    spec = render_replay(seed_from_records(target, SHADOWED))
+    assert spec.expression == (
+        "∀ («x✝» : @Nat), ∀ (x_2 : @Nat), (fun (x_1 : @Nat) => (fun (x : @Nat) => @x_2))"
     )
-    spec = render_replay(seed)
-    assert spec.expression == "∀ (x_1 : @Nat), ∀ (x : @Nat), (@Eq @Nat @x_1 @x)"
-    assert spec.name_map == (("x✝", "x_1✝"),)
+    assert spec.name_map == (("x", "x_2"),)
 
 
-def test_bound_variables_numerals_and_capture():
-    # `x` inside the lambda would capture the local `x` the body refers to.
+def test_bound_variables_and_numerals():
     seed = seed_from_records(
-        "((:c Eq) (:c Nat) (:lambda x (:c Nat) ((:c HAdd.hAdd) 0 (:fv _x))) (:lit 3))",
+        "((:c Eq) (:c Nat) (:lambda y (:c Nat) ((:c HAdd.hAdd) 0 (:fv _x))) (:lit 3))",
         [local("_x", "x", "(:c Nat)", 0)],
     )
     expression = render_replay(seed).expression
-    assert "(fun (x_1 : @Nat) => (@HAdd.hAdd @x_1 @x))" in expression
+    assert "(fun (y : @Nat) => (@HAdd.hAdd @y @x))" in expression
     assert expression.endswith("(nat_lit 3))")
 
 
-def test_sanitized_binders_are_named_only_when_used():
+def test_anonymous_binders_stay_anonymous_for_the_model():
     seed = seed_from_records(
         "((:c And) (:forall _ (:c Nat) (:c True)) (:forall _ (:c Nat) ((:c Eq) (:c Nat) 0 0)))",
         [],
     )
     expression = render_replay(seed).expression
     assert "(∀ (_ : @Nat), @True)" in expression
-    assert "(∀ (x_1 : @Nat), (@Eq @Nat @x_1 @x_1))" in expression
+    # A used one gets a name Lean treats as inaccessible, printed as `_` again.
+    assert "(∀ («a✝0» : @Nat), (@Eq @Nat @«a✝0» @«a✝0»))" in expression
 
 
 def test_projection_placeholders_are_inferred_and_match_anything():
@@ -293,6 +352,24 @@ def test_dataset_columns_align_by_checked_name_and_keep_index_gaps():
     )
     assert reason(lambda: check_raw_schema(3)) is ReplayFailure.MALFORMED_STRUCTURED
     check_raw_schema(4)
+
+
+def test_model_input_must_match_what_the_source_recorded():
+    from maths_ai.lean_replay import validate_model_input
+
+    records = [
+        StructuredLocal("_a", "a", 0, ":explicit", False, False, "(:c Nat)", model_type_sexp="(:c Nat)")
+    ]
+    seed = seed_from_records("(:c True)", records, model_target="(:c True)")
+    validate_model_input(seed, "(:c True)", ["(:c Nat)"])
+    assert reason(lambda: validate_model_input(seed, "(:c False)", ["(:c Nat)"])) is (
+        ReplayFailure.MODEL_MISMATCH
+    )
+    assert reason(lambda: validate_model_input(seed, "(:c True)", ["(:c Int)"])) is (
+        ReplayFailure.MODEL_MISMATCH
+    )
+    # Without recorded model expressions (printed text) there is nothing to compare.
+    validate_model_input(seed_from_text(goal="True"), "(:c Anything)", [])
 
 
 def test_fingerprint_identifies_the_rendered_replay():

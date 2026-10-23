@@ -16,6 +16,7 @@ from pantograph_async import (
 )
 from pantograph_async.probes import probe_model_client
 
+from maths_ai.data_models.model_identity import with_model_identity
 from maths_ai.data_models.proof_components import Goal
 from maths_ai.lean_replay import (
     GoalReplaySpec,
@@ -24,6 +25,7 @@ from maths_ai.lean_replay import (
     ReplayInputError,
     ReplayValidation,
     render_replay,
+    validate_model_input,
     validate_replay,
 )
 
@@ -83,7 +85,9 @@ async def materialize_seed(
 
     Lean rejecting the input and a replay that does not match the seed are
     properties of the input, so both raise ``ReplayInputError``. Client and
-    transport failures propagate unchanged.
+    transport failures propagate unchanged. A structured seed's locals keep
+    their source model identity on the returned goal; Lean's live names and
+    indices are its execution identity.
     """
     replay = render_replay(seed)
     try:
@@ -100,8 +104,17 @@ async def materialize_seed(
         validation = validate_replay(
             seed, replay, goal.target.sexp, execution_goal_to_structured_locals(goal)
         )
+        canonical = execution_goal_to_goal(goal)
+        identities = [local.model_identity for local in seed.locals]
+        if identities and all(identity is not None for identity in identities):
+            canonical = with_model_identity(canonical, identities)
+        validate_model_input(
+            seed,
+            canonical.goal_model_sexp,
+            [local.type_model_sexp for local in canonical.locals or []],
+        )
     except ReplayInputError:
         if scope.is_usable:
             await scope.release(state)
         raise
-    return state, execution_goal_to_goal(goal), validation
+    return state, canonical, validation

@@ -136,7 +136,11 @@ class RLHybridReasoner(HybridReasoner):
                     batch, id_to_tactic=self.id_to_tactic, greedy=self._greedy
                 )
                 candidate, action = self._decode(
-                    sample, dag, local_names, graph_fingerprint
+                    sample,
+                    dag,
+                    local_names,
+                    graph_fingerprint,
+                    execution_names=sub_goal.execution_names(),
                 )
                 if candidate is None:
                     self._unplayable_actions.append(action)
@@ -163,6 +167,8 @@ class RLHybridReasoner(HybridReasoner):
         dag,
         local_names: dict[str, str],
         graph_fingerprint: str,
+        *,
+        execution_names: dict[str, str] | None = None,
     ) -> tuple[Optional[TacticCandidate], EdgeAction]:
         """Turn one batch-size-1 ``ActionSample`` into ``(TacticCandidate, EdgeAction)``.
 
@@ -191,7 +197,9 @@ class RLHybridReasoner(HybridReasoner):
                 return None, action
             try:
                 arguments.append(
-                    _resolve_local_node_name(dag.nodes[idx], dag, local_names)
+                    _resolve_local_node_name(
+                        dag.nodes[idx], dag, local_names, execution_names
+                    )
                 )
             except ValueError:
                 return None, action

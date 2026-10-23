@@ -21,6 +21,7 @@ from pantograph_async import (
 )
 from maths_ai.hybrid_reasoner.pantograph_adapter import execution_state_to_goals
 
+from maths_ai.data_models.model_identity import carry_model_identity
 from maths_ai.data_models.proof_components import (
     Goal,
     RankedSubgoal,
@@ -661,18 +662,20 @@ class HybridReasoner:
             print(
                 f"  [Tactic APPLIED] {tactic.tactic_name} {' '.join(tactic.arguments)} (prob={tactic.probability:.4f})"
             )
+            # Successors see the model identity of the goal they came from.
+            subgoals = [carry_model_identity(node.goal, goal) for goal in outcome.subgoals]
 
-            if not outcome.subgoals:
+            if not subgoals:
                 # "no-goal": this tactic fully discharges the goal (QED for this branch)
                 print(f"  [Tactic QED] no subgoals — branch closed!")
                 self._link(graph, node, tactic, ranked_subgoals=[])
                 continue
 
             if self.use_pln:
-                print(f"  [PLN Ranking] scoring {len(outcome.subgoals)} subgoal(s)...")
+                print(f"  [PLN Ranking] scoring {len(subgoals)} subgoal(s)...")
                 ranked = await self.rank_subgoals(
                     node.goal.expression,
-                    outcome.subgoals,
+                    subgoals,
                     tactic,
                     gnn_probability=tactic.probability,
                 )
@@ -695,7 +698,7 @@ class HybridReasoner:
                     graph,
                     node,
                     tactic,
-                    ranked_subgoals=[(subgoal, None) for subgoal in outcome.subgoals],
+                    ranked_subgoals=[(subgoal, None) for subgoal in subgoals],
                 )
 
         if not any_applied and self.use_pln:

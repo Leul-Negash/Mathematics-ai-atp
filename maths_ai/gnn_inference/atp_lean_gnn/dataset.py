@@ -51,6 +51,9 @@ class DatasetRow:
     local_context: object = None
     raw_schema_version: object = None
     pending_goal_count: object = None
+    # The dataset's own `row_index` column; `row_index` above is the position
+    # in the split stream, and the two differ once the producer skipped rows.
+    source_row_index: object = None
 
     def source_identity(self) -> dict[str, object]:
         return {
@@ -58,6 +61,7 @@ class DatasetRow:
             "revision": self.dataset_revision,
             "split": self.split,
             "row_index": self.row_index,
+            "source_row_index": self.source_row_index,
             "theorem": self.theorem,
             "file_path": self.file_path,
             "commit": self.repo_commit,
@@ -76,7 +80,10 @@ class DatasetRow:
             list(self.model_hyp_sexps) or None,
         )
         return seed_from_records(
-            self.raw_goal_sexp, locals_, source=self.source_identity()
+            self.raw_goal_sexp,
+            locals_,
+            source=self.source_identity(),
+            model_target=self.model_goal_sexp or None,
         )
 
     def metadata(self) -> dict[str, object]:
@@ -147,6 +154,7 @@ def _dataset_row_from_sample(
         local_context=sample.get("local_context"),
         raw_schema_version=sample.get("raw_schema_version"),
         pending_goal_count=sample.get("pending_goal_count"),
+        source_row_index=sample.get("row_index"),
     )
 
 

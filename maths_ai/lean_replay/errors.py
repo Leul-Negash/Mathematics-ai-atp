@@ -15,6 +15,7 @@ class ReplayFailure(str, Enum):
     UNRESOLVED_UNIVERSE = "unresolved-universe"
     UNRESOLVED_TERM = "unresolved-term"
     SEMANTIC_MISMATCH = "semantic-mismatch"
+    MODEL_MISMATCH = "model-mismatch"
     LEAN_REJECTED = "lean-rejected"
 
 

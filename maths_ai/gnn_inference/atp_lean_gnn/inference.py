@@ -60,8 +60,13 @@ def _resolve_local_node_name(
     node: GraphNode,
     dag: DAGBuilder,
     local_names: dict[str, str] | None = None,
+    execution_names: dict[str, str] | None = None,
 ) -> str:
-    """Resolve a structured local node to a Lean-usable user name."""
+    """Resolve a structured local node to a Lean-usable user name.
+
+    The graph holds model names; ``execution_names`` maps any that differ to
+    the live name Lean knows the local by.
+    """
     if node.label == "Hyp" and node.children:
         name_index = 1 if len(node.children) == 4 else 0
         result = dag.nodes[node.children[name_index]].label
@@ -71,6 +76,7 @@ def _resolve_local_node_name(
         raise ValueError(
             f"Selected node {node.label!r} is not a structured local declaration."
         )
+    result = (execution_names or {}).get(result, result)
     if not _is_playable_local_name(result):
         raise ValueError(
             f"Selected local {result!r} is not a playable Lean identifier."
@@ -216,9 +222,17 @@ class InferencePipeline:
     def predict_from_goal(self, goal, *, top_k: int = 1) -> InferenceResult:
         """Predict synchronously from one complete canonical model state."""
         dag = model_goal_to_dag(goal.require_model_state())
-        return self._predict_from_dag(dag, top_k=top_k)
+        return self._predict_from_dag(
+            dag, top_k=top_k, execution_names=goal.execution_names()
+        )
 
-    def _predict_from_dag(self, dag: DAGBuilder, *, top_k: int = 1) -> InferenceResult:
+    def _predict_from_dag(
+        self,
+        dag: DAGBuilder,
+        *,
+        top_k: int = 1,
+        execution_names: dict[str, str] | None = None,
+    ) -> InferenceResult:
         """Core prediction logic from a pre-built DAG."""
         data = dag_to_pyg(dag, self.node_vocab)
 
@@ -339,7 +353,9 @@ class InferencePipeline:
                     idx = int(idx)
                     cid = pool.candidate_ids[idx]
                     node = dag.nodes[cid]
-                    arg_str = _resolve_local_node_name(node, dag, local_names)
+                    arg_str = _resolve_local_node_name(
+                        node, dag, local_names, execution_names
+                    )
                     arguments.append(arg_str)
                     score_val = (
                         float(local_scores[local_sorted[rank]].item())
@@ -382,7 +398,9 @@ class InferencePipeline:
 
                 if source == "local":
                     node = dag.nodes[cid]
-                    arg_str = _resolve_local_node_name(node, dag, local_names)
+                    arg_str = _resolve_local_node_name(
+                        node, dag, local_names, execution_names
+                    )
                 else:
                     if self.lemma_corpus and cid in self.lemma_corpus:
                         arg_str = self.lemma_corpus[cid].name

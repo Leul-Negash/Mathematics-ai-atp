@@ -84,6 +84,35 @@ def same_expression(
     return True
 
 
+def validate_model_input(
+    seed: LeanGoalSeed, target_model_sexp: str, local_model_sexps: Sequence[str]
+) -> None:
+    """Raise ``MODEL_MISMATCH`` unless the model sees the expressions the source recorded.
+
+    Lean can rebuild the same goal while the normalized expressions differ,
+    for example where the source kept metadata that source syntax cannot
+    recreate. Such a replay would show the model different input than the
+    prepared data, so it is not admitted.
+    """
+    expected = [("target", seed.model_target, target_model_sexp)]
+    expected += [
+        (f"local {position} ({source.name})", source.model_type, actual)
+        for position, (source, actual) in enumerate(zip(seed.locals, local_model_sexps))
+    ]
+    for where, recorded, actual in expected:
+        if recorded is not None and recorded != actual:
+            start = next(
+                (i for i, (a, b) in enumerate(zip(recorded, actual)) if a != b),
+                min(len(recorded), len(actual)),
+            )
+            raise ReplayInputError(
+                ReplayFailure.MODEL_MISMATCH,
+                "The replayed model S-expression differs from the source near "
+                f"{recorded[max(0, start - 40):start + 40]!r}.",
+                field=where,
+            )
+
+
 def validate_replay(
     seed: LeanGoalSeed,
     spec: GoalReplaySpec,

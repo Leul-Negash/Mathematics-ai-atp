@@ -16,7 +16,7 @@ from .seed import (
     seed_from_text,
 )
 from .text import Hypothesis, ProofState, parse_state, parse_states
-from .validation import ReplayValidation, validate_replay
+from .validation import ReplayValidation, validate_model_input, validate_replay
 
 __all__ = [
     "RENDERER_VERSION",
@@ -34,5 +34,6 @@ __all__ = [
     "render_replay",
     "seed_from_records",
     "seed_from_text",
+    "validate_model_input",
     "validate_replay",
 ]

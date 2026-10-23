@@ -88,6 +88,9 @@ def dataset_locals(
                 is_let=context["is_let"],
                 type_sexp=raw["sexp"],
                 value_sexp=raw.get("value_sexp"),
+                model_type_sexp=(
+                    model_hyps[position].get("sexp") if model_hyps is not None else None
+                ),
             )
         )
     return out

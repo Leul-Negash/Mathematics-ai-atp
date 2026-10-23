@@ -152,9 +152,15 @@ def test_exact_canonical_fingerprints_and_graph_features(label, source):
     assert len(goals) == len(expected)
     for execution, golden in zip(goals, expected):
         goal = execution_goal_to_goal(execution)
-        # Raw expressions are replay metadata outside the canonical model view.
+        # Raw expressions and live identity are execution metadata outside the
+        # canonical model view; a fresh REPL goal has no separate live identity.
+        live_fields = {"type_sexp", "value_sexp", "execution_name", "execution_index"}
         canonical = goal.model_dump(
-            exclude={"goal_sexp": True, "locals": {"__all__": {"type_sexp", "value_sexp"}}}
+            exclude={"goal_sexp": True, "locals": {"__all__": live_fields}}
+        )
+        assert all(
+            local.execution_name is None and local.execution_index is None
+            for local in goal.locals
         )
         assert canonical == golden["canonical"]
         assert goal.goal_sexp == execution.target.sexp
