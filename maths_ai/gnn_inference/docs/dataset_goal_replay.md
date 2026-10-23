@@ -40,7 +40,7 @@ definition (`x : Nat := 3`) and explicit universes are accepted.
 - `expression`: a closed statement, `∀` binders and `let`s around the target;
 - `universe_levels`: the universe parameters to declare, sent as `goal.start`'s
   `levels` (client 0.1.1);
-- `local_names`: the `intro` pattern, `_` for inaccessible locals;
+- `local_names`: the `intro` pattern, each local's name quoted where needed;
 - `expected_names`: what Lean will print after `intro`;
 - `name_map` / `level_map`: every source name the replay had to change;
 - `fingerprint`: the identity of this exact replay and renderer version.
@@ -71,13 +71,25 @@ Rejected: `(:mv …)` and `(:mvd …)` (`unresolved-term`), a level `(:mv …)`
 (`unsupported-syntax`), and a quoted atom that does not end at a delimiter
 (`malformed-structured`).
 
-Inaccessible locals (`inst✝²`) are bound under their base name and introduced
-with `_`, so Lean prints the same names again. A local is renamed only when a
-later local rebinds its name and something after that still refers to it; a
-common case is the first of `[Ring R] [AddCommGroup M] [Module R M]`. Lean has
-no source syntax for a shadowed local, and finding it by type (`‹Ring R›`)
-leaves metavariables Mathlib's unifier cannot solve within its heartbeat limit,
-so renaming is the only safe choice. The admission report counts these renames.
+Names:
+
+- Every local is bound and introduced under its exact display name, quoted
+  when it is not a plain identifier: `inst✝²` is written `«inst✝²»`, and Lean
+  keeps exactly that name. Display names in one context are distinct, so
+  shadowing never forces a rename.
+- Printed text is never renamed. A printed `x✝` is written `«x✝»` wherever it
+  occurs, which changes no binder, so text replay is the printed state read as
+  Lean source. Nested binders in text keep the names they were printed with.
+- In raw expressions, a nested binder keeps its source name. A binder
+  Pantograph printed as `_` stays anonymous when unused and is named `«a✝k»`
+  when used: Lean can refer to that name but treats it as inaccessible, so the
+  model S-expression still prints `_`.
+- A local is renamed (to a fresh plain name that occurs nowhere in the goal)
+  only when its name would hide a constant, when the same display name is bound
+  twice and the earlier one is used after that, or when a nested binder of the
+  same name would capture a reference to it. The nested binder is never the one
+  renamed, because the model reads binder names; the local's model name is kept
+  separately (see Model identity). Every rename is listed in `name_map`.
 
 Universes are read only where Lean's grammar has them: after `Type` / `Sort`,
 in `Foo.{u, v}` and in raw sort levels. A term called `u_1` is not a universe.
@@ -93,10 +105,36 @@ with the seed:
   matched by position (binder names are ignored and a projection `_` matches
   whatever Lean inferred);
 - local display names are compared with `expected_names`; a difference is
-  reported, not rejected.
+  reported, not rejected;
+- when the source recorded model S-expressions (dataset rows, canonical
+  goals), the replayed goal must give the model exactly those after its model
+  identity is applied, or it is rejected as `model-mismatch`.
 
-Context indices are not reproduced: a source context can have gaps from hidden
-declarations, and the replay is always dense. The report counts these.
+## Model identity
+
+A replayed goal is a new Lean context: new local IDs, dense context indices
+(the source can have gaps from hidden declarations) and, rarely, a renamed
+local. The GNN must still see the source context, because the prepared data
+and vocabularies were built from it. `GoalLocal` therefore keeps two
+identities (`maths_ai/data_models/model_identity.py`):
+
+- model identity: `user_name`, `context_index` and the `(:fv FVk)` labels in the
+  model S-expressions, which the graph and the state fingerprint read;
+- execution identity: `internal_name`, `execution_name` and `execution_index`,
+  Lean's live names, which tactics and replay use.
+
+`materialize_seed` applies the source identity to a replayed seed. Successor
+goals inherit it from their parent by Lean's local ID: a kept local keeps its
+model index (and its model name unless the tactic renamed it); a new local is
+numbered after the locals before it with the spacing Lean gave it, so a goal
+that never needed a mapping keeps Lean's own indices. Re-materializing a
+canonical goal replays its live identity and returns the same model view.
+Tactic arguments are chosen from model names and translated back to live
+names before Lean sees them.
+
+`scripts/compare_replay_graphs.py` replays dataset rows and compares the graph
+given to the model with the graph built from each row's stored model columns.
+With `--prepared-root` it also counts labels outside the prepared vocabulary.
 
 ## Quarantine reasons
 
@@ -109,6 +147,7 @@ declarations, and the replay is always dense. The report counts these.
 | `unresolved-universe` | A universe level metavariable (`?u.12`, `(:mv …)` in a sort) |
 | `unresolved-term` | A term metavariable (`?m.5`) |
 | `semantic-mismatch` | Lean built a different goal than the seed describes |
+| `model-mismatch` | Lean built the goal, but the model would see different normalized expressions than the source recorded (for example metadata around a partial application) |
 | `lean-rejected` | Lean refused the replay, for example an unknown printed name |
 
 Client, protocol and transport failures are infrastructure, never row labels.

@@ -38,10 +38,10 @@ timeout 60 s. Reports: [admission_train_500.json](../tests/fixtures/dataset_repl
 | --- | --- | --- |
 | Rows reaching Lean | 497 | 320 after quarantine and budget skips |
 | Accepted by Lean | 8 | 320 |
-| Checked against the source | no | yes, all 320 match |
+| Checked against the source | no | 320 match the raw source; 319 also give the model exactly the source's normalized expressions |
 | Lean rejections | 489 (279 unknown universe level, 197 parse, 11 unknown identifier, 2 other) | 0 |
 
-On this branch the other 180 rows are reported, not searched:
+319 rows are admitted. The other 181 are reported, not searched:
 
 | Outcome | Rows |
 | --- | --- |
@@ -49,35 +49,57 @@ On this branch the other 180 rows are reported, not searched:
 | `missing-context`: `let` locals, schema 4 stores no value | 46 |
 | `unresolved-universe` | 9 |
 | `unresolved-term` | 3 |
+| `model-mismatch`: metadata around a partial application (row 468) | 1 |
 | skipped `over-size-replay` (> 50,000 characters) | 63 |
 | skipped `replay-repl-failure` (REPL printed a heartbeat error) | 8 |
 
-All 320 admitted goals printed the predicted local names (no name drift);
-289 have context-index gaps the dense replay closes. Admitted rows span 17
-Mathlib areas (most from `Data`, `MeasureTheory`, `RingTheory`, `Algebra`,
-`Topology`); every row over 1,600 printed characters was quarantined, and the
-report lists coverage by area and size. Offline, on 400 sampled
-rows, 115 of 348 renderable seeds rename at least one local (352 of 6,023
-locals, almost all earlier `inst` instances).
+All 319 admitted goals printed the predicted local names (no name drift).
+Admitted rows span 17 Mathlib areas (most from `Data`, `MeasureTheory`,
+`RingTheory`, `Algebra`, `Topology`); every row over 1,600 printed characters
+was quarantined, and the report lists coverage by area and size.
 
 ### Model input
 
-On the live fixture rows (5, 7, 41) the replayed goal's normalized target and
-local types are identical to the dataset's `model_goal_sexp` and
-`model_hyp_sexps`, and the binder roles match, once free-variable context
-indices are renumbered. Two differences reach the GNN, and both need review
-before long RL training:
+[graphs_train_500.json](../tests/fixtures/dataset_replay/evidence/graphs_train_500.json)
+(`scripts/compare_replay_graphs.py`) compares, for every admitted row, the
+graph RL gives the model with the graph built from the row's stored model
+columns, which is what the prepared data holds: **319 of 319 identical**, node
+for node (labels, edges, roots, fingerprint). Without the model-identity
+mapping only 31 would be, because 289 of the rows have context-index gaps from
+hidden declarations and a replayed context is dense. Admission now enforces
+this: a replay whose model expressions differ from the source's is rejected as
+`model-mismatch` (row 468).
 
-- Context indices: 289 of the 320 admitted rows have gaps in their source
-  context (hidden declarations the dataset does not list), and the replay is
-  dense, so `FV` labels shift relative to the prepared supervised data. Nothing
-  compacts them in code; Lean's rebuilt context simply has no hidden locals.
-- Renamed locals: a local renamed to avoid capture (`inst_1✝` instead of
-  `inst✝²`) is a new name label. Tactic arguments resolve against the live
-  goal, so they use the replayed names consistently.
+The mapping is carried to successor goals and through re-materialization, and
+tactic arguments are translated back to live names; live tests cover a gapped
+row (5) and the instance-heavy row 41, a successor with a new local, a
+re-materialized successor, and a full search whose root and child nodes keep
+the source identity. Offline, on 400 sampled rows, 20 of 348 renderable seeds
+rename a local (21 locals in all), each to keep a nested binder's name, and
+each keeps its source name for the model.
 
 Existing graph and canonical goldens are unchanged, and no vocabulary or
-checkpoint was modified.
+checkpoint was modified. The check against the real prepared vocabulary and the
+supervised checkpoint needs those artifacts, which are not on this machine:
+
+```bash
+PANTOGRAPH_TEST_SOURCE_ROOT=/path/to/mathlib4 \
+PANTOGRAPH_TEST_REPL=/path/to/Pantograph/.lake/build/bin/repl \
+PANTOGRAPH_TEST_PREPARED_ROOT=/path/to/prepared/sexpr_full_model \
+PANTOGRAPH_TEST_CHECKPOINT=/path/to/best-v3.pt \
+python -m pytest maths_ai/gnn_inference/tests/test_dataset_replay.py \
+  --run-pantograph-live -k vocabulary_and_checkpoint
+
+python -m maths_ai.gnn_inference.scripts.compare_replay_graphs \
+  --source-root /path/to/mathlib4 --pantograph-repl /path/to/repl \
+  --prepared-root /path/to/prepared/sexpr_full_model --report graphs.json
+```
+
+The test featurizes replayed fixture rows against the prepared vocabulary
+(structural labels must all exist), requires their feature tensors to equal the
+prepared rows' own, and runs the checkpoint on them. It was run here only
+against a stand-in vocabulary and checkpoint built the same way, to check the
+code path.
 
 ### Text parser
 
@@ -89,8 +111,8 @@ Tests, run with GNU `stdbuf` first on `PATH`:
 
 | Run | Result |
 | --- | --- |
-| `maths_ai` and `tests` | 388 passed, 4 skipped, 5 failed; the same 5 fail at the base (worker-count config test, `stdbuf` path test on this host, 3 Thompson-sampler tests) |
-| Live with Mathlib (`--run-pantograph-live`) | `test_pantograph_client_live.py` 2 passed; `test_dataset_replay.py` 1 passed (structured repairs, text rejections, universes, model-input equality, canonical, branch and cancelled replays, cleanup) |
+| `maths_ai` and `tests` | 407 passed, 8 skipped, 5 failed; the same 5 fail at the base (worker-count config test, `stdbuf` path test on this host, 3 Thompson-sampler tests) |
+| Live with Mathlib (`--run-pantograph-live`) | `test_pantograph_client_live.py` 2 passed; `test_dataset_replay.py` 4 passed, 1 skipped without prepared artifacts (structured repairs and rejections, exact prepared graphs, successors and re-materialization, capture checks, a full search, universes, canonical, branch and cancelled replays, cleanup) |
 | `rl_smoke` (live) | one on-policy optimizer step, finite losses |
 | Translator `test_imports` | passed |
 | Client suite | 425 with live tests (3 skipped without a companion checkout), sdist/wheel check, 427 from the sdist against the wheel |
@@ -104,9 +126,16 @@ change, and the suites and live tests above were rerun with it installed from th
   names it cannot send get a `replay_uN` alias. The plan's example aliases every
   name, which would change every printed goal without changing what Lean
   checks; the mapping is recorded either way in `level_map`.
-- A shadowed local that is still referenced is renamed rather than found by
-  type: `‹Ring R›` left tactic metavariables that Mathlib's unifier could not
-  resolve within the heartbeat limit on row 41.
+- Locals and printed names are written with their exact display names,
+  quoted where needed (`«inst✝²»`), instead of being renamed. This keeps the
+  names Lean shows, and it is what fixes the review's capture case: quoting
+  changes no binder, so a nested `fun x_1` can no longer capture a reference.
+  Finding a shadowed local by type (`‹Ring R›`) was tried first and rejected:
+  on row 41 it left tactic metavariables Mathlib's unifier could not resolve
+  within the heartbeat limit.
+- When a nested binder and a local would collide, the local is renamed, not
+  the binder, because binder names are part of the model S-expressions while a
+  local's model name is kept by the mapping.
 - Client callers that start fixed goals without universes (the client's own
   probes and example) keep the default `levels=()`; every application caller
   passes its levels explicitly.
@@ -119,7 +148,9 @@ MCTS-AC-branch needs the same cutover, not a separate mechanism:
 - `prove(seed)` as the only entry point, so `SearchFactory` and the pool pass
   `TheoremItem.seed`;
 - MCTS node re-materialization through `materialize_seed(goal.replay_seed())`
-  (it replays canonical goals the same way `_materialize_goal` does here);
+  (it replays canonical goals the same way `_materialize_goal` does here), and
+  `carry_model_identity` on every successor so the model keeps the source
+  identity;
 - pool admission through `seed_admission`, and the `inadmissible` outcome kept
   out of `N`/`W`, HTPS data and the anneal clocks, as it is kept out of the
   solve rate here.
@@ -141,9 +172,8 @@ digest in the client's extraction manifest.
   as `unsupported-syntax`.
 - Universe level metavariables (`(:mv …)` in a sort) have no assignment in
   the dataset; those rows stay quarantined.
-- When an earlier local's name is rebound and still used, it is renamed
-  (`inst✝²` becomes `inst_1✝`); the admission report counts these and the
-  replay records them. Those names are new graph labels for the GNN.
+- Run the prepared-vocabulary and checkpoint test above where those artifacts
+  are (JupyterHub).
 - The companion REPL prints an uncaught Lean exception (for example a
   heartbeat timeout) as plain text on stdout instead of a JSON error; the
   client then closes the session as a protocol failure. This is a REPL fix.
