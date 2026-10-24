@@ -24,6 +24,7 @@ from maths_ai.gnn_inference.atp_lean_gnn.graph_contract import (
     MODEL_SEXPR_GRAPH_SPEC,
     GraphRepresentationSpec,
 )
+from maths_ai.lean_replay import StructuredLocal
 
 
 def require_client_compatibility(
@@ -51,6 +52,8 @@ def execution_local_to_goal_local(local: ExecutionLocal) -> GoalLocal:
         value_pp=local.value.pp if local.value else None,
         value_model_sexp=local.value.model_sexp if local.value else None,
         model_sexp_version=local.type.model_sexp_version,
+        type_sexp=local.type.sexp,
+        value_sexp=local.value.sexp if local.value else None,
     )
 
 
@@ -59,6 +62,7 @@ def execution_goal_to_goal(goal: ExecutionGoal) -> Goal:
     return Goal(
         expression=goal.target.pp,
         goal_model_sexp=goal.target.model_sexp,
+        goal_sexp=goal.target.sexp,
         locals=[execution_local_to_goal_local(local) for local in goal.locals],
         case_tag=goal.case_tag,
         model_sexp_version=goal.target.model_sexp_version,
@@ -67,6 +71,23 @@ def execution_goal_to_goal(goal: ExecutionGoal) -> Goal:
 
 def execution_state_to_goals(state: TacticState | TacticSuccess) -> list[Goal]:
     return [execution_goal_to_goal(goal) for goal in state.goals]
+
+
+def execution_goal_to_structured_locals(goal: ExecutionGoal) -> list[StructuredLocal]:
+    """The replayed context in the form ``validate_replay`` compares."""
+    return [
+        StructuredLocal(
+            internal_id=local.internal_name,
+            name=local.user_name,
+            context_index=local.context_index,
+            binder_role=local.binder_role,
+            is_instance=local.is_instance,
+            is_let=local.is_let,
+            type_sexp=local.type.sexp,
+            value_sexp=local.value.sexp if local.value is not None else None,
+        )
+        for local in goal.locals
+    ]
 
 
 def execution_goal_to_translator(goal: ExecutionGoal) -> dict[str, Any]:

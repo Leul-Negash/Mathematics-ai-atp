@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, Literal
 
 import torch
 
+from maths_ai.lean_replay import ReplayInputError
 from pantograph_async import (
     await_cleanup,
     PantographConfigurationError,
@@ -22,12 +23,14 @@ from pantograph_async import (
 from .rl_resources import ResourcePlan
 
 
+# "inadmissible": the seed could not be replayed faithfully, so no search ran.
 CollectionOutcome = Literal[
     "solved",
     "unsolved",
     "cooperative_deadline",
     "hard_timeout",
     "error",
+    "inadmissible",
 ]
 ServerFactory = Callable[[int], Awaitable[Any]]
 ReasonerFactory = Callable[[int, torch.device, torch.nn.Module, Any], Any]
@@ -497,6 +500,22 @@ class LiveReasonerPool:
                             result=result,
                         )
                     )
+                except ReplayInputError as exc:
+                    # A property of the theorem, not of the session: the
+                    # client stays usable, so the worker is kept.
+                    records.append(
+                        CollectionRecord(
+                            batch_index=index,
+                            worker_id=worker.worker_id,
+                            queue_wait_s=queue_wait,
+                            search_s=time.perf_counter() - search_started,
+                            outcome="inadmissible",
+                            exception_category=exc.reason.value,
+                        )
+                    )
+                    self.log(
+                        f"  [collect worker={worker.worker_id}] inadmissible seed: {exc}"
+                    )
                 except (asyncio.TimeoutError, PantographTransportError) as exc:
                     # The interrupted session may hold a request in flight, so
                     # the whole client/reasoner binding is retired.
@@ -591,6 +610,9 @@ class LiveReasonerPool:
             ),
             "searches_hard_timed_out": float(
                 sum(record.outcome == "hard_timeout" for record in records)
+            ),
+            "seeds_inadmissible": float(
+                sum(record.outcome == "inadmissible" for record in records)
             ),
             "worker_count": float(len(self.active_workers)),
             "server_count": float(len(self.active_workers)),

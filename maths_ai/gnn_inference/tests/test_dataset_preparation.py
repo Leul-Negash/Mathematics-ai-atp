@@ -288,7 +288,9 @@ class DatasetPreparationTests(unittest.TestCase):
 
         rows = list(stream_split(split="val", dataset_name="fake/dataset"))
 
-        mock_load_hf_split.assert_called_once_with("val", dataset_name="fake/dataset")
+        mock_load_hf_split.assert_called_once_with(
+            "val", dataset_name="fake/dataset", revision=None
+        )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].split, "val")
         self.assertEqual(rows[0].theorem, "demo.validation")

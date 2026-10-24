@@ -481,7 +481,7 @@ score-function ratio during these supervised updates.
 ```text
 Validate config, checkpoint, prepared graph contract, and vocabulary identity
 Create the canonical model, both optimizers, replay queues, and admitted workers
-Build the goal pool and hold out the evaluation set
+Build the goal pool from Lean-admitted seeds and hold out the evaluation set
 
 For each round:
     sample goals from the current curriculum window
@@ -490,14 +490,18 @@ For each round:
     mine minimal solved proofs and threshold-supported critic rows into queues
     run the configured number of supervised replay updates
     advance model generation for actual updates and synchronize replicas
-    update solve-rate history and grow the curriculum when its condition passes
+    update solve-rate history over searched seeds and grow the curriculum when its condition passes
     write periodic last.pt; periodically evaluate and save best.pt on improvement
 ```
 
 Dataset mode starts from dataset proof states, which can be intermediate goals,
 not necessarily complete theorem statements. File mode accepts supplied goal
-seeds. The pool sorts by goal size and expands an accessible prefix as recent
-solve rate reaches the configured threshold. Size is a curriculum heuristic;
+seeds. Before the pool is built, `seed_admission.preflight` replays every seed
+through Lean on a dedicated client and keeps only the ones that materialize. The
+pool sorts by goal size and expands an accessible prefix as recent
+solve rate reaches the configured threshold. A seed that fails to replay during
+collection is counted as inadmissible, not as a failed search, and a round that
+searched nothing leaves the window unchanged. Size is a curriculum heuristic;
 the code does not guarantee a fixed distance-to-proof for dataset roots.
 
 The tactic-anchor weight anneals by the count of actual on-policy optimizer
