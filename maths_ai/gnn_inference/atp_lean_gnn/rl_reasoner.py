@@ -32,10 +32,11 @@ from torch_geometric.data import Batch
 from maths_ai.data_models.proof_components import Goal, TacticCandidate
 from maths_ai.hybrid_reasoner.hypergraph import ProofHypergraph, ProofNode
 from maths_ai.hybrid_reasoner.joint_inference import ExpansionResult, HybridReasoner
+from maths_ai.lean_replay import LeanGoalSeed
 from pantograph_async import PantographStateError
 
 from .actor_critic import ActorCriticWithArgsClassifier
-from .inference import _local_names_by_fv_label, _resolve_local_node_name
+from .inference import _resolve_local_node_name, local_declarations
 from .pln_rl_training import EdgeAction, FailureRecord, make_dag_featurizer
 
 
@@ -123,7 +124,7 @@ class RLHybridReasoner(HybridReasoner):
         self._pending_goal = sub_goal
 
         dag, data = self.dag_featurize(sub_goal)
-        local_names = _local_names_by_fv_label(dag)
+        declarations = local_declarations(sub_goal)
         graph_fingerprint = str(data.graph_fingerprint)
         batch = Batch.from_data_list([data]).to(self.device)
 
@@ -135,7 +136,7 @@ class RLHybridReasoner(HybridReasoner):
                     batch, id_to_tactic=self.id_to_tactic, greedy=self._greedy
                 )
                 candidate, action = self._decode(
-                    sample, dag, local_names, graph_fingerprint
+                    sample, dag, declarations, graph_fingerprint
                 )
                 if candidate is None:
                     self._unplayable_actions.append(action)
@@ -160,7 +161,7 @@ class RLHybridReasoner(HybridReasoner):
         self,
         sample,
         dag,
-        local_names: dict[str, str],
+        declarations: dict[str, str],
         graph_fingerprint: str,
     ) -> tuple[Optional[TacticCandidate], EdgeAction]:
         """Turn one batch-size-1 ``ActionSample`` into ``(TacticCandidate, EdgeAction)``.
@@ -190,7 +191,7 @@ class RLHybridReasoner(HybridReasoner):
                 return None, action
             try:
                 arguments.append(
-                    _resolve_local_node_name(dag.nodes[idx], dag, local_names)
+                    _resolve_local_node_name(dag.nodes[idx], dag, declarations)
                 )
             except ValueError:
                 return None, action
@@ -252,9 +253,8 @@ class RLHybridReasoner(HybridReasoner):
 
     async def prove(
         self,
-        goal: str,
+        seed: LeanGoalSeed,
         *,
-        hypotheses: Optional[List[str]] = None,
         greedy: bool = False,
     ) -> RLSearchResult:
         """Run the search and return ``RLSearchResult(graph, edge_actions, failure_actions)``.
@@ -277,7 +277,7 @@ class RLHybridReasoner(HybridReasoner):
         )  # graph attached after the base search
         result = None
         try:
-            graph = await super().prove(goal, hypotheses=hypotheses)
+            graph = await super().prove(seed)
             self._result.graph = graph
             result, self._result = self._result, None
         finally:

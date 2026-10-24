@@ -10,6 +10,8 @@ from typing import Any, Awaitable, Callable, Literal
 
 import torch
 
+from maths_ai.lean_replay import ReplayInputError
+
 from .rl_resources import ResourcePlan
 from pantograph_async import (
     await_cleanup,
@@ -20,7 +22,8 @@ from pantograph_async import (
 )
 
 
-CollectionOutcome = Literal["solved", "unsolved", "timeout", "error"]
+# "inadmissible": the seed could not be replayed faithfully, so no search ran.
+CollectionOutcome = Literal["solved", "unsolved", "timeout", "error", "inadmissible"]
 ServerFactory = Callable[[int], Awaitable[Any]]
 ReasonerFactory = Callable[[int, torch.device, torch.nn.Module, Any], Any]
 SearchFactory = Callable[[Any, Any, bool], Awaitable[Any]]
@@ -471,6 +474,20 @@ class LiveReasonerPool:
                             result=result,
                         )
                     )
+                except ReplayInputError as exc:
+                    records.append(
+                        CollectionRecord(
+                            batch_index=index,
+                            worker_id=worker.worker_id,
+                            queue_wait_s=queue_wait,
+                            search_s=time.perf_counter() - search_started,
+                            outcome="inadmissible",
+                            exception_category=exc.reason.value,
+                        )
+                    )
+                    self.log(
+                        f"  [collect worker={worker.worker_id}] inadmissible seed: {exc}"
+                    )
                 except (asyncio.TimeoutError, PantographTransportError) as exc:
                     records.append(
                         CollectionRecord(
@@ -574,6 +591,9 @@ class LiveReasonerPool:
             ),
             "searches_timed_out": float(
                 sum(record.outcome == "timeout" for record in records)
+            ),
+            "seeds_inadmissible": float(
+                sum(record.outcome == "inadmissible" for record in records)
             ),
             "worker_count": float(len(self.active_workers)),
             "server_count": float(len(self.active_workers)),

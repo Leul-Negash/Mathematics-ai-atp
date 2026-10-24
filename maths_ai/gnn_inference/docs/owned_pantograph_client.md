@@ -77,11 +77,10 @@ materialization request owns a state scope:
 ```python
 from pathlib import Path
 from pantograph_async import PantographEnv
-from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_goal
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import (
-    create_model_sexpr_client, materialize_replay,
+    create_model_sexpr_client, materialize_seed,
 )
-from maths_ai.data_models.proof_components import LeanGoalSeed, seed_replay_spec
+from maths_ai.lean_replay import seed_from_text
 
 env = PantographEnv(
     source_root=Path('/path/to/compiled/mathlib4'),
@@ -90,13 +89,13 @@ env = PantographEnv(
 )
 async with await create_model_sexpr_client(env) as client:
     async with client.state_scope() as scope:
-        replay = seed_replay_spec(LeanGoalSeed(expression='True'))
-        state = await materialize_replay(scope, replay)
-        goal = execution_goal_to_goal(state.goals[0])
+        seed = seed_from_text(goal='a = a', hypotheses=['α : Type u_1', 'a : α'])
+        state, goal, validation = await materialize_seed(scope, seed)
         # predictor is an already-loaded GNNPredictor; no subprocess or new loop.
         predictions = predictor.predict_tactics_with_arguments(goal)
 ```
 
+Seeds and replay rules are described in [dataset_goal_replay.md](dataset_goal_replay.md).
 Canonical goals may outlive the scope; live execution states may not. Use the
 exact state object issued by its scope. Early release is idempotent, and tactic
 results do not consume their input, allowing alternative branches. Tactics always

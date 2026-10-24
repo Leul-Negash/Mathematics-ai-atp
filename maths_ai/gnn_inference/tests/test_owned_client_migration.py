@@ -11,10 +11,11 @@ import torch
 
 from maths_ai.data_models.proof_components import TacticCandidate
 from maths_ai.gnn_inference.model import GNNPredictor
-from maths_ai.gnn_inference.atp_lean_gnn.inference import InferencePipeline
+from maths_ai.gnn_inference.atp_lean_gnn.inference import InferencePipeline, local_declarations
 from maths_ai.gnn_inference.tests.model_helpers import structured_goal, pantograph_goal
 from maths_ai.hybrid_reasoner.joint_inference import HybridReasoner, PantographExecutor
 from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_translator
+from maths_ai.lean_replay import seed_from_text
 from pantograph_async import PantographStateError
 
 
@@ -41,7 +42,8 @@ def test_prediction_is_synchronous_canonical_and_gradient_free_in_active_loop():
     seen = []
     pipeline = object.__new__(InferencePipeline)
 
-    def predict(dag, *, top_k):
+    def predict(dag, *, top_k, declarations):
+        assert declarations == local_declarations(goal)
         seen.append(
             (torch.is_grad_enabled(), (parameter * 2).requires_grad, dag.state_root_id)
         )
@@ -66,7 +68,7 @@ def test_overlapping_prove_is_rejected_before_changing_search_state():
 
     async def run():
         with pytest.raises(PantographStateError):
-            await reasoner.prove("True")
+            await reasoner.prove(seed_from_text(goal="True"))
 
     asyncio.run(run())
     assert reasoner._proving is True

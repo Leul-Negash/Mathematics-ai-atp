@@ -15,6 +15,8 @@ import re
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
+from maths_ai.lean_replay.sexp import parse_sexp_string
+
 from .constants import LEAN_TO_PETTA, TYPE_ATOMS, map_const
 from .normalizer import VariableNormalizer
 
@@ -43,31 +45,6 @@ def literal_to_concept(value: Any) -> str:
     if n > 1:
         return "Positive"
     return "Negative"
-
-
-def parse_sexp_string(s: str) -> Any:
-    tokens = re.findall(r"\(|\)|:[^\s()]+|[^\s()]+", s)
-
-    def read() -> Any:
-        if not tokens:
-            raise ValueError("Unexpected end of S-expression")
-        tok = tokens.pop(0)
-        if tok == "(":
-            out = []
-            while tokens:
-                if tokens[0] == ")":
-                    tokens.pop(0)
-                    return out
-                out.append(read())
-            raise ValueError("Unclosed '(' in S-expression")
-        if tok == ")":
-            raise ValueError("Unexpected ')' in S-expression")
-        return tok
-
-    out = read()
-    if tokens:
-        raise ValueError(f"Extra tokens after S-expression: {tokens[:5]}")
-    return out
 
 
 def split_top_level_infix(s: str, ops: list[str]) -> tuple[str, str, str] | None:

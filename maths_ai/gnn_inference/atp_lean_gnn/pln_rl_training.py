@@ -41,6 +41,7 @@ from .search_harvest import (
 )
 
 from maths_ai.data_models.proof_components import Goal
+from maths_ai.lean_replay import LeanGoalSeed
 
 
 _STRUCTURAL_LABELS = {
@@ -72,6 +73,34 @@ def _is_structural_label(label: str) -> bool:
         or label.startswith("ArgPosition:")
         or _FV_RE.fullmatch(label) is not None
     )
+
+
+# Roles the model serializer emits for binders, application arguments, and
+# context locals (``instance``/``let`` refine the local's binder role).
+_BINDER_ROLES = (":explicit", ":implicit", ":strict-implicit", ":instance-implicit")
+_ARG_ROLES = (":explicit", ":implicit", ":implicit-type", ":instance", ":proof")
+_HYP_ROLES = (*(role.removeprefix(":") for role in _BINDER_ROLES), "instance", "let")
+
+
+def supported_structural_labels(*, max_locals: int, max_arity: int) -> list[str]:
+    """Every structural label a state within these bounds can contain.
+
+    A vocabulary built from a seed goal alone lacks labels its successors
+    introduce, such as ``FV1`` after ``intro``. Vocabularies for synthetic runs
+    include this set; states beyond the bounds still fail the missing-label check.
+    """
+    if max_locals < 0 or max_arity < 0:
+        raise ValueError("Structural label bounds must be nonnegative.")
+    labels = [
+        *sorted(_STRUCTURAL_LABELS),
+        *(f"BinderRole:{role}" for role in _BINDER_ROLES),
+        *(f"ArgRole:{role}" for role in _ARG_ROLES),
+        *(f"ArgPosition:{position}" for position in range(max_arity)),
+        *(f"HypRole:{role}" for role in _HYP_ROLES),
+        *(f"FV{index}" for index in range(max_locals)),
+    ]
+    assert all(_is_structural_label(label) for label in labels)
+    return labels
 
 
 def _validate_update_size(
@@ -514,24 +543,21 @@ def train_step(
     return metrics
 
 
-async def collect_batch(reasoner, theorems: list[dict]) -> list:
-    """Run one shared reasoner sequentially over a batch of theorems.
+async def collect_batch(reasoner, theorems: list[LeanGoalSeed]) -> list:
+    """Run one shared reasoner sequentially over a batch of theorem seeds.
 
-    Each item is ``{"goal": str, "hypotheses": list[str]}``. Requires a live Pantograph
+    Requires a live Pantograph
     server + ``petta`` binary (env-gated); PLN is de-blocked via ``evaluate_async`` so the
     independent pool workers provide cross-theorem concurrency. Returns finished graphs.
     """
-    return [
-        await reasoner.prove(item["goal"], hypotheses=item.get("hypotheses"))
-        for item in theorems
-    ]
+    return [await reasoner.prove(seed) for seed in theorems]
 
 
 async def collect_and_train(
     reasoner,
     model: ActorCriticWithArgsClassifier,
     optimizer: torch.optim.Optimizer,
-    theorems: list[dict],
+    theorems: list[LeanGoalSeed],
     featurize: Callable[[Goal], Data],
     tactic_to_id: dict[str, int],
     **train_kwargs,
@@ -641,7 +667,7 @@ def train_step_onpolicy(
     return metrics
 
 
-async def collect_batch_onpolicy(reasoner, theorems: list[dict]) -> list:
+async def collect_batch_onpolicy(reasoner, theorems: list[LeanGoalSeed]) -> list:
     """Run the RL reasoner SEQUENTIALLY over the batch and return its ``RLSearchResult`` s.
 
     Sequential because one reasoner instance holds one action stash at a time
@@ -650,10 +676,8 @@ async def collect_batch_onpolicy(reasoner, theorems: list[dict]) -> list:
     and is deferred.
     """
     results = []
-    for item in theorems:
-        results.append(
-            await reasoner.prove(item["goal"], hypotheses=item.get("hypotheses"))
-        )
+    for seed in theorems:
+        results.append(await reasoner.prove(seed))
     return results
 
 
@@ -661,7 +685,7 @@ async def collect_and_train_onpolicy(
     reasoner,
     model: ActorCriticWithArgsClassifier,
     optimizer: torch.optim.Optimizer,
-    theorems: list[dict],
+    theorems: list[LeanGoalSeed],
     featurize: Callable[[Goal], Data],
     **train_kwargs,
 ) -> dict[str, float]:

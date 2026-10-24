@@ -1,7 +1,6 @@
 import asyncio
 import argparse
 import random
-import re
 import json
 
 try:
@@ -9,13 +8,12 @@ try:
 except ImportError:
     Digraph = None
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 from pantograph_async import (
     PantographClient,
     PantographEnv,
     PantographStateScope,
     TacticState,
-    PantographGoalRejected,
     PantographTacticRejected,
     PantographProtocolError,
     PantographTransportError,
@@ -23,15 +21,14 @@ from pantograph_async import (
 )
 from maths_ai.hybrid_reasoner.pantograph_adapter import execution_state_to_goals
 
+from maths_ai.data_models.model_identity import carry_model_identity
 from maths_ai.data_models.proof_components import (
     Goal,
-    GoalReplaySpec,
-    LeanGoalSeed,
     RankedSubgoal,
     STV,
     TacticCandidate,
-    seed_replay_spec,
 )
+from maths_ai.lean_replay import LeanGoalSeed, ReplayInputError, seed_from_text
 from maths_ai.gnn_inference.inference_engine import GNNModelEngine
 from maths_ai.pln_inference.model import PLNInference
 from maths_ai.pln_inference.metta.translator.translator_modules.runner import (
@@ -48,13 +45,10 @@ from maths_ai.hybrid_reasoner.hypergraph import (
 )
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import (
     create_model_sexpr_client,
-    materialize_replay,
+    materialize_seed,
 )
 from maths_ai.core.config import settings
 from maths_ai.gnn_inference.atp_lean_gnn.reporting import console_print
-
-_INACCESSIBLE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_']*✝[⁰-⁹¹²³]*")
-_UNIVERSE_PLACEHOLDER_RE = re.compile(r"\b(?:Type|Sort)\s+\?u(?:\.|_)?[0-9]+")
 
 # A Lean identifier usable as a rewrite rule or simp lemma: hypothesis names and
 # dotted lemma names, but not terms like `↑13` or `?m.2235`.
@@ -132,40 +126,6 @@ def render_tactic_command(tactic: TacticCandidate) -> Optional[str]:
     if not arguments:
         return name
     return " ".join([name, *arguments])
-
-
-def _sanitize_replay_spec(spec: GoalReplaySpec) -> GoalReplaySpec:
-    """Replace Lean's "inaccessible name" tokens (e.g. ``p✝``, printed for a
-    binder shadowed by a later one — see ``intro p q p``) with fresh plain
-    identifiers.
-
-    These tokens are pretty-printer output, not valid surface syntax:
-    feeding them back to scoped ``start_goal``/``apply_tactic`` operations is a
-    parse error. Renaming each one consistently across the expression and
-    every hypothesis keeps the goal semantically identical while making it
-    parseable again.
-    """
-    text = " ".join([spec.expression, *spec.local_names])
-    tokens = sorted(set(_INACCESSIBLE_NAME_RE.findall(text)))
-    existing_names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_']*", text))
-    rename: Dict[str, str] = {}
-    for token in tokens:
-        candidate = token.split("✝")[0] + "_"
-        while candidate in existing_names or candidate in rename.values():
-            candidate += "_"
-        rename[token] = candidate
-
-    def substitute(value: str) -> str:
-        value = _INACCESSIBLE_NAME_RE.sub(lambda m: rename[m.group(0)], value)
-        # Extracted pretty states may contain unresolved universe levels such as
-        # ``Type ?u.319125``. They are not term holes and cannot be replayed as
-        # surface Lean syntax, so erase only the level annotation.
-        return _UNIVERSE_PLACEHOLDER_RE.sub("Type", value)
-
-    return GoalReplaySpec(
-        expression=substitute(spec.expression),
-        local_names=tuple(substitute(name) for name in spec.local_names),
-    )
 
 
 def plot_hypergraph(graph: ProofHypergraph) -> None:
@@ -502,26 +462,25 @@ class HybridReasoner:
 
     # Joint search
 
-    async def prove(
-        self, goal: str, *, hypotheses: Optional[List[str]] = None
-    ) -> ProofHypergraph:
+    async def prove(self, seed: LeanGoalSeed) -> ProofHypergraph:
         if self._proving:
             raise PantographStateError("A reasoner supports only one active search.")
         self._proving = True
         try:
             async with self.server.state_scope() as scope:
                 self._scope = scope
-                return await self._prove_scoped(goal, hypotheses=hypotheses)
+                return await self._prove_scoped(seed)
         finally:
             self._scope = None
             self._cached_root_state = None
             self._cached_root_fingerprint = None
             self._proving = False
 
-    async def _prove_scoped(
-        self, goal: str, *, hypotheses: Optional[List[str]] = None
-    ) -> ProofHypergraph:
-        """Run best-first AND-OR search over the hypergraph rooted at ``goal``.
+    async def _prove_scoped(self, seed: LeanGoalSeed) -> ProofHypergraph:
+        """Run best-first AND-OR search over the hypergraph rooted at ``seed``.
+
+        A seed that cannot be replayed faithfully raises ``ReplayInputError``
+        before any search; that is a property of the input, not a failed proof.
 
         Loop: pop the highest-``combined_rank`` open node, expand it
         (``_expand``), which links any new subgoals into the hypergraph —
@@ -543,7 +502,6 @@ class HybridReasoner:
         safeguards. Cycle detection (a subgoal identical to one of its own
         ancestors) is handled inside ``ProofHypergraph.add_edge``.
         """
-        seed = LeanGoalSeed(expression=goal, hypotheses=hypotheses or [])
         root_state, root_goal = await self._materialize_goal(seed)
         graph = ProofHypergraph(root_goal)
         self._cached_root_state = root_state
@@ -584,29 +542,17 @@ class HybridReasoner:
             graph.search_end_reason = SearchEndReason.FRONTIER_EMPTY
         return graph
 
-    async def _start_state(self, goal: Goal | LeanGoalSeed) -> TacticState:
-        replay = (
-            goal.replay_spec() if isinstance(goal, Goal) else seed_replay_spec(goal)
-        )
-        return await self._goal_state_for(_sanitize_replay_spec(replay))
-
-    async def _goal_state_for(self, replay: GoalReplaySpec) -> TacticState:
+    async def _materialize_goal(
+        self, goal: Goal | LeanGoalSeed
+    ) -> tuple[TacticState, Goal]:
+        """Replay a seed or a canonical goal and return the checked live goal."""
         if self._scope is None:
             raise PantographStateError(
                 "Materialization requires an active search scope."
             )
-        return await materialize_replay(self._scope, replay)
-
-    async def _materialize_goal(
-        self, goal: Goal | LeanGoalSeed
-    ) -> tuple[TacticState, Goal]:
-        state = await self._start_state(goal)
-        goals = execution_state_to_goals(state)
-        if len(goals) != 1:
-            raise PantographProtocolError(
-                f"Replaying one search node produced {len(goals)} goals."
-            )
-        return state, goals[0]
+        seed = goal.replay_seed() if isinstance(goal, Goal) else goal
+        state, materialized, _ = await materialize_seed(self._scope, seed)
+        return state, materialized
 
     def _link(
         self,
@@ -657,7 +603,7 @@ class HybridReasoner:
             else:
                 state, materialized = await self._materialize_goal(node.goal)
             node.goal = materialized
-        except (PantographGoalRejected, PantographTacticRejected) as exc:
+        except ReplayInputError as exc:
             graph.mark_node_unelaborated(node.id, note=f"elaboration error: {exc}")
             self._on_expansion_complete(node, ExpansionResult.ELABORATION_ERROR)
             return
@@ -716,18 +662,20 @@ class HybridReasoner:
             print(
                 f"  [Tactic APPLIED] {tactic.tactic_name} {' '.join(tactic.arguments)} (prob={tactic.probability:.4f})"
             )
+            # Successors see the model identity of the goal they came from.
+            subgoals = [carry_model_identity(node.goal, goal) for goal in outcome.subgoals]
 
-            if not outcome.subgoals:
+            if not subgoals:
                 # "no-goal": this tactic fully discharges the goal (QED for this branch)
                 print(f"  [Tactic QED] no subgoals — branch closed!")
                 self._link(graph, node, tactic, ranked_subgoals=[])
                 continue
 
             if self.use_pln:
-                print(f"  [PLN Ranking] scoring {len(outcome.subgoals)} subgoal(s)...")
+                print(f"  [PLN Ranking] scoring {len(subgoals)} subgoal(s)...")
                 ranked = await self.rank_subgoals(
                     node.goal.expression,
-                    outcome.subgoals,
+                    subgoals,
                     tactic,
                     gnn_probability=tactic.probability,
                 )
@@ -750,7 +698,7 @@ class HybridReasoner:
                     graph,
                     node,
                     tactic,
-                    ranked_subgoals=[(subgoal, None) for subgoal in outcome.subgoals],
+                    ranked_subgoals=[(subgoal, None) for subgoal in subgoals],
                 )
 
         if not any_applied and self.use_pln:
@@ -863,7 +811,7 @@ async def main(
             print(repr(h))
         try:
             proof_graph = await hybrid_reasoner.prove(
-                goal_statement, hypotheses=hypotheses
+                seed_from_text(goal=goal_statement, hypotheses=hypotheses or [])
             )
             if proof_graph.is_solved():
                 print("\n✅ Proof found!")
