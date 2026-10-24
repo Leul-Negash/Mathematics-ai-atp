@@ -12,6 +12,7 @@ from maths_ai.gnn_inference.atp_lean_gnn.rl_live_collection import (
     WorkerStartupError,
 )
 from maths_ai.gnn_inference.atp_lean_gnn.rl_resources import ResourcePlan
+from maths_ai.lean_replay import ReplayFailure, ReplayInputError
 from pantograph_async import (
     PantographConfigurationError,
     PantographProtocolError,
@@ -326,6 +327,38 @@ def test_transport_failure_is_not_harvested_and_replaces_before_next_search():
             assert seen[0] is not seen[1] and seen[0].closed
             assert pool.workers[0].reasoner.server is pool.workers[0].server
         assert all(server.closed for server in servers)
+
+    asyncio.run(run())
+
+
+def test_inadmissible_seed_is_recorded_without_replacing_the_worker():
+    async def run():
+        pool, _model, servers = await _create_pool(workers=1)
+        seen = []
+
+        async def search(reasoner, theorem, greedy, deadline):
+            del greedy, deadline
+            seen.append(reasoner.server)
+            if theorem == "unreplayable":
+                raise ReplayInputError(ReplayFailure.LEAN_REJECTED, "unknown identifier")
+            return _Result(theorem)
+
+        pool.search_factory = search
+        async with pool:
+            result = await pool.collect_round(
+                ["unreplayable", "solve-next"], timeout_s=1, model_generation=0
+            )
+            record = result.records[0]
+            assert record.result is None
+            assert record.outcome == "inadmissible"
+            assert record.exception_category == "lean-rejected"
+            assert [r.theorem for r in result.results] == ["solve-next"]
+            assert result.stats["seeds_inadmissible"] == 1.0
+            assert result.stats["searches_failed"] == 0.0
+            # The client is still usable, so the same worker searches the next seed.
+            assert result.stats["workers_replaced"] == 0.0
+            assert seen[0] is seen[1] and not seen[0].closed
+        assert len(servers) == 1
 
     asyncio.run(run())
 

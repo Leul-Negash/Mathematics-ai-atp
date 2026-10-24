@@ -22,6 +22,7 @@ from .parser import (
 )
 from .renderer import build_query, render_formula, validate_formula_shape
 from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_translator
+from maths_ai.lean_replay import render_replay, seed_from_text
 
 
 def is_nonlogical_type_expr(expr: Any) -> bool:
@@ -144,8 +145,9 @@ def essentialize_subgoal(
 
 async def proof_state_after_tactics(client, goal_type: str, tactics: list[str]):
     """Return owned raw-expression projections; no live handle escapes its scope."""
+    replay = render_replay(seed_from_text(goal=goal_type))
     async with client.state_scope() as scope:
-        state = await scope.start_goal(goal_type)
+        state = await scope.start_goal(replay.expression, levels=replay.universe_levels)
         for tactic in tactics or ["skip"]:
             previous = state
             state = await scope.apply_tactic(state, tactic)

@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-import re
 import time
 from collections import deque
 from contextlib import AsyncExitStack
@@ -28,8 +27,9 @@ from typing import Any, Optional
 import torch
 from torch.optim import AdamW
 
-from maths_ai.data_models.proof_components import Goal, LeanGoalSeed
+from maths_ai.data_models.proof_components import Goal
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
+from maths_ai.lean_replay import ReplayInputError
 from pantograph_async import (
     PantographEnv,
     PantographRequestTimeout,
@@ -42,7 +42,7 @@ from .actor_critic import ActorCriticWithArgsClassifier
 from .checkpointing import build_model_from_checkpoint, checkpoint_payload
 from .graph_contract import GraphRepresentationSpec, require_graph_representation
 from .graph import dag_fingerprint, model_goal_to_dag
-from .dataset import DATASET_NAME, iter_dataset_rows
+from .dataset import DATASET_NAME, DATASET_REVISION
 from .pln_reward import RewardConfig
 from .pln_rl_training import make_dag_featurizer, train_step_htps_style, train_step_onpolicy
 from .reporting import console_print
@@ -55,7 +55,16 @@ from .search_harvest import (
     extract_critic_samples,
     extract_minimal_hypertree,
 )
-from .state import parse_state
+from .seed_admission import (
+    AdmissionReport,
+    TheoremItem,
+    ValidationCache,
+    dataset_candidates,
+    environment_identity,
+    file_candidates,
+    preflight,
+    write_report,
+)
 from .training import load_prepared_metadata
 
 
@@ -75,14 +84,22 @@ class RLTrainingConfig:
     warmstart_checkpoint: Path
     prepared_root: Path
 
-    # Theorem sourcing: "dataset" streams LeanDojo proof states; "file" reads a
-    # JSONL of {"goal": str, "hypotheses": [str, ...]} rows.
+    # Theorem sourcing: "dataset" replays rows from their raw expression and
+    # local-context columns; "file" reads a JSONL of
+    # {"goal": str, "hypotheses": [declaration, ...], "tactic"?: str} rows.
     data_source: str = "dataset"
     theorem_file: Path | None = None
     dataset_name: str = DATASET_NAME
+    dataset_revision: str | None = DATASET_REVISION
     leandojo_split: str = "train"
     max_pool_size: int = 5000
     max_state_chars: int | None = 400
+    # Admission: rows read from the source, independent of the pool size, and
+    # the wall-clock budget for replaying candidates in Lean before training.
+    max_scan_rows: int = 20000
+    max_replay_chars: int | None = 50000
+    admission_time_budget_s: float = 1800.0
+    seed_cache_path: Path | None = None
     eval_pool_size: int = 200
     seed: int = 42
 
@@ -174,8 +191,8 @@ class RLTrainingConfig:
     server_timeout_s: int = 120
 
     _PATH_FIELDS = (
-        "warmstart_checkpoint", "prepared_root", "theorem_file", "run_root",
-        "source_root", "pantograph_repl",
+        "warmstart_checkpoint", "prepared_root", "theorem_file", "seed_cache_path",
+        "run_root", "source_root", "pantograph_repl",
     )
 
     def __post_init__(self) -> None:
@@ -264,39 +281,6 @@ def search_settings(cfg: RLTrainingConfig) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class TheoremItem:
-    goal: LeanGoalSeed
-    tactic_label: str  # ground-truth tactic from the dataset row ("" in file mode)
-    size: int
-
-
-# Universe placeholders such as ``?u.319125`` are emitted in extracted type
-# annotations and are not unresolved term metavariables.
-_UNIVERSE_METAVARIABLE_RE = re.compile(r"\?u(?:\.|_)?[0-9]+")
-_METAVARIABLE_RE = re.compile(r"\?m\.\d+|\?[a-zA-Z_][a-zA-Z0-9_]*\b")
-
-
-def _has_metavariable(goal: LeanGoalSeed) -> bool:
-    """Return whether a goal or hypothesis contains an unresolved term hole."""
-    def has_term_metavariable(text: str) -> bool:
-        without_universes = _UNIVERSE_METAVARIABLE_RE.sub("", text)
-        return _METAVARIABLE_RE.search(without_universes) is not None
-
-    if has_term_metavariable(goal.expression):
-        return True
-    return any(has_term_metavariable(hypothesis) for hypothesis in goal.hypotheses)
-
-
-def _row_state_to_goal(state_str: str) -> LeanGoalSeed:
-    """Convert a dataset proof-state string into an unelaborated theorem seed."""
-    parsed = parse_state(state_str)
-    return LeanGoalSeed(
-        expression=parsed.goal,
-        hypotheses=[f"{h.name} : {h.type_expr}" for h in parsed.hypotheses],
-    )
-
-
 class TheoremPool:
     """Size-sorted pool of rollout roots with a sliding curriculum window.
 
@@ -330,69 +314,83 @@ class TheoremPool:
         self.curriculum_size = min(int(self.curriculum_size * factor) or 1, len(self.train_items))
 
 
-def build_theorem_pool(cfg: RLTrainingConfig) -> TheoremPool:
-    """Build the pool from the configured source (dataset stream or JSONL file)."""
-    items: list[TheoremItem] = []
-    dropped = 0
+async def build_theorem_pool(
+    cfg: RLTrainingConfig,
+    env: PantographEnv,
+    *,
+    report_dir: Path | None = None,
+    client_factory=None,
+) -> TheoremPool:
+    """Build the pool from Lean-validated seeds of the configured source.
 
+    A dedicated preflight client (not a collection worker's scope) replays the
+    candidates. Rows that cannot be reconstructed are quarantined with their
+    reason and written to a new report in ``report_dir``; they never enter
+    the pool.
+    """
+    report = AdmissionReport()
+    report.environment = environment_identity(env)
     if cfg.data_source == "file":
         if cfg.theorem_file is None:
             raise ValueError("data_source='file' requires theorem_file")
-        with open(cfg.theorem_file) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                row = json.loads(line)
-                goal = LeanGoalSeed(
-                    expression=row["goal"], hypotheses=row.get("hypotheses", [])
-                )
-                size = len(goal.expression) + sum(len(h) for h in goal.hypotheses)
-                if cfg.max_state_chars is not None and size > cfg.max_state_chars:
-                    dropped += 1
-                    continue
-                if _has_metavariable(goal):
-                    dropped += 1
-                    continue
-                items.append(TheoremItem(goal=goal, tactic_label=row.get("tactic", ""), size=size))
-                if len(items) >= cfg.max_pool_size:
-                    break
+        candidates = file_candidates(
+            cfg.theorem_file,
+            max_scan_rows=cfg.max_scan_rows,
+            max_state_chars=cfg.max_state_chars,
+            report=report,
+        )
     elif cfg.data_source == "dataset":
-        for row in iter_dataset_rows(
+        candidates = dataset_candidates(
             dataset_name=cfg.dataset_name,
             split=cfg.leandojo_split,
-            sample_limit=cfg.max_pool_size * 2,
-        ):
-            state_str = (row.state or "").strip()
-            if not state_str or (
-                cfg.max_state_chars is not None and len(state_str) > cfg.max_state_chars
-            ):
-                dropped += 1
-                continue
-            try:
-                goal = _row_state_to_goal(state_str)
-            except Exception:
-                dropped += 1
-                continue
-            if not goal.expression:
-                dropped += 1
-                continue
-            if _has_metavariable(goal):
-                dropped += 1
-                continue
-            items.append(TheoremItem(goal=goal, tactic_label=row.tactic or "", size=len(state_str)))
-            if len(items) >= cfg.max_pool_size:
-                break
+            revision=cfg.dataset_revision,
+            max_scan_rows=cfg.max_scan_rows,
+            max_state_chars=cfg.max_state_chars,
+            report=report,
+        )
     else:
         raise ValueError(f"Unknown data_source '{cfg.data_source}' (use 'dataset' or 'file')")
-
-    console_print(f"Theorem pool: {len(items)} usable states, {dropped} dropped.")
+    cache = ValidationCache(cfg.seed_cache_path, report.environment)
+    items = await preflight(
+        candidates,
+        client_factory or (lambda: create_model_sexpr_client(env)),
+        max_admitted=cfg.max_pool_size,
+        time_budget_s=cfg.admission_time_budget_s,
+        report=report,
+        cache=cache,
+        max_replay_chars=cfg.max_replay_chars,
+    )
+    console_print(report.summary())
+    if report_dir is not None:
+        console_print(f"Admission report: {write_report(report, report_dir)}")
+    if not items:
+        raise RuntimeError(
+            "No seed passed Lean validation; see the admission report for the "
+            "quarantine reasons. Training on an empty pool would only hide them."
+        )
+    if len(items) < cfg.max_pool_size:
+        console_print(
+            f"Pool is undersized: {len(items)} validated seeds of the "
+            f"{cfg.max_pool_size} requested."
+        )
     return TheoremPool(
         items,
         eval_pool_size=cfg.eval_pool_size,
         curriculum_size=cfg.curriculum_start_size,
         seed=cfg.seed,
     )
+
+
+def _describe(item: TheoremItem) -> str:
+    source = item.seed.source_dict
+    label = source.get("theorem") or source.get("file") or "seed"
+    where = source.get("row_index", source.get("line"))
+    return f"{label}#{where}" if where is not None else str(label)
+
+
+def _searched(stats: dict[str, float]) -> float:
+    """Inputs that were actually searched: a seed that failed to replay was not."""
+    return stats["attempted"] - stats.get("seeds_inadmissible", 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -450,25 +448,25 @@ async def collect_round(
     failed = 0
     cooperative_deadlines = 0
     hard_timeouts = 0
+    inadmissible = 0
     for item in batch:
         try:
             deadline = time.monotonic() + timeout_s
             async with asyncio.timeout(timeout_s * 1.25):
-                result = await reasoner.prove(
-                    item.goal.expression,
-                    hypotheses=item.goal.hypotheses,
-                    greedy=greedy,
-                    deadline=deadline,
-                )
+                result = await reasoner.prove(item.seed, greedy=greedy, deadline=deadline)
             results.append(result)
             if result.graph.is_solved():
                 solved += 1
             if result.graph.end_reason == SearchEndReason.DEADLINE:
                 cooperative_deadlines += 1
+        except ReplayInputError as exc:
+            # The seed itself failed to replay: no search ran, so nothing is learned.
+            inadmissible += 1
+            console_print(f"  [collect] inadmissible seed {_describe(item)}: {exc}")
         except (asyncio.TimeoutError, PantographRequestTimeout) as exc:
             failed += 1
             hard_timeouts += 1
-            console_print(f"  [collect] timeout on: {item.goal.expression[:60]}")
+            console_print(f"  [collect] timeout on: {_describe(item)}")
             server = getattr(reasoner, "server", None)
             if server is not None and not server.is_usable:
                 raise PantographTransportError(
@@ -479,7 +477,7 @@ async def collect_round(
             raise
         except Exception as exc:  # noqa: BLE001 — a single search may not kill the run
             failed += 1
-            console_print(f"  [collect] error on: {item.goal.expression[:60]} — {exc}")
+            console_print(f"  [collect] error on: {_describe(item)} — {exc}")
     stats = {
         "attempted": float(len(batch)),
         "collected": float(len(results)),
@@ -487,6 +485,7 @@ async def collect_round(
         "searches_failed": float(failed),
         "searches_cooperative_deadline": float(cooperative_deadlines),
         "searches_hard_timed_out": float(hard_timeouts),
+        "seeds_inadmissible": float(inadmissible),
     }
     return results, stats
 
@@ -598,12 +597,12 @@ async def evaluate_proof_rate(
     finally:
         if was_training:
             reasoner.model.train()
-    attempted = stats["attempted"] or 1.0
     return {
-        "proof_rate": stats["solved"] / attempted,
+        "proof_rate": stats["solved"] / (_searched(stats) or 1.0),
         "solved": stats["solved"],
         "attempted": stats["attempted"],
         "searches_failed": stats["searches_failed"],
+        "seeds_inadmissible": stats.get("seeds_inadmissible", 0.0),
     }
 
 
@@ -655,12 +654,7 @@ async def _create_live_reasoner_pool(
         )
 
     async def search_factory(reasoner, theorem, greedy, deadline):
-        return await reasoner.prove(
-            theorem.goal.expression,
-            hypotheses=theorem.goal.hypotheses,
-            greedy=greedy,
-            deadline=deadline,
-        )
+        return await reasoner.prove(theorem.seed, greedy=greedy, deadline=deadline)
 
     return await LiveReasonerPool.create(
         model=model,
@@ -855,11 +849,15 @@ async def _run_rl_training_impl(
         await live_stack.enter_async_context(live_reasoner_pool)
         reasoner = live_reasoner_pool.primary
     else:
+        env = None
         reasoner = reasoner_factory(model, node_vocab, tactic_vocab, cfg)
 
-    # Theorem pool (injectable for tests).
+    # Theorem pool (injectable for tests), validated by its own preflight
+    # client before any collection worker uses it.
     if pool is None:
-        pool = build_theorem_pool(cfg)
+        if env is None:
+            raise ValueError("Building a pool needs the live Pantograph environment.")
+        pool = await build_theorem_pool(cfg, env, report_dir=run_dir / "admission")
     if curriculum_size_override:
         pool.curriculum_size = min(curriculum_size_override, len(pool.train_items))
     console_print(
@@ -1026,12 +1024,17 @@ async def _run_rl_training_impl(
                 f"{cfg.source_root}."
             )
 
-        # Curriculum: grow when the recent training-window solve rate crosses threshold.
-        solve_rate = collect_stats["solved"] / (collect_stats["attempted"] or 1.0)
-        recent_solve_rates.append(solve_rate)
-        if len(recent_solve_rates) > cfg.curriculum_window_rounds:
-            recent_solve_rates.pop(0)
-        window_rate = sum(recent_solve_rates) / len(recent_solve_rates)
+        # Curriculum: grow when the recent training-window solve rate crosses
+        # threshold. Only searched seeds count, and a round that searched
+        # nothing leaves the window as it was rather than adding a zero.
+        searched = _searched(collect_stats)
+        if searched > 0:
+            recent_solve_rates.append(collect_stats["solved"] / searched)
+            if len(recent_solve_rates) > cfg.curriculum_window_rounds:
+                recent_solve_rates.pop(0)
+        window_rate = (
+            sum(recent_solve_rates) / len(recent_solve_rates) if recent_solve_rates else 0.0
+        )
         if (
             len(recent_solve_rates) >= cfg.curriculum_window_rounds
             and window_rate >= cfg.curriculum_solve_threshold
@@ -1054,6 +1057,7 @@ async def _run_rl_training_impl(
         console_print(
             f"Round {round_idx}: solved {collect_stats['solved']:.0f}/{collect_stats['attempted']:.0f}, "
             f"trans {metrics.get('num_transitions', 0):.0f}, fail {metrics.get('num_failures', 0):.0f}, "
+            f"inadm {collect_stats.get('seeds_inadmissible', 0):.0f}, "
             f"return {metrics.get('mean_return', 0.0):.3f}, loss {metrics.get('total_loss', 0.0):.3f}, "
             f"bc {bc_weight:.3f}, {row['wall_clock_s']:.1f}s"
         )
@@ -1134,6 +1138,12 @@ def driver_main(argv: list[str] | None = None) -> int:
         default=None,
         help="Hugging Face dataset identifier used for dataset-mode theorem streaming",
     )
+    parser.add_argument(
+        "--dataset-revision",
+        type=str,
+        default=None,
+        help="Dataset commit to read (default: the pinned DATASET_REVISION)",
+    )
     parser.add_argument("--resume", type=str, default=None, help="Run directory to resume (contains last.pt)")
     parser.add_argument("--eval-only", action="store_true", help="Only run the greedy proof-rate evaluation")
     parser.add_argument("--checkpoint", type=str, default=None,
@@ -1143,6 +1153,8 @@ def driver_main(argv: list[str] | None = None) -> int:
     cfg = RLTrainingConfig.from_json(args.config)
     if args.dataset_name:
         cfg.dataset_name = args.dataset_name
+    if args.dataset_revision:
+        cfg.dataset_revision = args.dataset_revision
     if args.eval_only:
         if args.checkpoint:
             cfg.warmstart_checkpoint = Path(args.checkpoint)
@@ -1184,7 +1196,7 @@ def driver_main(argv: list[str] | None = None) -> int:
                 model_generation=0,
             )
             async with live_pool:
-                theorem_pool = build_theorem_pool(cfg)
+                theorem_pool = await build_theorem_pool(cfg, environment)
                 live_pool.assert_generation(0)
                 stats = await evaluate_proof_rate(
                     live_pool.primary,

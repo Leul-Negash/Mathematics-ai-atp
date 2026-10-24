@@ -478,14 +478,15 @@ collect → on-policy step (one `optimizer.step()`) → N decoupled steps
 
 ```
 warm start (strict load of the supervised actor-critic best.pt)
-pool ← LeanDojo proof states (parse_state), size-sorted, eval set held out
+pool ← Lean-validated typed seeds (seed_admission.preflight), size-sorted, eval set held out
 for round in 0..num_rounds:
     batch    ← sample from the curriculum window (easy prefix of the sorted pool)
     results  ← collect_round(reasoner, batch)        # sequential, fault-isolated
     metrics  ← train_step_onpolicy(..., bc_weight=anneal(round))   # ONE optimizer.step()
     [HTPS mode] extract_minimal_hypertree + extract_critic_samples → fill queues
     [HTPS mode] train_step_htps_style × htps_steps_per_round
-    window widens when the recent solve rate ≥ threshold
+    window widens when the recent solve rate ≥ threshold (searched seeds only;
+             a round that searched nothing leaves the window unchanged)
     last.pt every checkpoint_every rounds (model+optimizer+RNG+round → resumable)
     every eval_every rounds: greedy proof rate on the fixed eval pool → best.pt on improvement
 ```

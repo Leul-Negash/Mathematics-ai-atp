@@ -24,19 +24,23 @@ from pantograph_async.probes import require
 
 from maths_ai.core.git_worktree import dirty_provenance, read_status
 from maths_ai.data_models.proof_components import TacticCandidate
+from maths_ai.lean_replay import seed_from_text
 
 from .hypergraph import EdgeStatus, NodeStatus, SearchEndReason
 from .joint_inference import HybridReasoner, PantographExecutor
-from .pantograph_adapter import execution_goal_to_goal
 from .pantograph_diagnostics import verify_live_application
-from .pantograph_model_sexpr import create_model_sexpr_client
+from .pantograph_model_sexpr import create_model_sexpr_client, materialize_seed
 
+
+# The theorems the live checks search, as the typed seeds search accepts.
+CONJUNCTION = seed_from_text(goal="True ∧ True")
+IDENTITY = seed_from_text(goal="∀ (p : Prop), p → p")
 
 TARGET_BRANCH = "MCTS-AC-branch"
-TARGET_BASE_COMMIT = "89a2417e522720d2cfe3f2e6218614e4d828c8de"
-APPLICATION_SOURCE_COMMIT = "72c82ce13d62f132ee1939d8e92641c100f4c418"
+TARGET_BASE_COMMIT = "f21d04409ebe80167358360aead4e44c4a06cffb"
+APPLICATION_SOURCE_COMMIT = "54d7cefe04aed980734798f06528ed80c71b81ac"
 CLIENT_REPOSITORY = "https://github.com/123nol/Pantograph-Client"
-CLIENT_COMMIT = "664bcaa10578cb933afc618b8e8cb20a1b751106"
+CLIENT_COMMIT = "d1dac7e8a8ea296192e7a5b2616114b73e0812b7"
 GOLDEN_PATH = (
     Path(__file__).parents[1]
     / "gnn_inference/tests/fixtures/pantograph/canonical_graph_expectations.json"
@@ -53,6 +57,19 @@ SEARCH_SOURCES = (
     "maths_ai/hybrid_reasoner/pantograph_adapter.py",
     "maths_ai/hybrid_reasoner/pantograph_model_sexpr.py",
     "maths_ai/hybrid_reasoner/pantograph_diagnostics.py",
+    "maths_ai/data_models/model_identity.py",
+    "maths_ai/data_models/proof_components.py",
+    "maths_ai/gnn_inference/atp_lean_gnn/inference.py",
+    "maths_ai/gnn_inference/atp_lean_gnn/seed_admission.py",
+    "maths_ai/lean_replay/columns.py",
+    "maths_ai/lean_replay/errors.py",
+    "maths_ai/lean_replay/lexer.py",
+    "maths_ai/lean_replay/raw.py",
+    "maths_ai/lean_replay/seed.py",
+    "maths_ai/lean_replay/sexp.py",
+    "maths_ai/lean_replay/text.py",
+    "maths_ai/lean_replay/universe.py",
+    "maths_ai/lean_replay/validation.py",
 )
 # Each leaf tries an elaboration failure and an admission before the tactic
 # that closes it, so every leaf runs several alternatives on one state.
@@ -149,7 +166,7 @@ async def verify_mcts_search(client: PantographClient, *, searches: int = 20) ->
     checks = []
 
     reasoner = _puct_reasoner(client)
-    graph = await reasoner.prove("True ∧ True")
+    graph = await reasoner.prove(CONJUNCTION)
     require(graph.is_solved(), "PUCT search did not prove the conjunction.")
     require(
         any(len(batch) > 1 for batch in reasoner.proposal_batches),
@@ -183,7 +200,7 @@ async def verify_mcts_search(client: PantographClient, *, searches: int = 20) ->
     ]
 
     best_first = ScriptedSearchReasoner(client, IDENTITY_SCRIPT, max_depth=4)
-    graph = await best_first.prove("∀ (p : Prop), p → p")
+    graph = await best_first.prove(IDENTITY)
     require(graph.is_solved(), "Best-first search did not prove the identity.")
     root_edge = graph.edges[graph.nodes[graph.root_id].outgoing_edge_ids[0]]
     require(root_edge.status == EdgeStatus.SOLVED, "Identity edge stayed unsolved.")
@@ -194,7 +211,7 @@ async def verify_mcts_search(client: PantographClient, *, searches: int = 20) ->
     checks.append("best-first-graph-equivalence")
 
     cutoff = _FirstBatchCutoff(client, CONJUNCTION_SCRIPT, **PUCT_SETTINGS)
-    graph = await cutoff.prove("True ∧ True", deadline=0.0)
+    graph = await cutoff.prove(CONJUNCTION, deadline=0.0)
     require(
         graph.end_reason == SearchEndReason.DEADLINE and not graph.is_solved(),
         "Cooperative cutoff did not end the search with a partial graph.",
@@ -210,7 +227,7 @@ async def verify_mcts_search(client: PantographClient, *, searches: int = 20) ->
     checks.append("cooperative-deadline-scope-closure")
 
     for _ in range(searches):
-        graph = await _puct_reasoner(client).prove("True ∧ True")
+        graph = await _puct_reasoner(client).prove(CONJUNCTION)
         require(graph.is_solved(), "A repeated PUCT search failed.")
         require(
             (await client.stat()).n_goals == baseline,
@@ -271,7 +288,7 @@ async def verify_shared_device_workers(env: PantographEnv) -> list[str]:
         )
         pool.assert_generation(0)
         result = await pool.collect_round(
-            ["True ∧ True"] * 4, timeout_s=120, model_generation=0
+            [CONJUNCTION] * 4, timeout_s=120, model_generation=0
         )
         require(result.stats["solved"] == 4, "Pool workers did not prove every theorem.")
         for client in clients:
@@ -295,7 +312,6 @@ async def verify_learning_round(client: PantographClient) -> dict:
     import torch
     from torch.optim import AdamW
 
-    from maths_ai.data_models.proof_components import LeanGoalSeed, seed_replay_spec
     from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
     from maths_ai.gnn_inference.atp_lean_gnn.model_factory import build_actor_critic_model
     from maths_ai.gnn_inference.atp_lean_gnn.model_spec import ModelSpec
@@ -312,11 +328,8 @@ async def verify_learning_round(client: PantographClient) -> dict:
         extract_minimal_hypertree,
     )
 
-    from .pantograph_model_sexpr import materialize_replay
-
     async with client.state_scope() as scope:
-        seed = seed_replay_spec(LeanGoalSeed(expression="True ∧ True"))
-        root = execution_goal_to_goal((await materialize_replay(scope, seed)).goals[0])
+        _, root, _ = await materialize_seed(scope, CONJUNCTION)
     # Successor states add structural labels the seed goal lacks.
     node_vocab = build_vocab_from_labels(
         [
@@ -357,7 +370,7 @@ async def verify_learning_round(client: PantographClient) -> dict:
             **PUCT_SETTINGS,
         )
         baseline = (await client.stat()).n_goals
-        result = await reasoner.prove("True ∧ True")
+        result = await reasoner.prove(CONJUNCTION)
         require((await client.stat()).n_goals == baseline, "Learning search leaked states.")
         require(
             bool(result.edge_actions or result.failure_actions),

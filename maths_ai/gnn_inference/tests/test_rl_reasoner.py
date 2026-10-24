@@ -11,6 +11,7 @@ from torch.optim import AdamW
 from torch_geometric.data import Batch
 
 from maths_ai.data_models.proof_components import STV, TacticCandidate
+from maths_ai.lean_replay import seed_from_text
 from maths_ai.hybrid_reasoner.hypergraph import (
     ProofHypergraph,
     SearchEndReason,
@@ -147,6 +148,7 @@ class _StubPLN:
 TACTIC_VOCAB = {"trivial": 0, "intro": 1, "exact": 2}
 GOAL_EXPR = "p → p"
 HYPS = ["p : Prop"]
+SEED = seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)
 
 
 def _make_reasoner(executor, *, top_k=3, seed=0, reasoner_cls=RLHybridReasoner, **search_kwargs):
@@ -190,9 +192,9 @@ class DecodeTests(unittest.TestCase):
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
         )
-        from maths_ai.gnn_inference.atp_lean_gnn.inference import _local_names_by_fv_label
+        from maths_ai.gnn_inference.atp_lean_gnn.inference import local_declarations
         candidate, action = reasoner._decode(
-            sample, dag, _local_names_by_fv_label(dag), str(data.graph_fingerprint)
+            sample, dag, local_declarations(goal), str(data.graph_fingerprint)
         )
         self.assertEqual(candidate.tactic_name, "exact")
         self.assertEqual(candidate.arguments, ["p"])
@@ -214,18 +216,118 @@ class DecodeTests(unittest.TestCase):
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
         )
-        from maths_ai.gnn_inference.atp_lean_gnn.inference import _local_names_by_fv_label
+        from maths_ai.gnn_inference.atp_lean_gnn.inference import local_declarations
         candidate, action = reasoner._decode(
-            sample, dag, _local_names_by_fv_label(dag), str(data.graph_fingerprint)
+            sample, dag, local_declarations(goal), str(data.graph_fingerprint)
         )
         self.assertIsNone(candidate)
         self.assertEqual(action.arg_indices, (oob,))
         self.assertEqual(action.graph_fingerprint, str(data.graph_fingerprint))
 
 
+class DeclarationResolutionTests(unittest.TestCase):
+    """A sampled local resolves to the live declaration it denotes, not by name."""
+
+    @staticmethod
+    def _sample(indices):
+        """One ``exact`` draw per batch row, each selecting ``indices[row]``."""
+        rows = len(indices)
+        return ActionSample(
+            tactic_action=torch.tensor([2] * rows),  # "exact"
+            tactic_logp=torch.tensor([-0.5] * rows),
+            tactic_entropy=torch.tensor([1.0] * rows),
+            arg_actions=[torch.tensor(indices)],
+            arg_logp=torch.tensor([-0.3] * rows),
+            value=torch.tensor([0.0] * rows),
+            tactic_logits=torch.zeros(rows, 3),
+        )
+
+    @staticmethod
+    def _positions(dag, label):
+        """The FV node with ``label`` and the structured ``Hyp`` that declares it."""
+        fv = next(i for i, n in enumerate(dag.nodes) if n.label == label)
+        hyp = next(
+            i
+            for i, n in enumerate(dag.nodes)
+            if n.label == "Hyp" and n.children and n.children[0] == fv
+        )
+        return hyp, fv
+
+    def test_review_case_through_rl_decoding_for_hyp_and_fv_candidates(self):
+        from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
+        from maths_ai.gnn_inference.atp_lean_gnn.inference import local_declarations
+        from maths_ai.gnn_inference.tests.test_model_identity import (
+            after_intro_x,
+            outer_aliased,
+        )
+
+        reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
+        child = after_intro_x(outer_aliased())
+        dag = model_goal_to_dag(child)
+        declarations = local_declarations(child)
+
+        for label, live in (("FV5", "x_1"), ("FV6", "x")):
+            for index in self._positions(dag, label):
+                candidate, _ = reasoner._decode(
+                    self._sample([index]), dag, declarations, "fingerprint"
+                )
+                self.assertEqual(candidate.arguments, [live])
+
+    def test_batched_leaves_resolve_through_their_own_declarations(self):
+        """Two leaves with the same model names but different live names, in one
+        policy batch: each row resolves only through its own goal's locals."""
+        from maths_ai.data_models.model_identity import with_model_identity
+        from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
+        from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab
+        from maths_ai.gnn_inference.tests.test_model_identity import (
+            after_intro_x,
+            goal,
+            local,
+            outer_aliased,
+        )
+
+        first = after_intro_x(outer_aliased())
+        replayed = goal(
+            [local("y_1", "_live.3", 0), local("z", "_live.4", 1)],
+            target="(:app (:c Eq) (:fv FV0) (:fv FV0))",
+        )
+        second = with_model_identity(
+            replayed, [(l.user_name, l.context_index) for l in first.locals]
+        )
+        self.assertEqual(
+            [l.user_name for l in first.locals], [l.user_name for l in second.locals]
+        )
+        node_vocab = build_vocab([model_goal_to_dag(first), model_goal_to_dag(second)])
+        reasoner = RLHybridReasoner(
+            actor_critic(len(node_vocab), len(TACTIC_VOCAB)),
+            node_vocab,
+            TACTIC_VOCAB,
+            executor=_QEDExecutor(),
+            top_k_tactics=1,
+        )
+        reasoner.petta_chainer = _StubPLN()
+
+        for label, expected in (("FV5", ["x_1", "y_1"]), ("FV6", ["x", "z"])):
+            for kind in (0, 1):  # the Hyp candidate, then the free variable
+                indices = [
+                    self._positions(model_goal_to_dag(leaf), label)[kind]
+                    for leaf in (first, second)
+                ]
+                reasoner._pending = {}
+                reasoner.model.act = lambda *_args, **_kwargs: self._sample(indices)
+                proposals = reasoner._predict_next_tactics_batch(
+                    [first, second], node_ids=[1, 2]
+                )
+                self.assertEqual(
+                    [row[0].arguments[0] for row in proposals], expected, (label, kind)
+                )
+                # Each row's draw is owned by its own node.
+                self.assertEqual(sorted(reasoner._pending), [1, 2])
+
+
 class RolloutTests(unittest.TestCase):
     def _prove(self, reasoner):
-        return asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        return asyncio.run(reasoner.prove(SEED))
 
     def test_qed_rollout_stash_migrates_to_edge_ids(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
@@ -287,7 +389,7 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_train_step_onpolicy_updates_params(self):
         reasoner, model, _vocab = _make_reasoner(_QEDExecutor())
-        result = asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        result = asyncio.run(reasoner.prove(SEED))
 
         optimizer = AdamW(model.parameters(), lr=0.01)
         before = [p.detach().clone() for p in model.parameters()]
@@ -303,7 +405,7 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_failure_only_batch_is_actor_only(self):
         reasoner, model, _vocab = _make_reasoner(_RejectExecutor())
-        result = asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        result = asyncio.run(reasoner.prove(SEED))
         self.assertGreater(len(result.failure_actions), 0)
 
         loss_result = compute_onpolicy_loss(
@@ -318,7 +420,7 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_multiplicity_weights_actor_term(self):
         reasoner, model, _vocab = _make_reasoner(_QEDExecutor())
-        result = asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        result = asyncio.run(reasoner.prove(SEED))
         transitions = extract_transitions(
             result.graph, RewardConfig(step_penalty=0.0),
             edge_ids=list(result.edge_actions.keys()),
@@ -354,7 +456,7 @@ class MCTSSearchTests(unittest.TestCase):
     ROOT = GOAL_EXPR  # "p → p"
 
     def _prove(self, reasoner):
-        return asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        return asyncio.run(reasoner.prove(SEED))
 
     def test_default_legacy_loop_never_touches_visit_stats(self):
         # selection_policy="legacy" (default): the best-first loop runs
@@ -457,7 +559,7 @@ class MCTSSearchTests(unittest.TestCase):
             selection_policy="puct", num_simulations=6, sim_batch_size=2,
         )
         result = asyncio.run(
-            reasoner.prove(GOAL_EXPR, hypotheses=HYPS, deadline=time.monotonic() - 1.0)
+            reasoner.prove(SEED, deadline=time.monotonic() - 1.0)
         )
         # The loop stopped before the first simulation batch: only the root
         # exists, unexpanded, and the partial graph came back instead of an error.
@@ -623,7 +725,7 @@ class PLNDisabledTests(unittest.TestCase):
     """use_pln=False: no PLN objects exist, no petta subprocess, terminal-only reward."""
 
     def _prove(self, reasoner):
-        return asyncio.run(reasoner.prove(GOAL_EXPR, hypotheses=HYPS))
+        return asyncio.run(reasoner.prove(SEED))
 
     def test_no_pln_objects_constructed(self):
         # use_pln=False: petta_chainer and dts_sampler must both be None —
