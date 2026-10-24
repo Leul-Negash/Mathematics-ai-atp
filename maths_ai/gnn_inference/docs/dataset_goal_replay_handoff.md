@@ -75,7 +75,16 @@ tactic arguments are translated back to live names; live tests cover gapped
 rows (5, 7), the instance-heavy row 41, row 74 (its local `x` is renamed for
 Lean because a nested `∀ x` refers to it, while the model keeps `x`), a successor with a new local, a
 re-materialized successor, and a full search whose root and child nodes keep
-the source identity. Offline, on 400 sampled rows, 20 of 348 renderable seeds
+the source identity.
+
+Tactic arguments are resolved by model context label through a complete
+label-to-live-declaration map, not by display name. The review case (outer `x`
+aliased to `x_1` for Lean, then `intro x`) is covered offline for `Hyp` and
+`FV` candidates through RL decoding and the inference resolver, after
+re-materialization, and for shadowing twice, explicit renaming, removal and
+alternative branches; live, `revert` of each resolved name removes exactly the
+selected declaration, before and after re-materialization and on a second
+branch. Offline, on 400 sampled rows, 20 of 348 renderable seeds
 rename a local (21 locals in all), each to keep a nested binder's name, and
 each keeps its source name for the model.
 
@@ -112,8 +121,8 @@ Tests, run with GNU `stdbuf` first on `PATH`:
 
 | Run | Result |
 | --- | --- |
-| `maths_ai` and `tests` | 409 passed, 8 skipped, 5 failed; the same 5 fail at the base (worker-count config test, `stdbuf` path test on this host, 3 Thompson-sampler tests) |
-| Live with Mathlib (`--run-pantograph-live`) | `test_pantograph_client_live.py` 2 passed; `test_dataset_replay.py` 4 passed, 1 skipped without prepared artifacts (structured repairs and rejections, exact prepared graphs, successors and re-materialization, capture checks, a full search, universes, canonical, branch and cancelled replays, cleanup) |
+| `maths_ai` and `tests` | 413 passed, 9 skipped, 5 failed; the same 5 fail at the base (worker-count config test, `stdbuf` path test on this host, 3 Thompson-sampler tests) |
+| Live with Mathlib (`--run-pantograph-live`) | `test_pantograph_client_live.py` 2 passed; `test_dataset_replay.py` 5 passed, 1 skipped without prepared artifacts (structured repairs and rejections, declaration resolution after intro, re-materialization and on a second branch, exact prepared graphs, successors and re-materialization, capture checks, a full search, universes, canonical, branch and cancelled replays, cleanup) |
 | `rl_smoke` (live) | one on-policy optimizer step, finite losses |
 | Translator `test_imports` | passed |
 | Client suite | 425 with live tests (3 skipped without a companion checkout), sdist/wheel check, 427 from the sdist against the wheel |

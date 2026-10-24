@@ -165,12 +165,10 @@ class DecodeTests(unittest.TestCase):
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
         )
-        from maths_ai.gnn_inference.atp_lean_gnn.inference import (
-            _local_names_by_fv_label,
-        )
+        from maths_ai.gnn_inference.atp_lean_gnn.inference import local_declarations
 
         candidate, action = reasoner._decode(
-            sample, dag, _local_names_by_fv_label(dag), data.graph_fingerprint
+            sample, dag, local_declarations(goal), data.graph_fingerprint
         )
         self.assertEqual(candidate.tactic_name, "exact")
         self.assertEqual(candidate.arguments, ["p"])
@@ -192,12 +190,10 @@ class DecodeTests(unittest.TestCase):
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
         )
-        from maths_ai.gnn_inference.atp_lean_gnn.inference import (
-            _local_names_by_fv_label,
-        )
+        from maths_ai.gnn_inference.atp_lean_gnn.inference import local_declarations
 
         candidate, action = reasoner._decode(
-            sample, dag, _local_names_by_fv_label(dag), data.graph_fingerprint
+            sample, dag, local_declarations(goal), data.graph_fingerprint
         )
         self.assertIsNone(candidate)
         self.assertEqual(action.arg_indices, (oob,))
@@ -216,16 +212,54 @@ class DecodeTests(unittest.TestCase):
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
         )
-        from maths_ai.gnn_inference.atp_lean_gnn.inference import (
-            _local_names_by_fv_label,
-        )
+        from maths_ai.gnn_inference.atp_lean_gnn.inference import local_declarations
 
         candidate, action = reasoner._decode(
-            sample, dag, _local_names_by_fv_label(dag), data.graph_fingerprint
+            sample, dag, local_declarations(goal), data.graph_fingerprint
         )
         self.assertIsNone(candidate)
         self.assertEqual(action.arg_indices, (hyp_idx,))
         self.assertEqual(action.graph_fingerprint, data.graph_fingerprint)
+
+
+class DeclarationResolutionTests(unittest.TestCase):
+    """A sampled local resolves to the live declaration it denotes, not by name."""
+
+    def test_review_case_through_rl_decoding_for_hyp_and_fv_candidates(self):
+        from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
+        from maths_ai.gnn_inference.atp_lean_gnn.inference import local_declarations
+        from maths_ai.gnn_inference.tests.test_model_identity import (
+            after_intro_x,
+            outer_aliased,
+        )
+
+        reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
+        child = after_intro_x(outer_aliased())
+        dag = model_goal_to_dag(child)
+        declarations = local_declarations(child)
+
+        def decode(index):
+            sample = ActionSample(
+                tactic_action=torch.tensor([2]),  # "exact"
+                tactic_logp=torch.tensor([-0.5]),
+                tactic_entropy=torch.tensor([1.0]),
+                arg_actions=[torch.tensor([index])],
+                arg_logp=torch.tensor([-0.3]),
+                value=torch.tensor([0.0]),
+                tactic_logits=torch.zeros(1, 3),
+            )
+            candidate, _ = reasoner._decode(sample, dag, declarations, "fingerprint")
+            return candidate.arguments
+
+        for label, live in (("FV5", "x_1"), ("FV6", "x")):
+            fv = next(i for i, n in enumerate(dag.nodes) if n.label == label)
+            hyp = next(
+                i
+                for i, n in enumerate(dag.nodes)
+                if n.label == "Hyp" and n.children and n.children[0] == fv
+            )
+            self.assertEqual(decode(hyp), [live])
+            self.assertEqual(decode(fv), [live])
 
 
 class RolloutTests(unittest.TestCase):

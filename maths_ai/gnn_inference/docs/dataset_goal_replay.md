@@ -127,10 +127,18 @@ identities (`maths_ai/data_models/model_identity.py`):
 goals inherit it from their parent by Lean's local ID: a kept local keeps its
 model index (and its model name unless the tactic renamed it); a new local is
 numbered after the locals before it with the spacing Lean gave it, so a goal
-that never needed a mapping keeps Lean's own indices. Re-materializing a
-canonical goal replays its live identity and returns the same model view.
-Tactic arguments are chosen from model names and translated back to live
-names before Lean sees them.
+that never needed a mapping keeps Lean's own indices. When a new local reuses
+a model name, the older locals with that name are shown to the model as Lean
+prints shadowed locals (`x✝`, `x✝¹`, ... counting back from the newest).
+Re-materializing a canonical goal replays its live identity and returns the
+same model view.
+
+Tactic arguments are resolved by declaration, not by name. A selected `Hyp`
+node or `FVk` node is identified by its model context label, which is unique in
+a goal, and `inference.local_declarations(goal)` maps every label to the live
+name of that declaration. Model names may repeat (an aliased outer `x` and a
+newly introduced `x`), so they are never used to look a declaration up. Only a
+graph built from printed text, which has no context labels, uses the name node.
 
 `scripts/compare_replay_graphs.py` replays dataset rows and compares the graph
 given to the model with the graph built from each row's stored model columns.

@@ -16,7 +16,12 @@ carries two identities:
 produced: a local Lean kept (same internal ID) keeps its model index, and its
 model name unless the tactic renamed it; a new local is numbered after the
 locals before it with the same spacing Lean gave it, so a goal that needed no
-mapping keeps Lean's own indices exactly.
+mapping keeps Lean's own indices exactly. A model name that a later local
+reuses is shown as Lean shows a shadowed local (``x✝``, then ``x✝¹``, ...).
+
+Model names are what the model reads, never how a declaration is found: tactic
+arguments are resolved by model context index (see
+``inference.local_declarations``), which is unique in a goal.
 """
 
 from __future__ import annotations
@@ -29,6 +34,39 @@ from maths_ai.lean_replay.sexp import SExpr, parse_sexp_string
 from .proof_components import Goal, GoalLocal
 
 _FV_LABEL = re.compile(r"FV(\d+)")
+_SUPERSCRIPTS = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+_INACCESSIBLE = "✝"
+
+
+def _shadowed_display(identities: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """Mark a model name reused by a later local the way Lean prints it.
+
+    Lean shows the newest local under its name and every older one with that
+    base as ``x✝``, ``x✝¹``, ... counting back from the newest, so the model sees
+    a successor's context as Lean itself would print it. Only a base that has a
+    newly shadowed name is renumbered; other names keep their source spelling.
+    """
+    names = [name for name, _ in identities]
+    shadowed = {
+        name
+        for position, name in enumerate(names)
+        if _INACCESSIBLE not in name and name in names[position + 1 :]
+    }
+    shown = list(identities)
+    counts: dict[str, int] = {}
+    for position in range(len(names) - 1, -1, -1):
+        name = names[position]
+        base = name.split(_INACCESSIBLE, 1)[0]
+        if base not in shadowed:
+            continue
+        hidden = _INACCESSIBLE in name or name in names[position + 1 :]
+        if not hidden:
+            continue
+        suffix = counts.get(base, 0)
+        counts[base] = suffix + 1
+        marked = f"{base}{_INACCESSIBLE}" + (str(suffix).translate(_SUPERSCRIPTS) if suffix else "")
+        shown[position] = (marked, identities[position][1])
+    return shown
 
 
 def _serialize(tree: SExpr) -> str:
@@ -153,4 +191,4 @@ def carry_model_identity(parent: Goal, child: Goal) -> Goal:
         model_index = max(model_index, last + 1)
         identities.append((name, model_index))
         last = model_index
-    return _rebuild(child, identities)
+    return _rebuild(child, _shadowed_display(identities))

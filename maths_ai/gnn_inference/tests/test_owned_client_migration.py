@@ -11,7 +11,7 @@ import torch
 
 from maths_ai.data_models.proof_components import TacticCandidate
 from maths_ai.gnn_inference.model import GNNPredictor
-from maths_ai.gnn_inference.atp_lean_gnn.inference import InferencePipeline
+from maths_ai.gnn_inference.atp_lean_gnn.inference import InferencePipeline, local_declarations
 from maths_ai.gnn_inference.tests.model_helpers import structured_goal, pantograph_goal
 from maths_ai.hybrid_reasoner.joint_inference import HybridReasoner, PantographExecutor
 from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_translator
@@ -42,7 +42,8 @@ def test_prediction_is_synchronous_canonical_and_gradient_free_in_active_loop():
     seen = []
     pipeline = object.__new__(InferencePipeline)
 
-    def predict(dag, *, top_k, execution_names):
+    def predict(dag, *, top_k, declarations):
+        assert declarations == local_declarations(goal)
         seen.append(
             (torch.is_grad_enabled(), (parameter * 2).requires_grad, dag.state_root_id)
         )

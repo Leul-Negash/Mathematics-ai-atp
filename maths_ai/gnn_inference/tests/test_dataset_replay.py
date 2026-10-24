@@ -168,7 +168,12 @@ def test_live_replay_repairs_supported_rows_and_rejects_the_rest(mathlib_env):
                         assert graph_view(model_goal_to_dag(goal)) == graph_view(prepared_graph(row))
                         if key == 74:
                             # The model sees `x`; tactics name the live local `x_1`.
-                            assert goal.execution_names() == {"x": "x_1"}
+                            from maths_ai.gnn_inference.atp_lean_gnn.inference import (
+                                local_declarations,
+                            )
+
+                            renamed = next(l for l in goal.locals if l.user_name == "x")
+                            assert local_declarations(goal)[f"FV{renamed.context_index}"] == "x_1"
                         assert goal.goal_model_sexp == row.model_goal_sexp
                         assert [
                             {k: l.graph_record()[k] for k in ("name", "context_index", "sexp")}
@@ -419,3 +424,60 @@ def test_live_search_nodes_see_the_source_identity(mathlib_env):
         assert client.phase.value == "CLOSED"
 
     asyncio.run(run())
+
+
+@pytest.mark.pantograph_live
+def test_live_selected_locals_reach_their_own_declarations(mathlib_env):
+    """Review case: an aliased outer `x` and a newly introduced `x`."""
+    from maths_ai.data_models.model_identity import carry_model_identity
+    from maths_ai.gnn_inference.atp_lean_gnn.inference import local_declarations
+    from maths_ai.hybrid_reasoner.pantograph_adapter import execution_state_to_goals
+    from maths_ai.hybrid_reasoner.pantograph_model_sexpr import materialize_seed
+    from maths_ai.lean_replay import StructuredLocal, seed_from_records
+
+    seed = seed_from_records(
+        "(:forall x (:c Nat) ((:c Eq) (:c Nat) (:fv _x) (:fv _x)))",
+        [StructuredLocal("_x", "x", 5, ":explicit", False, False, "(:c Nat)")],
+    )
+    assert render_replay(seed).expression == (
+        "∀ (x_1 : @Nat), (∀ (x : @Nat), (@Eq @Nat @x_1 @x_1))"
+    )
+
+    async def check_reverts(scope, state, goal):
+        """Reverting each resolved name removes exactly that declaration."""
+        declarations = local_declarations(goal)
+        for local in goal.locals:
+            name = declarations[f"FV{local.context_index}"]
+            (after,) = execution_state_to_goals(await scope.apply_tactic(state, f"revert {name}"))
+            remaining = {l.internal_name for l in after.locals}
+            assert remaining == {l.internal_name for l in goal.locals} - {local.internal_name}
+
+    async def body(scope):
+        state, root, _ = await materialize_seed(scope, seed)
+        assert [(l.user_name, l.context_index, l.execution_or_live_name) for l in root.locals] == [
+            ("x", 5, "x_1")
+        ]
+        intro = await scope.apply_tactic(state, "intro x")
+        (child,) = execution_state_to_goals(intro)
+        child = carry_model_identity(root, child)
+        assert local_declarations(child) == {"FV5": "x_1", "FV6": "x"}
+        await check_reverts(scope, intro, child)
+
+        # After re-materialization Lean has new IDs; the same selections still
+        # reach the right declarations.
+        again_state, again, _ = await materialize_seed(scope, child.replay_seed())
+        assert {l.internal_name for l in again.locals}.isdisjoint(
+            {l.internal_name for l in child.locals}
+        )
+        assert again.state_fingerprint() == child.state_fingerprint()
+        assert local_declarations(again) == {"FV5": "x_1", "FV6": "x"}
+        await check_reverts(scope, again_state, again)
+
+        # An alternative branch from the same state is resolved on its own.
+        other = await scope.apply_tactic(state, "intro y")
+        (branch,) = execution_state_to_goals(other)
+        branch = carry_model_identity(root, branch)
+        assert local_declarations(branch) == {"FV5": "x_1", "FV6": "y"}
+        await check_reverts(scope, other, branch)
+
+    asyncio.run(_with_scope(mathlib_env, body))

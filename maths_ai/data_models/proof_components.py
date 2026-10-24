@@ -164,14 +164,6 @@ class Goal(BaseModel):
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def execution_names(self) -> dict[str, str]:
-        """Model local names whose live Lean name differs, mapped to the live one."""
-        return {
-            local.user_name: local.execution_name
-            for local in self.locals or []
-            if local.execution_name is not None
-        }
-
     def replay_seed(self) -> LeanGoalSeed:
         """The structured seed that recreates this goal from its raw expressions.
 
