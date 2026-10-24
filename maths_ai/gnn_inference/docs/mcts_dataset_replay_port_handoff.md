@@ -70,7 +70,7 @@ commands are in [mcts_port/](../tests/fixtures/dataset_replay/mcts_port/)
 
 | Check | Result |
 | --- | --- |
-| Offline suite | 514 passed, 12 skipped; the 4 failures also fail on `f21d044` (GNU `stdbuf` path, three Thompson-sampler tests) |
+| Offline suite | 514 passed, 12 skipped (also through `uv run --locked --no-sync`); the 4 failures also fail on `f21d044` (GNU `stdbuf` path, three Thompson-sampler tests) |
 | Live tests (`--run-pantograph-live`) | 35 passed, 1 skipped: the prepared-vocabulary/checkpoint gate |
 | `mcts_client_smoke` | PUCT multi-leaf batches, checked rejection of alternatives, graph equivalence in both modes, cooperative-deadline scope closure, 20 repeated searches, two workers sharing one model device; learning rounds with HTPS off (1 step, generation 1) and on (2 steps, generation 2) |
 | Admission, `train[0:500]` | 391 candidates, **319 Lean-validated**; quarantined: missing-context 46, unsupported-syntax 51, unresolved-universe 9, unresolved-term 3, model-mismatch 1; skipped: over-size 63, REPL failure 8 |
@@ -78,6 +78,14 @@ commands are in [mcts_port/](../tests/fixtures/dataset_replay/mcts_port/)
 
 The admission and graph numbers equal AC's for the same rows, but they were
 produced here, not copied.
+
+`scripts/rl_smoke.py --no-pln` passes in both selection modes (`legacy` and
+`puct` with 8 simulations, batch 2): one on-policy step, no structural unknown
+labels. Against `f21d044` on the same REPL its root expansion is identical
+(same tactics and probabilities); the run differs from node 1 on, by design.
+After `intro p` Lean shows the outer `p` as `p✝`. The removed sanitizer
+renamed it to `p_` when replaying node 1, so the model saw a state Lean never
+produced and proposed `intro p_`. Node 1 now keeps the model identity `p✝`.
 
 ## Resume and checkpoints
 

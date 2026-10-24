@@ -274,8 +274,9 @@ class DeclarationResolutionTests(unittest.TestCase):
                 self.assertEqual(candidate.arguments, [live])
 
     def test_batched_leaves_resolve_through_their_own_declarations(self):
-        """Two leaves with the same model names but different live names, in one
-        policy batch: each row resolves only through its own goal's locals."""
+        """Leaves with the same model names but different live names, and a leaf
+        with fewer locals, in one policy batch: each row resolves only through its
+        own goal's locals, before and after re-materialization."""
         from maths_ai.data_models.model_identity import with_model_identity
         from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
         from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab
@@ -286,18 +287,35 @@ class DeclarationResolutionTests(unittest.TestCase):
             outer_aliased,
         )
 
+        def replayed(names, internals, identities):
+            """A goal as Lean returns it, given the model identity it replays."""
+            live = goal(
+                [local(name, internal, index) for index, (name, internal) in enumerate(zip(names, internals))],
+                target="(:app (:c Eq) (:fv FV0) (:fv FV0))",
+            )
+            return with_model_identity(live, identities)
+
         first = after_intro_x(outer_aliased())
-        replayed = goal(
-            [local("y_1", "_live.3", 0), local("z", "_live.4", 1)],
-            target="(:app (:c Eq) (:fv FV0) (:fv FV0))",
-        )
-        second = with_model_identity(
-            replayed, [(l.user_name, l.context_index) for l in first.locals]
-        )
+        identities = [(l.user_name, l.context_index) for l in first.locals]
+        second = replayed(["y_1", "z"], ["_live.3", "_live.4"], identities)
+        third = replayed(["w"], ["_live.5"], identities[:1])
         self.assertEqual(
             [l.user_name for l in first.locals], [l.user_name for l in second.locals]
         )
-        node_vocab = build_vocab([model_goal_to_dag(first), model_goal_to_dag(second)])
+        # Re-materialization: Lean issues new internal ids; the model identity
+        # comes back from each goal's own replay seed.
+        again = [
+            replayed(
+                [l.name for l in leaf.replay_seed().locals],
+                [f"_new.{row}.{i}" for i in range(len(leaf.locals))],
+                [l.model_identity for l in leaf.replay_seed().locals],
+            )
+            for row, leaf in enumerate((first, second, third))
+        ]
+        leaves_by_round = ((first, second, third), tuple(again))
+        node_vocab = build_vocab(
+            [model_goal_to_dag(leaf) for leaves in leaves_by_round for leaf in leaves]
+        )
         reasoner = RLHybridReasoner(
             actor_critic(len(node_vocab), len(TACTIC_VOCAB)),
             node_vocab,
@@ -307,22 +325,25 @@ class DeclarationResolutionTests(unittest.TestCase):
         )
         reasoner.petta_chainer = _StubPLN()
 
-        for label, expected in (("FV5", ["x_1", "y_1"]), ("FV6", ["x", "z"])):
-            for kind in (0, 1):  # the Hyp candidate, then the free variable
-                indices = [
-                    self._positions(model_goal_to_dag(leaf), label)[kind]
-                    for leaf in (first, second)
-                ]
-                reasoner._pending = {}
-                reasoner.model.act = lambda *_args, **_kwargs: self._sample(indices)
-                proposals = reasoner._predict_next_tactics_batch(
-                    [first, second], node_ids=[1, 2]
-                )
-                self.assertEqual(
-                    [row[0].arguments[0] for row in proposals], expected, (label, kind)
-                )
-                # Each row's draw is owned by its own node.
-                self.assertEqual(sorted(reasoner._pending), [1, 2])
+        # FV5 is in every leaf; FV6 only in the two-local leaves.
+        cases = (("FV5", ["x_1", "y_1", "w"], 3), ("FV6", ["x", "z"], 2))
+        for leaves in leaves_by_round:
+            for label, expected, rows in cases:
+                for kind in (0, 1):  # the Hyp candidate, then the free variable
+                    batch = list(leaves[:rows])
+                    indices = [
+                        self._positions(model_goal_to_dag(leaf), label)[kind] for leaf in batch
+                    ]
+                    reasoner._pending = {}
+                    reasoner.model.act = lambda *_args, **_kwargs: self._sample(indices)
+                    proposals = reasoner._predict_next_tactics_batch(
+                        batch, node_ids=list(range(1, rows + 1))
+                    )
+                    self.assertEqual(
+                        [row[0].arguments[0] for row in proposals], expected, (label, kind)
+                    )
+                    # Each row's draw is owned by its own node.
+                    self.assertEqual(sorted(reasoner._pending), list(range(1, rows + 1)))
 
 
 class RolloutTests(unittest.TestCase):

@@ -104,6 +104,13 @@
       "target_base_sha256": null
     },
     {
+      "path": "maths_ai/gnn_inference/docs/mcts_dataset_replay_port_handoff.md",
+      "classification": "target-only",
+      "sha256": "905d1ff8703b710b9140cf9adb0029ea121d59daa1acdfc4e32f0e2686deaa6a",
+      "application_source_sha256": null,
+      "target_base_sha256": null
+    },
+    {
       "path": "maths_ai/gnn_inference/docs/owned_pantograph_client.md",
       "classification": "adapted",
       "sha256": "d9aa9535d123edc0323d445dbdd93d4769e6c706411ec18d16f1fe2fab7cf492",
@@ -157,6 +164,34 @@
       "classification": "copied",
       "sha256": "9b085d13372508a45ec6562a0a5a679b7800769b03a8a1d3bd0dabf215c2c596",
       "application_source_sha256": "9b085d13372508a45ec6562a0a5a679b7800769b03a8a1d3bd0dabf215c2c596",
+      "target_base_sha256": null
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/dataset_replay/mcts_port/admission_train_500.json",
+      "classification": "target-only",
+      "sha256": "8704834c83dc44ead692bfd4f3de76c72a8141fe1edb13766da26e28a70cb0d7",
+      "application_source_sha256": null,
+      "target_base_sha256": null
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/dataset_replay/mcts_port/graphs_train_500.json",
+      "classification": "target-only",
+      "sha256": "9b085d13372508a45ec6562a0a5a679b7800769b03a8a1d3bd0dabf215c2c596",
+      "application_source_sha256": null,
+      "target_base_sha256": null
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/dataset_replay/mcts_port/provenance.json",
+      "classification": "target-only",
+      "sha256": "73cd81369e2934ab257a0ed18b438903d6badfb8476d0106625da644992b1bfc",
+      "application_source_sha256": null,
+      "target_base_sha256": null
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/fixtures/dataset_replay/mcts_port/report.json",
+      "classification": "target-only",
+      "sha256": "f37844e836dc694d6ec8c477e0c8b76ca2e0be284dc9b3b729dca75204dbab75",
+      "application_source_sha256": null,
       "target_base_sha256": null
     },
     {
@@ -253,7 +288,7 @@
     {
       "path": "maths_ai/gnn_inference/tests/test_rl_reasoner.py",
       "classification": "adapted",
-      "sha256": "fc9a60b444539504274c00fcf3624490a2d1d064dfce3ca5ca03befb58358628",
+      "sha256": "6a0e14f9b5f9eadfea9c86621dbd2b5d0ee50db3143494a495996fd8a913bf87",
       "application_source_sha256": "b2ed57ec9817b98b33d27c5ad0bdeee3ad8cdb1ec5e7d50f2f82255a48a3998b",
       "target_base_sha256": "a50122c0be2f998c67842f5d5a988e8bc1d2a6ab8acc4189f674e283be522674"
     },
