@@ -52,6 +52,19 @@ SAMPLE = ProposalSpec(mode="sample", seed=0)
 GREEDY = ProposalSpec(mode="greedy", seed=0)
 
 
+def accepted(result):
+    """Each accepted edge's first raw action."""
+    actions = {}
+    for observation in result.observations:
+        if observation.edge_id is not None:
+            actions.setdefault(observation.edge_id, observation.action)
+    return actions
+
+
+def failed(result):
+    return [o for o in result.observations if o.edge_id is None]
+
+
 TACTIC_VOCAB = {"trivial": 0, "intro": 1, "exact": 2}
 ROOT = "p → p"
 HYPS = ["p : Prop"]
@@ -161,7 +174,7 @@ class _NodeTrackingReasoner(RLHybridReasoner):
 
     async def _execute_and_link(self, graph, node, candidates, *, materialized):
         self.server.current_node = node.id
-        self.executed.append((node.id, len(candidates)))
+        self.executed.append((node.id, len({candidate.command for candidate in candidates})))
         return await super()._execute_and_link(
             graph, node, candidates, materialized=materialized
         )
@@ -312,21 +325,19 @@ class SearchModeOwnershipTests(unittest.TestCase):
         # and sampled-action multiplicity is kept per node.
         solved_edges = set(graph.nodes[solved].outgoing_edge_ids)
         root_edges = set(graph.nodes[0].outgoing_edge_ids)
-        self.assertLessEqual(set(result.edge_actions), solved_edges | root_edges)
+        self.assertLessEqual(result.accepted_edge_ids(), solved_edges | root_edges)
         self.assertEqual(
             sum(
-                action.multiplicity
-                for edge_id, action in result.edge_actions.items()
-                if edge_id in solved_edges
+                o.action.multiplicity for o in result.observations if o.edge_id in solved_edges
             ),
             reasoner.top_k_tactics,
         )
         self.assertEqual(
-            sum(record.action.multiplicity for record in result.failure_actions),
+            sum(record.action.multiplicity for record in failed(result)),
             reasoner.top_k_tactics * len(rejected),
         )
         fingerprint = str(reasoner.dag_featurize(graph.nodes[solved].goal)[1].graph_fingerprint)
-        for record in result.failure_actions:
+        for record in failed(result):
             self.assertEqual(record.action.graph_fingerprint, fingerprint)
         _assert_scoped_cleanly(self, client)
 
@@ -373,8 +384,8 @@ class BatchCompositionTests(unittest.TestCase):
         self.assertEqual(b.closure_reason, NodeClosureReason.NO_CANDIDATES)
         self.assertEqual(c.status, NodeStatus.SOLVED)
         # Only executed alternatives settle as evidence: C's accepted edge.
-        self.assertEqual(result.failure_actions, [])
-        self.assertTrue(set(result.edge_actions) <= {0, *c.outgoing_edge_ids})
+        self.assertEqual(failed(result), [])
+        self.assertTrue(result.accepted_edge_ids() <= {0, *c.outgoing_edge_ids})
         # Every materialized input, including B's unused one, was released by
         # the search itself; nothing was left for scope exit.
         self.assertEqual(client.left_at_exit, [0])
@@ -399,7 +410,7 @@ class BatchCompositionTests(unittest.TestCase):
             2,
         )
         self.assertEqual([node_id for node_id, _ in reasoner.executed], [0])
-        self.assertTrue(all(record.goal.expression == ROOT for record in result.failure_actions))
+        self.assertTrue(all(record.goal.expression == ROOT for record in failed(result)))
         _assert_scoped_cleanly(self, client)
 
 
@@ -416,12 +427,12 @@ class OverlappingSearchTests(unittest.TestCase):
             )
             await client.entered_apply.wait()
             pending, result, proposal = reasoner._pending, reasoner._result, reasoner._proposal
-            pending_snapshot = {key: dict(value.actions) for key, value in pending.items()}
+            pending_snapshot = {key: dict(value.draws) for key, value in pending.items()}
             with self.assertRaises(PantographStateError):
                 await reasoner.prove(SEED, proposal=SAMPLE)
             self.assertIs(reasoner._pending, pending)
             self.assertEqual(
-                {key: dict(value.actions) for key, value in pending.items()},
+                {key: dict(value.draws) for key, value in pending.items()},
                 pending_snapshot,
             )
             self.assertIs(reasoner._result, result)
@@ -533,8 +544,8 @@ class FailureInjectionTests(unittest.TestCase):
         self.assertEqual(rejected.closure_reason, NodeClosureReason.CANDIDATES_EXHAUSTED)
         # Ordinary rejection produces actor failure records for B only; the
         # unelaborated node never sampled or executed anything.
-        self.assertTrue(result.failure_actions)
-        for record in result.failure_actions:
+        self.assertTrue(failed(result))
+        for record in failed(result):
             self.assertEqual(record.goal.state_fingerprint(), rejected.goal.state_fingerprint())
         self.assertNotIn(elaboration.id, dict(reasoner.executed))
         # The AND-backup over (unknown, valid 0.0) is a valid 0.0: completed
@@ -558,7 +569,7 @@ class FailureInjectionTests(unittest.TestCase):
         self.assertEqual(root_edge.visit_stats.N, 1)
         self.assertEqual(root_edge.visit_stats.N_v, 0)
         self.assertEqual(root_edge.visit_stats.W, 0.0)
-        self.assertEqual(result.failure_actions, [])
+        self.assertEqual(failed(result), [])
         _assert_scoped_cleanly(self, client)
 
 
@@ -580,7 +591,7 @@ class CooperativeDeadlineTests(unittest.TestCase):
         self.assertFalse(graph.is_solved())
         # The completed root expansion is kept as experience.
         self.assertTrue(graph.nodes[0].outgoing_edge_ids)
-        self.assertTrue(result.edge_actions or result.failure_actions)
+        self.assertTrue(result.observations)
         for edge in graph.edges.values():
             self.assertEqual(edge.visit_stats.virtual_loss, 0)
         _assert_scoped_cleanly(self, client)

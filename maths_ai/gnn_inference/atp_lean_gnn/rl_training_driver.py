@@ -36,7 +36,13 @@ from pantograph_async import (
     PantographRequestTimeout,
     PantographTransportError,
 )
-from maths_ai.hybrid_reasoner.hypergraph import BackupSource, SearchEndReason
+from maths_ai.hybrid_reasoner.hypergraph import (
+    PRIOR_ALIAS_POLICY,
+    PRIOR_NORMALIZATION,
+    PRIOR_SEMANTICS,
+    BackupSource,
+    SearchEndReason,
+)
 from maths_ai.hybrid_reasoner.proposal import (
     PROPOSAL_MODES,
     SEED_DERIVATION_VERSION,
@@ -56,7 +62,7 @@ from .pln_rl_training import make_dag_featurizer, train_step_htps_style, train_s
 from .reporting import console_print
 from .rl_live_collection import FATAL_SESSION_ERRORS, LiveReasonerPool
 from .rl_resources import ResourcePlan, plan_resources
-from .rl_reasoner import RLHybridReasoner, RLSearchResult
+from .rl_reasoner import ACTOR_PRIOR, RLHybridReasoner, RLSearchResult
 from .search_harvest import (
     CriticSample,
     TacticImitationSample,
@@ -301,6 +307,13 @@ def search_settings(cfg: RLTrainingConfig) -> dict[str, object]:
             "seed_derivation": SEED_DERIVATION_VERSION,
             "greedy": "stepwise-argmax-v1",
         },
+        "prior": {
+            "semantics": PRIOR_SEMANTICS,
+            "normalization": PRIOR_NORMALIZATION,
+            "alias_policy": PRIOR_ALIAS_POLICY,
+            "provider": ACTOR_PRIOR,
+        },
+        "observations": "per-node-raw-action-ledger-v1",
     }
 
 
@@ -1159,7 +1172,7 @@ async def _run_rl_training_impl(
             )
             mined = extract_minimal_hypertree(
                 result.graph,
-                result.edge_actions,
+                result.observations,
                 mine_all_solved_nodes=cfg.mine_all_solved_nodes,
             )
             imitation_mined += len(mined)

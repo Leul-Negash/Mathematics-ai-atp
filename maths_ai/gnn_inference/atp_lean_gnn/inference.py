@@ -111,6 +111,23 @@ def _extract_fresh_names_from_dag(dag: DAGBuilder) -> list[str]:
     ]
 
 
+def _ranked_choice_log_prior(scores: torch.Tensor, chosen: list[int]) -> float:
+    """Log-probability of picking ``chosen`` in order, each without replacement.
+
+    This is the generic provider's argument law: step k is a softmax over the
+    scores of the eligible candidates not already chosen. Its ranked choices
+    are the argmax of each step, and their probability under this law is what
+    the search uses as the argument factor of the action's prior.
+    """
+    available = torch.ones_like(scores, dtype=torch.bool)
+    total = 0.0
+    for position in chosen:
+        masked = scores.masked_fill(~available, float("-inf"))
+        total += float(torch.log_softmax(masked, dim=-1)[position])
+        available[position] = False
+    return total
+
+
 def _top_tactic_candidates(
     tactic_probs: torch.Tensor,
     id_to_tactic: dict[int, str],
@@ -269,6 +286,11 @@ class InferencePipeline:
         top_candidates = _top_tactic_candidates(
             tactic_probs, self.id_to_tactic, top_k=top_k
         )
+        # Unrounded, for the action prior; "probability" stays the rounded
+        # display/ranking value.
+        tactic_log_probs = torch.log_softmax(tactic_logits.squeeze(0), dim=-1)
+        for item in top_candidates:
+            item["tactic_log_probability"] = float(tactic_log_probs[int(item["tactic_id"])])
 
         tactic_distribution = [
             (item["tactic_name"], float(item["probability"])) for item in top_candidates
@@ -289,6 +311,7 @@ class InferencePipeline:
             tactic_name = str(candidate["tactic_name"])
             arity = get_tactic_arity(tactic_name)
 
+            tactic_log_probability = float(candidate["tactic_log_probability"])
             if arity == 0 or tactic_name in _NO_ARGS_TACTICS:
                 top_tactic_predictions.append(
                     {
@@ -297,6 +320,8 @@ class InferencePipeline:
                         "probability": float(candidate["probability"]),
                         "selected_arguments": [],
                         "selected_argument_details": [],
+                        "action_log_prior": tactic_log_probability,
+                        "argument_law": "none",
                     }
                 )
                 continue
@@ -307,6 +332,8 @@ class InferencePipeline:
             tactic_emb = self.model.tactic_embedding(tactic_id_tensor)
 
             if not pool.candidate_ids:
+                # The tactic needs arguments and there are none to choose:
+                # the action is incomplete and has no prior.
                 top_tactic_predictions.append(
                     {
                         "tactic_id": tactic_id,
@@ -314,6 +341,8 @@ class InferencePipeline:
                         "probability": float(candidate["probability"]),
                         "selected_arguments": [],
                         "selected_argument_details": [],
+                        "action_log_prior": None,
+                        "argument_law": "incomplete",
                     }
                 )
                 continue
@@ -333,6 +362,9 @@ class InferencePipeline:
                             )
                             for name in fresh_names
                         ],
+                        # One deterministic choice of fresh names: factor one.
+                        "action_log_prior": tactic_log_probability,
+                        "argument_law": "fresh-names-deterministic",
                     }
                 )
                 continue
@@ -376,6 +408,7 @@ class InferencePipeline:
                         )
                     )
 
+                complete = len(local_indices) == arity
                 top_tactic_predictions.append(
                     {
                         "tactic_id": tactic_id,
@@ -383,6 +416,13 @@ class InferencePipeline:
                         "probability": float(candidate["probability"]),
                         "selected_arguments": arguments,
                         "selected_argument_details": selected_argument_details,
+                        "action_log_prior": (
+                            tactic_log_probability
+                            + _ranked_choice_log_prior(local_scores, local_sorted.tolist())
+                            if complete
+                            else None
+                        ),
+                        "argument_law": "local-softmax-without-replacement" if complete else "incomplete",
                     }
                 )
                 continue
@@ -420,6 +460,7 @@ class InferencePipeline:
                     )
                 )
 
+            complete = len(top_indices) == arity
             top_tactic_predictions.append(
                 {
                     "tactic_id": tactic_id,
@@ -427,6 +468,12 @@ class InferencePipeline:
                     "probability": float(candidate["probability"]),
                     "selected_arguments": arguments,
                     "selected_argument_details": selected_argument_details,
+                    "action_log_prior": (
+                        tactic_log_probability + _ranked_choice_log_prior(scores, top_indices)
+                        if complete
+                        else None
+                    ),
+                    "argument_law": "pool-softmax-without-replacement" if complete else "incomplete",
                 }
             )
 

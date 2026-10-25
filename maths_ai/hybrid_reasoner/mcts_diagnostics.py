@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
 
@@ -23,7 +24,7 @@ from pantograph_async.diagnostics import distribution_source
 from pantograph_async.probes import require
 
 from maths_ai.core.git_worktree import dirty_provenance, read_status
-from maths_ai.data_models.proof_components import TacticCandidate
+from maths_ai.data_models.proof_components import ProposedAction, TacticCandidate
 from maths_ai.lean_replay import seed_from_text
 
 from .hypergraph import EdgeStatus, NodeStatus, SearchEndReason
@@ -112,15 +113,22 @@ class ScriptedSearchReasoner(HybridReasoner):
     def _build_gnn_engine(self, **_kwargs):
         return None
 
-    def predict_next_tactics_for_nodes(self, nodes):
+    def predict_next_tactics_for_nodes(self, nodes, draws=None):
         self.proposal_batches.append([node.id for node in nodes])
         return [
-            [
-                TacticCandidate(tactic_name=tactic, arguments=[], probability=probability)
-                for tactic, probability in self.script.get(node.goal.expression, ())
-            ]
+            [scripted_action(tactic, probability) for tactic, probability in self.script.get(node.goal.expression, ())]
             for node in nodes
         ]
+
+
+def scripted_action(tactic: str, probability: float) -> ProposedAction:
+    """A scripted zero-argument action whose probability is the complete action's."""
+    return ProposedAction(
+        candidate=TacticCandidate(tactic_name=tactic, arguments=[], probability=probability),
+        raw_action_id=("scripted", tactic),
+        log_prior=math.log(probability),
+        provider="scripted-v1",
+    )
 
 
 class _FirstBatchCutoff(ScriptedSearchReasoner):
@@ -375,7 +383,7 @@ async def verify_learning_round(client: PantographClient) -> dict:
         result = await reasoner.prove(CONJUNCTION, proposal=ProposalSpec(mode="sample", seed=0))
         require((await client.stat()).n_goals == baseline, "Learning search leaked states.")
         require(
-            bool(result.edge_actions or result.failure_actions),
+            bool(result.observations),
             "The learning search produced no on-policy actions.",
         )
         before = [parameter.detach().clone() for parameter in model.parameters()]
@@ -391,7 +399,7 @@ async def verify_learning_round(client: PantographClient) -> dict:
         )
         onpolicy_steps = int(metrics["onpolicy_optimizer_step"])
         critic_samples = extract_critic_samples(result.graph, visit_threshold=1)
-        imitation_samples = extract_minimal_hypertree(result.graph, result.edge_actions)
+        imitation_samples = extract_minimal_hypertree(result.graph, result.observations)
         htps_steps = 0
         if htps_enabled:
             htps = train_step_htps_style(
@@ -425,8 +433,9 @@ async def verify_learning_round(client: PantographClient) -> dict:
         )
         return {
             "solved": result.graph.is_solved(),
-            "edge_actions": len(result.edge_actions),
-            "failure_actions": len(result.failure_actions),
+            "accepted_edges": len(result.accepted_edge_ids()),
+            "observations": len(result.observations),
+            "draws": result.draws(),
             "imitation_samples": len(imitation_samples),
             "critic_samples": len(critic_samples),
             "onpolicy_optimizer_steps": onpolicy_steps,

@@ -2,28 +2,26 @@
 
 ``RLHybridReasoner`` overrides these seams of ``HybridReasoner``:
 
-  * ``predict_next_tactic`` / ``predict_next_tactics_batch`` — instead of the
-    deterministic GNN-engine top-k, draw ``k`` i.i.d. actions from the actor-critic
-    policy (``model.act``), decode each into a ``TacticCandidate`` the Pantograph
-    executor can apply, and stash the integer action record (``EdgeAction``) in the
-    proposing node's pending sub-dict. The batch variant runs one multi-graph policy
-    forward across all leaves of a simulation batch.
-  * ``_link`` — when the executor accepts a candidate and the base expansion links it
-    into the hypergraph, migrate the stash entry from the pending sub-dict to
-    ``edge.id`` so the train phase can join each harvested transition to the action
-    that produced it.
+  * ``predict_next_tactics_for_nodes`` — instead of the deterministic GNN-engine
+    top-k, draw ``k`` actions per node from the actor-critic policy (``model.act``)
+    in one multi-graph forward, and decode each into a ``ProposedAction``: the
+    command the executor applies plus the raw action's complete log-prior. The
+    integer action record (``EdgeAction``) waits in the node's pending round.
+  * ``_on_command_settled`` — once a command has a checked outcome (a new or
+    existing edge, or a Lean rejection, possibly from the node's cache), every
+    raw action that rendered it becomes a ``PolicyObservation`` for the train phase.
   * ``_leaf_value`` — the critic head's value estimate for an unresolved simulation
     leaf (HTPS's ``v_T(g) = c_θ(g)``), used by ``_backup_simulation``.
 
-The pending stash is keyed per node (``goal_key → {fingerprint → EdgeAction}``): a
-node's still-pending entries after its expansion completes belong to executor-REJECTED
-samples, and ``_on_expansion_complete`` flushes exactly that node's sub-dict to
-``failure_actions`` — so batching proposals across several leaves cannot misattribute
-one leaf's pending entries to another. Failure records train the actor with
-``return = terminal_failure − step_penalty`` (no critic target — the state may still be
-provable, only that action failed).
+Observations are owned by the graph node that proposed them, and one raw action
+at one node is one observation whose multiplicity counts all its settled draws,
+in every proposal round. A draw is settled only by what Lean observed: when a
+round ends without an outcome (depth limit, replay failure, abort) its pending
+draws are discarded, never turned into failures. Rejected and unrenderable draws
+train the actor with ``return = terminal_failure − step_penalty`` (no critic
+target — the state may still be provable, only that action failed).
 
-Only integers are stashed (no autograd graph): the train phase recomputes log-probs under
+Only integers are stored (no autograd graph): the train phase recomputes log-probs under
 the current parameters via ``model.evaluate_actions``, which is exactly on-policy under the
 one-optimizer-step-per-collect invariant.
 """
@@ -31,13 +29,13 @@ one-optimizer-step-per-collect invariant.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional
 
 import torch
 from torch_geometric.data import Batch
 
-from maths_ai.data_models.proof_components import Goal, TacticCandidate
+from maths_ai.data_models.proof_components import Goal, ProposedAction, TacticCandidate
 from maths_ai.hybrid_reasoner.hypergraph import ProofHypergraph, ProofNode
 from maths_ai.hybrid_reasoner.joint_inference import (
     ExpansionResult,
@@ -49,33 +47,59 @@ from pantograph_async import PantographStateError
 
 from .actor_critic import ActorCriticWithArgsClassifier, action_arity
 from .inference import _resolve_local_node_name, local_declarations
-from .pln_rl_training import EdgeAction, FailureRecord, make_dag_featurizer
+from .pln_rl_training import (
+    EdgeAction,
+    ObservationOutcome,
+    PolicyObservation,
+    make_dag_featurizer,
+)
+
+# The actor's prior law: log π(τ|s) plus the pointer log-probs of the steps the
+# action owns.
+ACTOR_PRIOR = "actor-pointer-v1"
 
 
 @dataclass
 class RLSearchResult:
-    """One search's graph plus the on-policy join tables (refinement 6).
+    """One search's graph plus its policy observations (refinement 6).
 
-    ``edge.id`` is unique only within one ``ProofHypergraph``, so the action stash must
-    travel with its graph rather than accumulate on the reasoner across searches.
+    ``edge.id`` is unique only within one ``ProofHypergraph``, so the observations must
+    travel with their graph rather than accumulate on the reasoner across searches.
     """
     graph: ProofHypergraph
-    edge_actions: Dict[int, EdgeAction] = field(default_factory=dict)
-    failure_actions: List[FailureRecord] = field(default_factory=list)
+    observations: List[PolicyObservation] = field(default_factory=list)
+
+    def accepted_edge_ids(self) -> set[int]:
+        return {o.edge_id for o in self.observations if o.edge_id is not None}
+
+    def draws(self) -> int:
+        return sum(o.action.multiplicity for o in self.observations)
 
 
-def _fingerprint(tactic_name: str, arguments: tuple[str, ...]) -> tuple:
-    return (tactic_name, arguments)
+@dataclass
+class _PendingDraw:
+    action: EdgeAction
+    proposal: ProposedAction
 
 
 @dataclass
 class _PendingNode:
-    """One proposing node's sampled-but-not-yet-linked actions."""
+    """One node's draws in the current proposal round, not yet settled."""
 
     goal: Goal
     graph_fingerprint: str
-    actions: Dict[tuple, EdgeAction] = field(default_factory=dict)
-    unplayable_actions: List[EdgeAction] = field(default_factory=list)
+    draws: Dict[tuple, _PendingDraw] = field(default_factory=dict)
+    unrenderable: Dict[tuple, EdgeAction] = field(default_factory=dict)
+
+
+@dataclass
+class _NodeLedger:
+    """Search-lifetime record of one node's raw actions."""
+
+    graph_fingerprint: str
+    rounds: int = 0
+    # raw action id -> the command it rendered, to catch a changed rendering.
+    commands: Dict[tuple, tuple] = field(default_factory=dict)
 
 
 class RLHybridReasoner(HybridReasoner):
@@ -111,10 +135,12 @@ class RLHybridReasoner(HybridReasoner):
             **reasoner_kwargs,
         )
 
-        # Per-search stashes, reset by prove(); _pending holds one sub-dict per
-        # proposing graph node (flushed by _on_expansion_complete when that node's
-        # expansion finishes).
+        # Per-search state, reset by prove(): the current round's pending draws
+        # per node, each node's ledger, and the observations so far, keyed by
+        # (node id, raw action id) in settlement order.
         self._pending: Dict[int, _PendingNode] = {}
+        self._ledgers: Dict[int, _NodeLedger] = {}
+        self._observations: Dict[tuple, PolicyObservation] = {}
         self._result: Optional[RLSearchResult] = None
         # The running search's proposal mode and its own generator; set per prove().
         self._proposal: Optional[ProposalSpec] = None
@@ -125,44 +151,41 @@ class RLHybridReasoner(HybridReasoner):
         return None
 
     # ------------------------------------------------------------------
-    # Proposal: sample k i.i.d. actions and decode them
+    # Proposal: draw k actions per node and decode them
     # ------------------------------------------------------------------
 
-    def predict_next_tactic(self, sub_goal: Goal) -> List[TacticCandidate]:
-        """Draw ``top_k_tactics`` i.i.d. actions from π(·|s) and decode each.
+    def predict_next_tactic(self, sub_goal: Goal) -> List[ProposedAction]:
+        """Draw ``top_k_tactics`` actions from π(·|s) and decode each.
 
-        Identical draws are deduplicated for the EXECUTOR (Lean would reject the
-        duplicate edge) but recorded with ``multiplicity = m`` so the policy-gradient
-        term is weighted by how often the policy actually produced the action
-        (refinement 1). Every decoded candidate is stashed pending under this goal's
-        sub-dict; ``_link`` claims the ones that produce edges and
-        ``_on_expansion_complete`` converts the rest into failure records.
-
-        Under a ``greedy`` proposal every draw is the same step-wise argmax
-        action, so the k draws become one candidate with multiplicity k.
+        Identical raw draws are proposed once but recorded with ``multiplicity = m``
+        so the policy-gradient term is weighted by how often the policy actually
+        produced the action (refinement 1). Under a ``greedy`` proposal every draw
+        is the same step-wise argmax action, so the k draws become one proposal
+        with multiplicity k.
         """
         return self.predict_next_tactics_batch([sub_goal])[0]
 
-    def predict_next_tactics_batch(self, sub_goals: List[Goal]) -> List[List[TacticCandidate]]:
+    def predict_next_tactics_batch(self, sub_goals: List[Goal]) -> List[List[ProposedAction]]:
         """Batched proposal: one multi-graph policy forward per draw across all
         ``sub_goals`` (instead of ``k × len(sub_goals)`` single-graph forwards).
 
-        Each goal's sampled actions land in its own pending sub-dict, so a later
-        flush of one goal's failures cannot touch another's (Decision 1.1).
+        Each goal's draws land in its own pending round, so settling one goal's
+        draws cannot touch another's (Decision 1.1).
         """
         return self._predict_next_tactics_batch(sub_goals, node_ids=None)
 
     def predict_next_tactics_for_nodes(
-        self, nodes: List[ProofNode]
-    ) -> List[List[TacticCandidate]]:
+        self, nodes: List[ProofNode], draws: Optional[List[int]] = None
+    ) -> List[List[ProposedAction]]:
         # Rows go to the policy in node-id order, so a seeded search draws the
         # same actions however its simulations happened to list the leaves.
         order = sorted(range(len(nodes)), key=lambda index: nodes[index].id)
         proposed = self._predict_next_tactics_batch(
             [nodes[index].goal.require_model_state() for index in order],
             node_ids=[nodes[index].id for index in order],
+            draws=None if draws is None else [draws[index] for index in order],
         )
-        candidates: List[List[TacticCandidate]] = [[] for _ in nodes]
+        candidates: List[List[ProposedAction]] = [[] for _ in nodes]
         for position, index in enumerate(order):
             candidates[index] = proposed[position]
         return candidates
@@ -172,41 +195,50 @@ class RLHybridReasoner(HybridReasoner):
         sub_goals: List[Goal],
         *,
         node_ids: Optional[List[int]],
-    ) -> List[List[TacticCandidate]]:
+        draws: Optional[List[int]] = None,
+    ) -> List[List[ProposedAction]]:
+        """Propose ``draws[row]`` actions for each row (``top_k_tactics`` by default).
+
+        The forward runs as many times as the largest request; a row keeps only
+        its first ``draws[row]`` draws, so its count is fixed before drawing.
+        """
         pendings: List[_PendingNode] = []
         dags = []
         datas = []
         declaration_maps: list[dict[str, str]] = []
         if node_ids is not None and len(node_ids) != len(sub_goals):
             raise ValueError("node_ids must align with sub_goals")
+        counts = [self.top_k_tactics] * len(sub_goals) if draws is None else list(draws)
+        if len(counts) != len(sub_goals) or any(count < 0 for count in counts):
+            raise ValueError("draws must give a non-negative count per goal")
         for row, sub_goal in enumerate(sub_goals):
             dag, data = self.dag_featurize(sub_goal.require_model_state())
             graph_fingerprint = str(data.graph_fingerprint)
             key = node_ids[row] if node_ids is not None else -(row + 1)
-            pending = self._pending.get(key)
-            if pending is None:
-                pending = _PendingNode(
-                    goal=sub_goal,
-                    graph_fingerprint=graph_fingerprint,
-                )
-                self._pending[key] = pending
-            elif pending.graph_fingerprint != graph_fingerprint:
+            ledger = self._ledgers.get(key)
+            if ledger is None:
+                self._ledgers[key] = _NodeLedger(graph_fingerprint=graph_fingerprint)
+            elif ledger.graph_fingerprint != graph_fingerprint:
                 raise RuntimeError(
                     f"Node {key} was proposed from two different graph states."
                 )
+            pending = self._pending.get(key)
+            if pending is None:
+                pending = _PendingNode(goal=sub_goal, graph_fingerprint=graph_fingerprint)
+                self._pending[key] = pending
             pendings.append(pending)
             dags.append(dag)
             datas.append(data)
             # Each row resolves arguments only through its own goal's locals.
             declaration_maps.append(local_declarations(sub_goal))
-        batch = Batch.from_data_list(datas).to(self.device)
-
         if self._proposal is None or self._generator is None:
             raise PantographStateError("Actions are proposed only inside prove().")
-        all_candidates: List[List[TacticCandidate]] = [[] for _ in sub_goals]
+        batch = Batch.from_data_list(datas).to(self.device)
+
+        proposals: List[Dict[tuple, ProposedAction]] = [{} for _ in sub_goals]
         self.model.eval()
         with torch.no_grad():
-            for _ in range(self.top_k_tactics):
+            for draw in range(max(counts, default=0)):
                 sample = self.model.act(
                     batch,
                     id_to_tactic=self.id_to_tactic,
@@ -216,29 +248,36 @@ class RLHybridReasoner(HybridReasoner):
                 for row, (dag, pending, declarations) in enumerate(
                     zip(dags, pendings, declaration_maps)
                 ):
-                    candidate, action = self._decode_row(
+                    if draw >= counts[row]:
+                        continue
+                    proposal, action = self._decode_row(
                         sample,
                         row,
                         dag,
                         declarations,
                         pending.graph_fingerprint,
                     )
-                    if candidate is None:
-                        pending.unplayable_actions.append(action)
-                        continue
-                    key = _fingerprint(candidate.tactic_name, tuple(candidate.arguments))
-                    existing = pending.actions.get(key)
-                    if existing is not None:
-                        pending.actions[key] = EdgeAction(
-                            tactic_id=existing.tactic_id,
-                            arg_indices=existing.arg_indices,
-                            multiplicity=existing.multiplicity + 1,
-                            graph_fingerprint=existing.graph_fingerprint,
+                    raw_id = (action.tactic_id, action.arg_indices)
+                    if proposal is None:
+                        known = pending.unrenderable.get(raw_id)
+                        pending.unrenderable[raw_id] = (
+                            action if known is None
+                            else replace(known, multiplicity=known.multiplicity + 1)
                         )
-                    else:
-                        pending.actions[key] = action
-                        all_candidates[row].append(candidate)
-        return all_candidates
+                        continue
+                    existing = pending.draws.get(raw_id)
+                    if existing is not None:
+                        if abs(existing.proposal.log_prior - proposal.log_prior) > 1e-4:
+                            raise RuntimeError(
+                                f"Raw action {raw_id} changed its log-prior within one round."
+                            )
+                        existing.action = replace(
+                            existing.action, multiplicity=existing.action.multiplicity + 1
+                        )
+                        continue
+                    pending.draws[raw_id] = _PendingDraw(action=action, proposal=proposal)
+                    proposals[row][raw_id] = proposal
+        return [list(row.values()) for row in proposals]
 
     def _decode_row(
         self,
@@ -247,9 +286,9 @@ class RLHybridReasoner(HybridReasoner):
         dag,
         declarations: dict[str, str],
         graph_fingerprint: str,
-    ) -> tuple[Optional[TacticCandidate], EdgeAction]:
+    ) -> tuple[Optional[ProposedAction], EdgeAction]:
         """Turn row ``row`` of a batched ``ActionSample`` into
-        ``(TacticCandidate, EdgeAction)``.
+        ``(ProposedAction, EdgeAction)``.
 
         Tactic: ``tactic_id → name`` via the inverted tactic vocab; an id outside the
         vocab (or the ``<UNK>`` family) is unplayable — drop the draw. Arguments: each
@@ -265,6 +304,10 @@ class RLHybridReasoner(HybridReasoner):
         placeholder). Out-of-range indices (padding) are dropped from the argument
         list but KEPT in ``arg_indices`` — the recompute must evaluate the log-prob of
         what was actually chosen, and ``forced_step`` zeroes invalid rows.
+
+        The proposal's prior is ``tactic_logp + arg_logp`` of this row: the tactic and
+        exactly its own pointer steps, unrounded. ``candidate.probability`` keeps the
+        tactic's probability alone, for ranking.
         """
         tactic_id = int(sample.tactic_action[row])
         tactic_name = self.id_to_tactic.get(tactic_id)
@@ -296,11 +339,18 @@ class RLHybridReasoner(HybridReasoner):
             except ValueError:
                 return None, action
 
-        probability = float(math.exp(float(sample.tactic_logp[row])))
+        tactic_logp = float(sample.tactic_logp[row].detach())
+        log_prior = tactic_logp + float(sample.arg_logp[row].detach())
         candidate = TacticCandidate(
-            tactic_name=tactic_name, arguments=arguments, probability=probability
+            tactic_name=tactic_name, arguments=arguments, probability=math.exp(tactic_logp)
         )
-        return candidate, action
+        proposal = ProposedAction(
+            candidate=candidate,
+            raw_action_id=(tactic_id, arg_indices),
+            log_prior=log_prior,
+            provider=ACTOR_PRIOR,
+        )
+        return proposal, action
 
     def _decode(
         self,
@@ -308,52 +358,105 @@ class RLHybridReasoner(HybridReasoner):
         dag,
         declarations: dict[str, str],
         graph_fingerprint: str,
-    ) -> tuple[Optional[TacticCandidate], EdgeAction]:
+    ) -> tuple[Optional[ProposedAction], EdgeAction]:
         """Batch-size-1 view of ``_decode_row`` (kept for tests and callers
         holding a single-graph ``ActionSample``)."""
         return self._decode_row(sample, 0, dag, declarations, graph_fingerprint)
 
     # ------------------------------------------------------------------
-    # Stash migration: fingerprint → edge.id on link, failures on flush
+    # Settlement: checked outcomes become policy observations
     # ------------------------------------------------------------------
 
-    def _link(self, graph: ProofHypergraph, node: ProofNode, tactic: TacticCandidate, ranked_subgoals: list):
-        edge = super()._link(graph, node, tactic, ranked_subgoals)
-        pending_key = node.id
-        if pending_key in self._pending:
-            fingerprint = _fingerprint(tactic.tactic_name, tuple(tactic.arguments))
-            action = self._pending[pending_key].actions.pop(fingerprint, None)
-            if action is not None and edge is not None and self._result is not None:
-                self._result.edge_actions[edge.id] = action
-        return edge
+    def _observe(
+        self,
+        node: ProofNode,
+        goal: Goal,
+        action: EdgeAction,
+        outcome: ObservationOutcome,
+        *,
+        edge_id: Optional[int] = None,
+        proposal: Optional[ProposedAction] = None,
+    ) -> None:
+        key = (node.id, (action.tactic_id, action.arg_indices))
+        known = self._observations.get(key)
+        if known is not None:
+            if known.outcome != outcome or known.edge_id != edge_id:
+                raise RuntimeError(
+                    f"Raw action {key[1]} at node {node.id} changed its outcome "
+                    f"from {known.outcome.value} to {outcome.value}."
+                )
+            self._observations[key] = replace(
+                known,
+                action=replace(
+                    known.action, multiplicity=known.action.multiplicity + action.multiplicity
+                ),
+            )
+            return
+        self._observations[key] = PolicyObservation(
+            node_id=node.id,
+            goal=goal,
+            action=action,
+            outcome=outcome,
+            first_round=self._ledgers[node.id].rounds,
+            edge_id=edge_id,
+            log_prior=None if proposal is None else proposal.log_prior,
+            provider="" if proposal is None else proposal.provider,
+        )
+
+    def _on_command_settled(
+        self,
+        node: ProofNode,
+        command: tuple,
+        actions: List[ProposedAction],
+        edge_id: Optional[int],
+        *,
+        executed: bool,
+    ) -> None:
+        pending = self._pending.get(node.id)
+        if pending is None:
+            raise AssertionError(f"Node {node.id} settled a command it never proposed.")
+        ledger = self._ledgers[node.id]
+        outcome = ObservationOutcome.REJECTED if edge_id is None else ObservationOutcome.ACCEPTED
+        for proposal in actions:
+            draw = pending.draws.pop(proposal.raw_action_id, None)
+            if draw is None:
+                raise AssertionError(
+                    f"Node {node.id} settled {proposal.raw_action_id}, which it did not draw."
+                )
+            rendered = ledger.commands.setdefault(proposal.raw_action_id, command)
+            if rendered != command:
+                # The same model action rendered another command after replay:
+                # its cached outcome would belong to a different declaration.
+                raise RuntimeError(
+                    f"Raw action {proposal.raw_action_id} at node {node.id} rendered "
+                    f"{rendered} before and {command} now."
+                )
+            self._observe(node, pending.goal, draw.action, outcome, edge_id=edge_id, proposal=proposal)
 
     def _on_expansion_complete(
         self,
         node: ProofNode,
         result: ExpansionResult,
     ) -> None:
-        """Settle sampled actions according to what Lean actually observed."""
-        if result in (ExpansionResult.TACTICS_EXECUTED, ExpansionResult.NO_CANDIDATES):
-            self._flush_pending(node.id)
-            return
-
+        """Close the node's round according to what Lean actually observed."""
         pending = self._pending.pop(node.id, None)
+        if result in (ExpansionResult.TACTICS_EXECUTED, ExpansionResult.NO_CANDIDATES):
+            if pending is None:
+                return
+            if pending.draws:
+                raise AssertionError(
+                    f"Node {node.id} ended a round with unsettled draws {sorted(pending.draws)}."
+                )
+            for action in pending.unrenderable.values():
+                self._observe(node, pending.goal, action, ObservationOutcome.UNRENDERABLE)
+            self._ledgers[node.id].rounds += 1
+            return
         if result == ExpansionResult.DEPTH_LIMIT:
-            if pending is not None and (pending.actions or pending.unplayable_actions):
+            if pending is not None and (pending.draws or pending.unrenderable):
                 raise AssertionError(
                     f"{result.value} cannot leave executable actions for node {node.id}"
                 )
-
-    def _flush_pending(self, key: int) -> None:
-        """Convert one node's still-pending samples into failure records."""
-        pending = self._pending.pop(key, None)
-        if pending is None:
-            return
-        if self._result is not None:
-            for action in [*pending.actions.values(), *pending.unplayable_actions]:
-                self._result.failure_actions.append(
-                    FailureRecord(goal=pending.goal, action=action)
-                )
+        # Replay failure or abort: nothing Lean observed, so nothing is settled.
 
     # ------------------------------------------------------------------
     # Leaf evaluation: the critic as v_T(g) (HTPS)
@@ -383,15 +486,15 @@ class RLHybridReasoner(HybridReasoner):
         proposal: ProposalSpec,
         deadline: Optional[float] = None,
     ) -> RLSearchResult:
-        """Run the search and return ``RLSearchResult(graph, edge_actions, failure_actions)``.
+        """Run the search and return ``RLSearchResult(graph, observations)``.
 
-        Stashes are reset per call, so one reasoner instance must run searches
+        Per-search state is reset per call, so one reasoner instance must run searches
         sequentially (cross-theorem concurrency needs per-search instances).
 
         ``proposal`` fixes how actions are proposed (``sample`` or step-wise
         ``greedy``) and seeds a generator owned by this search on the model's
-        device; the global Torch RNG is not used. The stash fills in both modes;
-        evaluation callers ignore it (no gradient step follows an eval).
+        device; the global Torch RNG is not used. Observations fill in both modes;
+        evaluation callers ignore them (no gradient step follows an eval).
 
         ``deadline`` (a ``time.monotonic()`` timestamp) is forwarded to the base
         search loop, which stops cleanly between expansions / simulation batches
@@ -405,6 +508,8 @@ class RLHybridReasoner(HybridReasoner):
         if not isinstance(proposal, ProposalSpec):
             raise TypeError(f"prove() needs a ProposalSpec, got {type(proposal).__name__}.")
         self._pending = {}
+        self._ledgers = {}
+        self._observations = {}
         self._proposal = proposal
         self._generator = torch.Generator(device=self.device).manual_seed(proposal.seed)
         self._result = RLSearchResult(graph=None)  # graph attached after the base search
@@ -415,9 +520,12 @@ class RLHybridReasoner(HybridReasoner):
                     "Normal search completion left sampled actions without an expansion outcome."
                 )
             self._result.graph = graph
+            self._result.observations = list(self._observations.values())
             result, self._result = self._result, None
         finally:
             self._pending.clear()
+            self._ledgers = {}
+            self._observations = {}
             self._proposal = None
             self._generator = None
             self._result = None

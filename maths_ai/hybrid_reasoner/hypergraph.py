@@ -25,10 +25,17 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+import math
 from math import isfinite
 from typing import Deque, Dict, List, Optional, Protocol, Set, Tuple
 
-from maths_ai.data_models.proof_components import STV, Goal, TacticCandidate
+from maths_ai.data_models.proof_components import (
+    LOG_PRIOR_TOLERANCE,
+    STV,
+    Goal,
+    ProposedAction,
+    TacticCandidate,
+)
 from maths_ai.data_models.proof_components import GoalState as GoalStateModel
 from pantograph_async import PantographStateScope, TacticState
 
@@ -122,6 +129,10 @@ class ProofNode:
     outgoing_edge_ids: List[int] = field(default_factory=list)
     combined_rank: float = 0.0
     exhausted: bool = False
+    # Checked execution outcome of each command tried at this node: the edge
+    # it created, or None for a Lean rejection. Infrastructure failures are
+    # never recorded. A later draw of the same command reuses the outcome.
+    command_outcomes: Dict[tuple, Optional[int]] = field(default_factory=dict)
     note: Optional[str] = None
     closure_reason: NodeClosureReason = NodeClosureReason.NONE
     """Free-text annotation for terminal states the graph can't infer on its
@@ -170,18 +181,15 @@ class EdgeVisitStats:
     in-flight simulations that selected this edge but have not backed up
     yet — each one is treated as a pending loss (contributes 0 to ``W``
     while inflating the visit count), which steers concurrent simulations
-    in the same batch toward different branches. ``prior_prob`` is the
-    policy prior P(g,t) stamped once at edge creation by
-    ``ProofHypergraph.add_edge`` (the tactic-head probability
-    ``tactic.probability``) and read — never recomputed — by
-    ``puct_score`` on every later selection.
+    in the same batch toward different branches. The policy prior is not
+    stored here: ``ProofHypergraph.puct_priors`` derives it from the edges'
+    raw action log-priors whenever the node's selectable support changes.
     """
 
     N: int = 0
     N_v: int = 0
     W: float = 0.0
     virtual_loss: int = 0
-    prior_prob: float = 0.0
 
     @property
     def Q(self) -> float:
@@ -197,14 +205,40 @@ class EdgeVisitStats:
         return self.W / self.N_v
 
 
+# Prior contract, recorded in saved search settings and reports.
+PRIOR_SEMANTICS = "joint-action-v1"
+PRIOR_NORMALIZATION = "viable-observed-support-v1"
+PRIOR_ALIAS_POLICY = "unique-raw-action-sum-v1"
+
+
+def logsumexp(values: List[float]) -> float:
+    top = max(values)
+    return top + math.log(sum(math.exp(value - top) for value in values))
+
+
 @dataclass
 class ProofHyperedge:
+    """One executed command and every raw action observed to render it.
+
+    ``raw_log_priors`` maps each distinct raw action id to its immutable
+    log-prior. The edge's mass is their log-sum-exp: each distinct raw action
+    counts once, however often it was drawn. This is mass over the raw actions
+    this search observed, not the command's exact probability over every
+    possible alias.
+    """
+
     id: int
     source_id: int
     tactic: TacticCandidate
     child_ids: List[int] = field(default_factory=list)
     status: str = EdgeStatus.PENDING
     visit_stats: EdgeVisitStats = field(default_factory=EdgeVisitStats)
+    raw_log_priors: Dict[tuple, float] = field(default_factory=dict)
+    provider: str = ""
+
+    @property
+    def log_mass(self) -> float:
+        return logsumexp(list(self.raw_log_priors.values()))
 
     def summary(self) -> dict:
         return {
@@ -212,16 +246,21 @@ class ProofHyperedge:
             "source_id": self.source_id,
             "tactic": self.tactic.tactic_name,
             "arguments": list(self.tactic.arguments),
-            "probability": self.tactic.probability,
+            "tactic_confidence": self.tactic.probability,
             "child_ids": list(self.child_ids),
             "status": self.status,
+            "prior": {
+                "provider": self.provider,
+                "raw_actions": len(self.raw_log_priors),
+                "raw_log_priors": sorted(self.raw_log_priors.values(), reverse=True),
+                "log_mass": self.log_mass,
+            },
             "visits": {
                 "N": self.visit_stats.N,
                 "N_v": self.visit_stats.N_v,
                 "W": self.visit_stats.W,
                 "Q": self.visit_stats.Q,
                 "virtual_loss": self.visit_stats.virtual_loss,
-                "prior_prob": self.visit_stats.prior_prob,
             },
         }
 
@@ -328,10 +367,10 @@ class ProofHypergraph:
     def add_edge(
         self,
         source_id: int,
-        tactic: TacticCandidate,
+        action: ProposedAction,
         ranked_subgoals: List[Tuple[Goal, Optional[STV]]],
     ) -> ProofHyperedge:
-        """Record a tactic application from ``source_id`` producing the given
+        """Record the application of ``action`` from ``source_id`` producing the given
         ``(subgoal, stv)`` children (already scored by PLN and capped to the
         chosen top-k — see ``HybridReasoner.rank_subgoals``).
 
@@ -349,7 +388,16 @@ class ProofHypergraph:
         ``source_id``'s own ancestors is created but force-marked DEAD with
         ``note="cycle"`` rather than re-explored, so the search can't loop
         forever rediscovering the same state.
+
+        The edge starts with ``action``'s raw log-prior; ``observe_alias`` adds
+        further raw actions that render the same command.
         """
+        if not isinstance(action, ProposedAction):
+            raise TypeError(f"add_edge needs a ProposedAction, got {type(action).__name__}.")
+        tactic = action.candidate
+        for eid in self.nodes[source_id].outgoing_edge_ids:
+            if self.edges[eid].tactic.command == tactic.command:
+                raise ValueError(f"Node {source_id} already has an edge for {tactic.command}.")
         edge_id = self._next_edge_id
         self._next_edge_id += 1
         depth = self.nodes[source_id].depth + 1
@@ -377,7 +425,8 @@ class ProofHypergraph:
             source_id=source_id,
             tactic=tactic,
             child_ids=child_ids,
-            visit_stats=EdgeVisitStats(prior_prob=tactic.probability),
+            raw_log_priors={action.raw_action_id: float(action.log_prior)},
+            provider=action.provider,
         )
         edge.status = self._derive_edge_status(edge)
         self.edges[edge_id] = edge
@@ -385,6 +434,53 @@ class ProofHypergraph:
 
         self._propagate(source_id)
         return edge
+
+    def observe_alias(self, edge_id: int, action: ProposedAction) -> bool:
+        """Record another raw action that renders ``edge_id``'s command.
+
+        Return True when it is new, which adds its probability to the edge's
+        mass once. A raw action seen again must carry the same log-prior; a
+        different value means the model, graph or provider changed under the
+        search and is an error, not new mass.
+        """
+        edge = self.edges[edge_id]
+        if action.command != edge.tactic.command:
+            raise ValueError(f"{action.command} is not an alias of edge {edge_id}.")
+        if action.provider != edge.provider:
+            raise ValueError(
+                f"Edge {edge_id} has priors from {edge.provider!r}, not {action.provider!r}."
+            )
+        known = edge.raw_log_priors.get(action.raw_action_id)
+        if known is not None:
+            if abs(known - action.log_prior) > 1e-4:
+                raise ValueError(
+                    f"Raw action {action.raw_action_id} changed its log-prior from "
+                    f"{known} to {action.log_prior}."
+                )
+            return False
+        edge.raw_log_priors[action.raw_action_id] = float(action.log_prior)
+        return True
+
+    def puct_priors(self, node_id: int) -> Dict[int, float]:
+        """Effective PUCT priors of ``node_id``'s selectable (non-dead) edges.
+
+        Each edge's mass is normalized in log space over the node's current
+        non-dead edges, so the priors sum to one. They are derived on every
+        call, so adding an edge, a new alias or a dead edge renormalizes them
+        without touching any visit statistics or raw log-priors.
+        """
+        viable = [
+            self.edges[eid]
+            for eid in self.nodes[node_id].outgoing_edge_ids
+            if self.edges[eid].status != EdgeStatus.DEAD
+        ]
+        if not viable:
+            return {}
+        masses = [edge.log_mass for edge in viable]
+        normalizer = logsumexp(masses)
+        if not isfinite(normalizer):
+            raise ValueError(f"Node {node_id} has no finite prior mass to normalize.")
+        return {edge.id: math.exp(mass - normalizer) for edge, mass in zip(viable, masses)}
 
     def mark_edge_dead(self, edge_id: int, *, note: Optional[str] = None) -> None:
         """The tactic failed to apply (Lean rejected it / executor error)."""

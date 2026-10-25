@@ -3,7 +3,7 @@ from typing import List, Optional, cast
 
 import torch
 
-from maths_ai.data_models.proof_components import Goal, TacticCandidate
+from maths_ai.data_models.proof_components import Goal, ProposedAction, TacticCandidate
 from maths_ai.gnn_inference.atp_lean_gnn.checkpointing import (
     build_model_from_checkpoint,
 )
@@ -165,3 +165,35 @@ class GNNModelEngine:
         ]
 
         return result
+
+    def propose(self, goal: Goal, top_k: int = 3) -> List[ProposedAction]:
+        """Ranked candidates as search proposals, each with its action prior.
+
+        The prior is the tactic's log-probability plus the log-probability of
+        the ranked arguments under the predictor's argument law (a softmax
+        over the eligible pool, without replacement). A prediction whose
+        tactic needs arguments it could not choose is incomplete and is not
+        proposed. The source is finite: the same goal gives the same ranks.
+        """
+        predictions = self.gnn_inference.predict_tactics_with_arguments(
+            goal.require_model_state(), top_k=top_k
+        )
+        proposals: List[ProposedAction] = []
+        for prediction in predictions:
+            log_prior = prediction.get("action_log_prior")
+            if log_prior is None:
+                continue
+            arguments = [str(argument) for argument in cast(list, prediction["selected_arguments"])]
+            proposals.append(
+                ProposedAction(
+                    candidate=TacticCandidate(
+                        tactic_name=str(prediction["tactic_name"]),
+                        arguments=arguments,
+                        probability=float(cast(float, prediction["probability"])),
+                    ),
+                    raw_action_id=(int(cast(int, prediction["tactic_id"])), tuple(arguments)),
+                    log_prior=float(log_prior),
+                    provider=f"gnn-engine/{prediction['argument_law']}-v1",
+                )
+            )
+        return proposals

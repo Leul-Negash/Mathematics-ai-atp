@@ -13,7 +13,7 @@ from maths_ai.hybrid_reasoner.hypergraph import BackupSource, ProofHypergraph, N
 from maths_ai.gnn_inference.atp_lean_gnn.graph import dag_fingerprint, model_goal_to_dag
 from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab, build_vocab_from_labels
 from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import ActorCriticWithArgsClassifier
-from maths_ai.gnn_inference.tests.model_helpers import actor_critic, structured_goal
+from maths_ai.gnn_inference.tests.model_helpers import actor_critic, scored, structured_goal
 from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import (
     _is_structural_label,
     make_dag_featurizer,
@@ -57,15 +57,15 @@ class PLNRLTrainingTests(unittest.TestCase):
         g = ProofHypergraph(root)
         edge = g.add_edge(
             g.root_id,
-            _tac(),
+            scored(_tac()),
             ranked_subgoals=[
                 (sub_a, STV(strength=0.6, confidence=1.0)),
                 (sub_b, STV(strength=0.4, confidence=1.0)),
             ],
         )
         a_id, b_id = edge.child_ids
-        g.add_edge(a_id, _tac(), ranked_subgoals=[])  # QED
-        g.add_edge(b_id, _tac(), ranked_subgoals=[])  # QED
+        g.add_edge(a_id, scored(_tac()), ranked_subgoals=[])  # QED
+        g.add_edge(b_id, scored(_tac()), ranked_subgoals=[])  # QED
         return g
 
     def _setup(self):

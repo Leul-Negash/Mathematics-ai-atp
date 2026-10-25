@@ -28,12 +28,14 @@ from maths_ai.gnn_inference.tests.model_helpers import (
     ScopedFakeClient,
     actor_critic,
     pantograph_goal,
+    scored,
     structured_goal,
 )
 from maths_ai.gnn_inference.atp_lean_gnn.pln_reward import RewardConfig
 from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import (
     EdgeAction,
-    FailureRecord,
+    ObservationOutcome,
+    PolicyObservation,
     compute_onpolicy_loss,
     make_dag_featurizer,
     train_step_onpolicy,
@@ -43,6 +45,19 @@ from maths_ai.gnn_inference.atp_lean_gnn.search_harvest import extract_transitio
 from maths_ai.hybrid_reasoner.proposal import ProposalSpec
 
 SAMPLE = ProposalSpec(mode="sample", seed=0)
+
+
+def accepted(result):
+    """Each accepted edge's first raw action, as the old join table had it."""
+    actions = {}
+    for observation in result.observations:
+        if observation.edge_id is not None:
+            actions.setdefault(observation.edge_id, observation.action)
+    return actions
+
+
+def failed(result):
+    return [o for o in result.observations if o.outcome != ObservationOutcome.ACCEPTED]
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +218,11 @@ class DecodeTests(unittest.TestCase):
         candidate, action = reasoner._decode(
             sample, dag, local_declarations(goal), str(data.graph_fingerprint)
         )
-        self.assertEqual(candidate.tactic_name, "exact")
-        self.assertEqual(candidate.arguments, ["p"])
+        self.assertEqual(candidate.candidate.tactic_name, "exact")
+        self.assertEqual(candidate.candidate.arguments, ["p"])
+        # The prior is the tactic and its one owned argument step.
+        self.assertAlmostEqual(candidate.log_prior, -0.8, places=6)
+        self.assertEqual(candidate.raw_action_id, (2, (hyp_idx,)))
         self.assertEqual(action.tactic_id, 2)
         self.assertEqual(action.arg_indices, (hyp_idx,))
 
@@ -286,7 +304,7 @@ class DeclarationResolutionTests(unittest.TestCase):
                 candidate, _ = reasoner._decode(
                     self._sample([index]), dag, declarations, "fingerprint"
                 )
-                self.assertEqual(candidate.arguments, [live])
+                self.assertEqual(candidate.candidate.arguments, [live])
 
     def test_batched_leaves_resolve_through_their_own_declarations(self):
         """Leaves with the same model names but different live names, and a leaf
@@ -357,7 +375,7 @@ class DeclarationResolutionTests(unittest.TestCase):
                         batch, node_ids=list(range(1, rows + 1))
                     )
                     self.assertEqual(
-                        [row[0].arguments[0] for row in proposals], expected, (label, kind)
+                        [row[0].candidate.arguments[0] for row in proposals], expected, (label, kind)
                     )
                     # Each row's draw is owned by its own node.
                     self.assertEqual(sorted(reasoner._pending), list(range(1, rows + 1)))
@@ -370,7 +388,7 @@ class ProposalSeedTests(unittest.TestCase):
     def _draws(result):
         return sorted(
             (action.tactic_id, action.arg_indices, action.multiplicity)
-            for action in [*result.edge_actions.values(), *(f.action for f in result.failure_actions)]
+            for action in (o.action for o in result.observations)
         )
 
     def test_the_same_seed_repeats_a_search_and_leaves_the_global_rng_alone(self):
@@ -409,16 +427,15 @@ class RolloutTests(unittest.TestCase):
         result = self._prove(reasoner)
 
         self.assertTrue(result.graph.is_solved())
-        self.assertGreater(len(result.edge_actions), 0)
-        for edge_id, action in result.edge_actions.items():
+        self.assertGreater(len(accepted(result)), 0)
+        for edge_id, action in accepted(result).items():
             edge = result.graph.edges[edge_id]
             self.assertEqual(edge.tactic.tactic_name, reasoner.id_to_tactic[action.tactic_id])
 
     def test_multiplicity_accounts_for_every_draw(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
         result = self._prove(reasoner)
-        total = sum(a.multiplicity for a in result.edge_actions.values())
-        total += sum(f.action.multiplicity for f in result.failure_actions)
+        total = sum(o.action.multiplicity for o in result.observations)
         # One node expanded (root, immediately solved): every i.i.d. draw is accounted for.
         self.assertEqual(total, reasoner.top_k_tactics)
 
@@ -427,9 +444,9 @@ class RolloutTests(unittest.TestCase):
         result = self._prove(reasoner)
 
         self.assertFalse(result.graph.is_solved())
-        self.assertEqual(len(result.edge_actions), 0)
-        self.assertGreater(len(result.failure_actions), 0)
-        total = sum(f.action.multiplicity for f in result.failure_actions)
+        self.assertEqual(len(accepted(result)), 0)
+        self.assertGreater(len(failed(result)), 0)
+        total = sum(f.action.multiplicity for f in failed(result))
         self.assertEqual(total, reasoner.top_k_tactics)
 
     def test_onpolicy_edge_filter(self):
@@ -437,11 +454,11 @@ class RolloutTests(unittest.TestCase):
         result = self._prove(reasoner)
         transitions = extract_transitions(
             result.graph, RewardConfig(step_penalty=0.0),
-            edge_ids=list(result.edge_actions.keys()),
+            edge_ids=list(accepted(result).keys()),
         )
-        self.assertEqual(len(transitions), len(result.edge_actions))
+        self.assertEqual(len(transitions), len(accepted(result)))
         for t in transitions:
-            self.assertIn(t.edge_id, result.edge_actions)
+            self.assertIn(t.edge_id, accepted(result))
 
 
 class OnPolicyLossTests(unittest.TestCase):
@@ -481,10 +498,10 @@ class OnPolicyLossTests(unittest.TestCase):
     def test_failure_only_batch_is_actor_only(self):
         reasoner, model, _vocab = _make_reasoner(_RejectExecutor())
         result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
-        self.assertGreater(len(result.failure_actions), 0)
+        self.assertGreater(len(failed(result)), 0)
 
         loss_result = compute_onpolicy_loss(
-            model, [], [], {}, result.failure_actions, reasoner.dag_featurize_data,
+            model, [], [], failed(result), reasoner.dag_featurize_data,
         )
         self.assertIsNotNone(loss_result)
         loss, metrics = loss_result
@@ -498,7 +515,7 @@ class OnPolicyLossTests(unittest.TestCase):
         result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         transitions = extract_transitions(
             result.graph, RewardConfig(step_penalty=0.0),
-            edge_ids=list(result.edge_actions.keys()),
+            edge_ids=list(accepted(result).keys()),
         )
         goal = structured_goal(GOAL_EXPR, HYPS)
 
@@ -506,16 +523,21 @@ class OnPolicyLossTests(unittest.TestCase):
         # advantage contrast, so re-weighting the failure by m must change the loss.
         def loss_with(m: int) -> float:
             model.eval()  # deterministic forward so only multiplicity differs
-            failures = [FailureRecord(
+            failures = [PolicyObservation(
+                node_id=0,
                 goal=goal,
                 action=EdgeAction(
                     tactic_id=1,
                     multiplicity=m,
                     graph_fingerprint=str(reasoner.dag_featurize(goal)[1].graph_fingerprint),
                 ),
+                outcome=ObservationOutcome.REJECTED,
+                first_round=0,
+                log_prior=-1.0,
+                provider="test",
             )]
             out = compute_onpolicy_loss(
-                model, transitions, [], result.edge_actions, failures,
+                model, transitions, [], [*result.observations, *failures],
                 reasoner.dag_featurize_data, reward_cfg=RewardConfig(step_penalty=0.0),
             )
             self.assertIsNotNone(out)
@@ -697,22 +719,22 @@ class MCTSSearchTests(unittest.TestCase):
             selection_policy="puct", num_simulations=6, sim_batch_size=2,
         )
         result = self._prove(reasoner)
-        self.assertGreater(len(result.failure_actions), 0)
-        for record in result.failure_actions:
+        self.assertGreater(len(failed(result)), 0)
+        for record in failed(result):
             self.assertEqual(record.goal.expression, "B")
         # A's QED edge is in the on-policy join table with a matching tactic.
         solved_edges = [
             eid for eid, e in result.graph.edges.items()
             if result.graph.nodes[e.source_id].goal.expression == "A"
         ]
-        self.assertTrue(any(eid in result.edge_actions for eid in solved_edges))
+        self.assertTrue(any(eid in accepted(result) for eid in solved_edges))
 
     def _two_leaf_graph(self):
         root = structured_goal(self.ROOT, HYPS)
         graph = ProofHypergraph(root)
         edge = graph.add_edge(
             graph.root_id,
-            TacticCandidate(tactic_name="intro", arguments=[], probability=1.0),
+            scored(TacticCandidate(tactic_name="intro", arguments=[], probability=1.0)),
             [(structured_goal("A", HYPS), None), (structured_goal("B", HYPS), None)],
         )
         return graph, edge.child_ids

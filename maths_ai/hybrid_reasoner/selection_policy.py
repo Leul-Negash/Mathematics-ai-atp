@@ -78,16 +78,18 @@ def resolve_search_params(
     )
 
 
-def puct_score(stats: EdgeVisitStats, total_node_visits: int, c: float) -> float:
+def puct_score(
+    stats: EdgeVisitStats, prior: float, total_node_visits: int, c: float
+) -> float:
     """PUCT score for one tactic edge.
 
-    The prior is ``stats.prior_prob`` — the tactic-head probability stamped
-    onto the edge's ``EdgeVisitStats`` at creation time by
-    ``ProofHypergraph.add_edge`` — read here rather than passed in, so no
-    caller can substitute a live recomputation. ``total_node_visits`` is the
-    sum of (N + virtual_loss) over all sibling edges at the parent node;
-    ``c`` is the exploration constant.
+    ``prior`` is the edge's effective prior from
+    ``ProofHypergraph.puct_priors``: its observed complete-action mass,
+    normalized over the parent's non-dead edges. ``total_node_visits`` is the
+    sum of (N + virtual_loss) over those sibling edges; ``c`` is the
+    exploration constant. Virtual loss changes Q and the visit counts, never
+    the prior.
     """
-    return stats.Q + c * stats.prior_prob * math.sqrt(total_node_visits) / (
+    return stats.Q + c * prior * math.sqrt(total_node_visits) / (
         1 + stats.N + stats.virtual_loss
     )

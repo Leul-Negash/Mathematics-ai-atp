@@ -148,12 +148,10 @@ async def run_smoke(
         graph = result.graph
         print(
             f"[rl_smoke] search done: solved={graph.is_solved()} nodes={len(graph.nodes)} "
-            f"edges={len(graph.edges)} on-policy edges={len(result.edge_actions)} "
-            f"failures={len(result.failure_actions)}"
+            f"edges={len(graph.edges)} on-policy edges={len(result.accepted_edge_ids())} "
+            f"observations={len(result.observations)} draws={result.draws()}"
         )
-        assert (
-            result.edge_actions or result.failure_actions
-        ), "no on-policy signal collected — neither an accepted edge nor a failure record"
+        assert result.observations, "no on-policy signal collected — no settled policy draw"
 
         optimizer = AdamW(model.parameters(), lr=1e-3)
         metrics = train_step_onpolicy(

@@ -27,6 +27,7 @@ from maths_ai.hybrid_reasoner.pantograph_adapter import execution_state_to_goals
 from maths_ai.data_models.model_identity import carry_model_identity
 from maths_ai.data_models.proof_components import (
     Goal,
+    ProposedAction,
     RankedSubgoal,
     STV,
     TacticCandidate,
@@ -333,7 +334,7 @@ class HybridReasoner:
             corpus_path=corpus_path,
         )
 
-    def predict_next_tactic(self, sub_goal: Goal) -> List[TacticCandidate]:
+    def predict_next_tactic(self, sub_goal: Goal) -> List[ProposedAction]:
         """
             Args:
                 sub_goal: the sanitized target sub_goal (expression plus its
@@ -342,15 +343,17 @@ class HybridReasoner:
                     goal, so sampled arguments resolve against the same DAG
                     the encoder saw.
             Returns:
-                up to `top_k_tactics` TacticCandidate(tactic_name, arguments, probability),
-                ranked by predicted probability, descending.
+                up to `top_k_tactics` ProposedAction records, each a
+                TacticCandidate(tactic_name, arguments, probability) ranked by
+                tactic probability, descending, with the complete action's
+                log-prior under the engine's documented argument law.
 
                 An empty list means the GNN found no viable tactic for this
                 goal (see GNNModelEngine.inference's "degenerate prediction"
                 edge case) — callers must treat that as a dead branch, which
                 `_expand` below does via `graph.mark_node_exhausted`.
         """
-        return self.gnn_engine.inference(sub_goal, top_k=self.top_k_tactics)
+        return self.gnn_engine.propose(sub_goal, top_k=self.top_k_tactics)
 
     # PLN side
     def _make_dts_key(self, parent_goal: str, tactic: TacticCandidate, subgoal: Goal) -> str:
@@ -658,9 +661,10 @@ class HybridReasoner:
             if not viable:
                 continue  # stuck node (all edges dead, not yet propagated DEAD)
             total_visits = sum(e.visit_stats.N + e.visit_stats.virtual_loss for e in viable)
+            priors = graph.puct_priors(node_id)
             best = max(
                 viable,
-                key=lambda e: puct_score(e.visit_stats, total_visits, self.puct_c),
+                key=lambda e: puct_score(e.visit_stats, priors[e.id], total_visits, self.puct_c),
             )
             chosen_edges[node_id] = best.id
             best.visit_stats.virtual_loss += 1
@@ -670,7 +674,7 @@ class HybridReasoner:
             return None
         return _Simulation(chosen_edges=chosen_edges, leaves=leaves)
 
-    def predict_next_tactics_batch(self, sub_goals: List[Goal]) -> List[List[TacticCandidate]]:
+    def predict_next_tactics_batch(self, sub_goals: List[Goal]) -> List[List[ProposedAction]]:
         """Propose tactic candidates for several goals at once.
 
         Default implementation loops ``predict_next_tactic`` so the base
@@ -681,7 +685,7 @@ class HybridReasoner:
 
     def predict_next_tactics_for_nodes(
         self, nodes: List[ProofNode]
-    ) -> List[List[TacticCandidate]]:
+    ) -> List[List[ProposedAction]]:
         """Internal node-aware proposal seam used by both search modes.
 
         The base reasoner needs only sanitized goals. RL overrides this method so
@@ -936,20 +940,14 @@ class HybridReasoner:
         self,
         graph: ProofHypergraph,
         node: ProofNode,
-        tactic: TacticCandidate,
+        action: ProposedAction,
         ranked_subgoals: list,
     ):
-        """Link one successful tactic application into the hypergraph and
-        return the created hyperedge (or ``None`` when ``add_edge`` refuses
-        the link, e.g. on cycle detection).
-
-        This is the single seam between search and training data collection:
-        ``RLHybridReasoner`` overrides it to associate the returned edge id
-        with the sampled action indices that produced ``tactic``, so the
-        train phase can recompute log-probabilities for exactly the edges
-        that made it into the graph.
+        """Link one successful application of ``action`` into the hypergraph
+        and return the created hyperedge. Training data is attached through
+        ``_on_command_settled``, not here.
         """
-        return graph.add_edge(node.id, tactic, ranked_subgoals=ranked_subgoals)
+        return graph.add_edge(node.id, action, ranked_subgoals=ranked_subgoals)
 
     async def _expand(self, graph: ProofHypergraph, node: ProofNode) -> None:
         """Try each of the GNN's top-k tactics on ``node`` and link whatever
@@ -989,22 +987,42 @@ class HybridReasoner:
         self,
         graph: ProofHypergraph,
         node: ProofNode,
-        candidates: List[TacticCandidate],
+        proposals: List[ProposedAction],
         *,
         materialized: MaterializedGoal,
     ) -> None:
-        """Execute each proposed candidate against Lean and link the
-        survivors into the hypergraph — the per-node execution stage shared
-        by the best-first path (``_expand``) and the batched MCTS path
-        (``_expand_leaves``). Ends with ``mark_node_exhausted`` (the node's
-        candidate set is spent) and the ``_on_expansion_complete`` hook.
+        """Execute one proposal round at ``node`` and link the survivors — the
+        per-node execution stage shared by the best-first path (``_expand``)
+        and the batched MCTS path (``_expand_leaves``).
+
+        Proposals are grouped by rendered command. A command runs in Lean at
+        most once per node: its checked outcome (new edge or rejection) is
+        kept in ``node.command_outcomes``, and a later raw action rendering it
+        reuses that outcome. A raw action that reaches an existing edge is
+        recorded as an alias of it, which adds its prior mass once. Every
+        group is reported to ``_on_command_settled``; the round ends with
+        ``mark_node_exhausted`` and ``_on_expansion_complete``.
         """
         if materialized.fingerprint != node.goal.state_fingerprint():
             raise RuntimeError(f"Node {node.id} goal changed after action sampling.")
         state = materialized.state
         any_applied = False
 
-        for tactic in candidates:
+        groups: Dict[tuple, List[ProposedAction]] = {}
+        for action in proposals:
+            groups.setdefault(action.command, []).append(action)
+
+        for command, actions in groups.items():
+            tactic = actions[0].candidate
+            if command in node.command_outcomes:
+                edge_id = node.command_outcomes[command]
+                if edge_id is not None:
+                    any_applied = True
+                    for action in actions:
+                        graph.observe_alias(edge_id, action)
+                self._on_command_settled(node, command, actions, edge_id, executed=False)
+                continue
+
             try:
                 outcome = await self.executor.apply(self._scope, state, tactic)
             except _INFRASTRUCTURE_ERRORS as exc:
@@ -1019,6 +1037,8 @@ class HybridReasoner:
 
             if not outcome.success:
                 print(f"  [Tactic FAILED] {tactic.tactic_name} {' '.join(tactic.arguments)} — {outcome.error}")
+                node.command_outcomes[command] = None
+                self._on_command_settled(node, command, actions, None, executed=True)
                 continue
             any_applied = True
             print(f"  [Tactic APPLIED] {tactic.tactic_name} {' '.join(tactic.arguments)} (prob={tactic.probability:.4f})")
@@ -1032,10 +1052,8 @@ class HybridReasoner:
             if not subgoals:
                 # "no-goal": this tactic fully discharges the goal (QED for this branch)
                 print(f"  [Tactic QED] no subgoals — branch closed!")
-                self._link(graph, node, tactic, ranked_subgoals=[])
-                continue
-
-            if self.use_pln:
+                chosen = []
+            elif self.use_pln:
                 print(f"  [PLN Ranking] scoring {len(subgoals)} subgoal(s)...")
                 ranked = await self.rank_subgoals(
                     node.goal.expression, subgoals, tactic,
@@ -1055,7 +1073,11 @@ class HybridReasoner:
                 # gnn_probability, and potential() returns 0.0 (no shaping).
                 chosen = [(subgoal, None) for subgoal in subgoals]
 
-            self._link(graph, node, tactic, ranked_subgoals=chosen)
+            edge = self._link(graph, node, actions[0], ranked_subgoals=chosen)
+            node.command_outcomes[command] = edge.id
+            for action in actions[1:]:
+                graph.observe_alias(edge.id, action)
+            self._on_command_settled(node, command, actions, edge.id, executed=True)
 
         note = None if any_applied else "executor rejected every candidate tactic"
         if note:
@@ -1066,6 +1088,21 @@ class HybridReasoner:
             note=note,
         )
         self._on_expansion_complete(node, ExpansionResult.TACTICS_EXECUTED)
+
+    def _on_command_settled(
+        self,
+        node: ProofNode,
+        command: tuple,
+        actions: List[ProposedAction],
+        edge_id: Optional[int],
+        *,
+        executed: bool,
+    ) -> None:
+        """Hook: ``actions`` (all rendering ``command``) now have a checked
+        outcome — ``edge_id``, or None for a Lean rejection. ``executed`` is
+        False when the outcome came from the node's cache. The RL subclass
+        turns them into policy observations.
+        """
 
 
 

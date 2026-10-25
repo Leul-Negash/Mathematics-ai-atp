@@ -1,11 +1,11 @@
 """Unit tests for PUCT edge selection (Phase 1 of the HTPS/MCTS integration)
 and the search-mode validator.
 
-puct_score(stats, total_node_visits, c)
-  = Q + c * stats.prior_prob * sqrt(total_node_visits) / (1 + N + virtual_loss)
+puct_score(stats, prior, total_node_visits, c)
+  = Q + c * prior * sqrt(total_node_visits) / (1 + N + virtual_loss)
 
 where Q = W / N_v with first-play-urgency 0.5 when no valid backup exists, and
-prior_prob is the policy prior stamped onto the stats at edge creation.
+prior is the edge's effective prior from ProofHypergraph.puct_priors.
 """
 
 import pytest
@@ -17,44 +17,43 @@ from maths_ai.hybrid_reasoner.selection_policy import puct_score, resolve_search
 def test_prior_dominates_among_unvisited_edges():
     # Both edges unvisited: Q is the identical FPU 0.5, so the ordering is
     # exactly the prior ordering.
-    high = EdgeVisitStats(prior_prob=0.9)
-    low = EdgeVisitStats(prior_prob=0.1)
+    stats = EdgeVisitStats()
     total = 4
-    assert puct_score(high, total, c=1.0) > puct_score(low, total, c=1.0)
+    assert puct_score(stats, 0.9, total, c=1.0) > puct_score(stats, 0.1, total, c=1.0)
 
 
 def test_q_dominates_at_high_visit_counts():
     # A well-visited winning edge (Q=1) with a tiny prior beats a well-visited
     # losing edge (Q=0) with a large prior: the exploration bonus has decayed
     # by 1/(1+N) while Q has converged.
-    winning = EdgeVisitStats(N=100, N_v=100, W=100.0, prior_prob=0.01)
-    losing = EdgeVisitStats(N=100, N_v=100, W=0.0, prior_prob=0.99)
+    winning = EdgeVisitStats(N=100, N_v=100, W=100.0)
+    losing = EdgeVisitStats(N=100, N_v=100, W=0.0)
     total = 200
-    assert puct_score(winning, total, c=1.0) > puct_score(losing, total, c=1.0)
+    assert puct_score(winning, 0.01, total, c=1.0) > puct_score(losing, 0.99, total, c=1.0)
 
 
 def test_virtual_loss_suppresses_in_flight_edge():
     # Identical priors and no valid backups; one edge has a simulation in
     # flight. Exploration still sees the traversal through N + virtual_loss.
-    in_flight = EdgeVisitStats(virtual_loss=1, prior_prob=0.5)
-    untouched = EdgeVisitStats(prior_prob=0.5)
+    in_flight = EdgeVisitStats(virtual_loss=1)
+    untouched = EdgeVisitStats()
     total = 1
-    assert puct_score(untouched, total, c=1.0) > puct_score(in_flight, total, c=1.0)
+    assert puct_score(untouched, 0.5, total, c=1.0) > puct_score(in_flight, 0.5, total, c=1.0)
 
 
 def test_exploration_bonus_grows_with_sibling_visits():
     # The same edge scores higher when its siblings have absorbed more
     # simulations: sqrt(total_node_visits) rises while its own denominator
     # stays fixed, pushing selection back toward under-visited branches.
-    stats = EdgeVisitStats(N=1, W=0.5, prior_prob=0.5)
-    assert puct_score(stats, 100, c=1.0) > puct_score(stats, 4, c=1.0)
+    stats = EdgeVisitStats(N=1, W=0.5)
+    assert puct_score(stats, 0.5, 100, c=1.0) > puct_score(stats, 0.5, 4, c=1.0)
 
 
 def test_c_scales_the_exploration_term_only():
     # At c=0 the score is exactly Q; raising c adds the prior-weighted bonus.
-    stats = EdgeVisitStats(N=2, W=1.0, prior_prob=0.8)
-    assert puct_score(stats, 10, c=0.0) == stats.Q
-    assert puct_score(stats, 10, c=2.0) > puct_score(stats, 10, c=1.0)
+    stats = EdgeVisitStats(N=2, W=1.0)
+    assert puct_score(stats, 0.8, 10, c=0.0) == stats.Q
+    assert puct_score(stats, 0.8, 10, c=2.0) > puct_score(stats, 0.8, 10, c=1.0)
 
 
 class TestResolveSearchParams:
