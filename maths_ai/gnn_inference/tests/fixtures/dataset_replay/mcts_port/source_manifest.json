@@ -1,7 +1,7 @@
 {
   "kind": "mcts-dataset-replay-port-source-manifest",
   "target_branch": "MCTS-AC-branch",
-  "target_base_commit": "f21d04409ebe80167358360aead4e44c4a06cffb",
+  "target_base_commit": "61f6d384730fca3dd7a56918377af4efb2c912cc",
   "application_source_commit": "54d7cefe04aed980734798f06528ed80c71b81ac",
   "reviewed_feature_commit": "70f7b8d85d95dea3d73620096058177462010eab",
   "client_repository": "https://github.com/123nol/Pantograph-Client",
@@ -106,7 +106,7 @@
     {
       "path": "maths_ai/gnn_inference/docs/mcts_dataset_replay_port_handoff.md",
       "classification": "target-only",
-      "sha256": "905d1ff8703b710b9140cf9adb0029ea121d59daa1acdfc4e32f0e2686deaa6a",
+      "sha256": "d0f2f95d0f160b874e2ca36d56fca699a13ae02747ae434cadb3aee7d49c8e2c",
       "application_source_sha256": null,
       "target_base_sha256": null
     },
@@ -120,9 +120,9 @@
     {
       "path": "maths_ai/gnn_inference/docs/rl_process_walkthrough.md",
       "classification": "target-only",
-      "sha256": "640e929dbafe88c639c59b5069fbd0b058d1e9c94bf5b3e30b4a13dfddbf3f06",
+      "sha256": "cf92eda91db17cbc4a0ac9f26fa2ab5e265398db818e0369f8cec55e8466ae52",
       "application_source_sha256": "5cd21c1e5277446049fbf80d3051d9cec6373e38d803e89949053576467675b6",
-      "target_base_sha256": "f28da5d4a9ab263a6c02b857689742be2823364ca8b2569c21ee69c7226422b5"
+      "target_base_sha256": "d87b2892a6e89592b2ff7535049ee9df2518a4b73a0ab21f5fcef09e5a2c2de3"
     },
     {
       "path": "maths_ai/gnn_inference/scripts/compare_replay_graphs.py",
@@ -253,7 +253,7 @@
     {
       "path": "maths_ai/gnn_inference/tests/test_owned_client_migration.py",
       "classification": "adapted",
-      "sha256": "45d5ee484e86f08699f8227fa5227cf10f3f2bf003a793d936cf39784324fd39",
+      "sha256": "b1ab6efc205020029a8491169a39067303f9bfb879c7e3f9a19bef11913549eb",
       "application_source_sha256": "9de81db74fb4139d0416e2367118b0cae81511cb37949a75574d90721b6fb869",
       "target_base_sha256": "6d9c13e91bde84978b27bbcef2e2b1011d9d6b40cf3c50034ef5aed892746a80"
     },
@@ -316,7 +316,7 @@
     {
       "path": "maths_ai/hybrid_reasoner/mcts_diagnostics.py",
       "classification": "target-only",
-      "sha256": "35d687bf24bae80f675ca2b5966b0c8b2baf6ac7ebc449fd7315182e9896a091",
+      "sha256": "ff3dece17584a9b8308f075216560eacaeb328c992f9a9e585689bc1872e70de",
       "application_source_sha256": null,
       "target_base_sha256": "c18725bd8fcf10ccbd0c2a723d96a7e72dd4605b75d45f8a2a4cdef4535fac52"
     },

@@ -196,7 +196,7 @@ def test_port_sources_match_the_recorded_lineage_and_current_adaptations():
     # The dataset-reconstruction port is the next link: every file it changed
     # was recorded at the hash the previous link left it at.
     port = json.loads(PORT_MANIFEST.read_text())
-    assert port["target_base_commit"] == "f21d04409ebe80167358360aead4e44c4a06cffb"
+    assert port["target_base_commit"] == "61f6d384730fca3dd7a56918377af4efb2c912cc"
     assert port["application_source_commit"] == "54d7cefe04aed980734798f06528ed80c71b81ac"
     for entry in port["sources"]:
         if entry["path"] in expected:

@@ -37,7 +37,7 @@ CONJUNCTION = seed_from_text(goal="True ∧ True")
 IDENTITY = seed_from_text(goal="∀ (p : Prop), p → p")
 
 TARGET_BRANCH = "MCTS-AC-branch"
-TARGET_BASE_COMMIT = "f21d04409ebe80167358360aead4e44c4a06cffb"
+TARGET_BASE_COMMIT = "61f6d384730fca3dd7a56918377af4efb2c912cc"
 APPLICATION_SOURCE_COMMIT = "54d7cefe04aed980734798f06528ed80c71b81ac"
 CLIENT_REPOSITORY = "https://github.com/123nol/Pantograph-Client"
 CLIENT_COMMIT = "d1dac7e8a8ea296192e7a5b2616114b73e0812b7"

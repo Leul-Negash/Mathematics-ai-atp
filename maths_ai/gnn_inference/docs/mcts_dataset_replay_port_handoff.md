@@ -10,7 +10,7 @@ covers what changed on MCTS and what was verified here.
 
 | | |
 | --- | --- |
-| Target base | MCTS-AC-branch `f21d044` (merge of PR #59) |
+| Target base | MCTS-AC-branch `61f6d38` (walkthrough update after the PR #59 merge `f21d044`) |
 | Application source | AC-branch `54d7cef` (merge of PR #60); reviewed feature commit `70f7b8d` |
 | Client | `123nol/Pantograph-Client@d1dac7e`, version 0.1.1 (`start_goal(..., levels=...)`) |
 | Dataset | `jajostrains/Mathlib-Normalized-Sexpr` at `f44841f9` |
@@ -20,7 +20,7 @@ covers what changed on MCTS and what was verified here.
 Every copied and adapted file is listed with its AC-source, MCTS-base and
 current hashes in
 [source_manifest.json](../tests/fixtures/dataset_replay/mcts_port/source_manifest.json)
-(39 copied, 13 adapted, 4 MCTS-only). `test_owned_client_migration.py` checks
+(39 copied, 13 adapted, 9 MCTS-only). `test_owned_client_migration.py` checks
 that chain on top of the two earlier MCTS client-port manifests, which are
 unchanged.
 
@@ -66,7 +66,9 @@ optimizer order are unchanged.
 
 All from this branch at `c59ad2e` with a clean worktree. Reports and their
 commands are in [mcts_port/](../tests/fixtures/dataset_replay/mcts_port/)
-(`provenance.json`).
+(`provenance.json`). That commit was on `f21d044`; the branch was then rebased
+onto `61f6d38`, which changes only `rl_process_walkthrough.md`, so the code
+the reports cover is unchanged.
 
 | Check | Result |
 | --- | --- |
