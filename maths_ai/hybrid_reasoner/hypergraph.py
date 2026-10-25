@@ -361,6 +361,10 @@ class ProofHypergraph:
         # Simulation selections that reached an open node with nothing to
         # propose or select yet (its widening capacity had not grown).
         self.deferred_selections = 0
+        # Completed simulations, and proposed commands answered from a node's
+        # execution cache instead of Lean.
+        self.completed_simulations = 0
+        self.cache_hits = 0
         self.end_reason = SearchEndReason.RUNNING
 
         self.root_id = self._new_node(goal=root_goal, depth=0, gnn_probability=1.0, stv=None)
@@ -556,6 +560,11 @@ class ProofHypergraph:
             "raw_draws": float(sum(node.proposal_draws for node in nodes)),
             "distinct_commands": float(sum(node.attempted_commands for node in nodes)),
             "accepted_edges": float(len(self.edges)),
+            "rejected_commands": float(
+                sum(outcome is None for node in nodes for outcome in node.command_outcomes.values())
+            ),
+            "cache_hits": float(self.cache_hits),
+            "completed_simulations": float(self.completed_simulations),
             "deferred_selections": float(self.deferred_selections),
             **{f"closed_{reason}": float(count) for reason, count in sorted(closures.items())},
         }

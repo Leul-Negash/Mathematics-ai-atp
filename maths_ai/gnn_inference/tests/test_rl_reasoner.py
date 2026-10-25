@@ -440,7 +440,7 @@ class RolloutTests(unittest.TestCase):
         # One node expanded (root, immediately solved): every i.i.d. draw is accounted for.
         self.assertEqual(total, reasoner.top_k_tactics)
 
-    def test_rejected_samples_flush_to_failure_actions(self):
+    def test_rejected_samples_become_rejected_observations(self):
         reasoner, _model, _vocab = _make_reasoner(_RejectExecutor())
         result = self._prove(reasoner)
 

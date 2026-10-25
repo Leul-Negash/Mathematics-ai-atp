@@ -956,6 +956,7 @@ class HybridReasoner:
         # validity; no edge visit is invented where none was chosen.
         for node_id in simulation.selected:
             graph.nodes[node_id].visits += 1
+        graph.completed_simulations += 1
 
     def _leaf_value(self, node: ProofNode) -> float:
         """Value estimate for an unresolved simulation leaf.
@@ -1128,6 +1129,7 @@ class HybridReasoner:
         for command, actions in groups.items():
             tactic = actions[0].candidate
             if command in node.command_outcomes:
+                graph.cache_hits += 1
                 edge_id = node.command_outcomes[command]
                 if edge_id is not None:
                     any_applied = True

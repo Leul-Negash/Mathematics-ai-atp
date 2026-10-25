@@ -270,6 +270,9 @@ class WideningSearchTests(unittest.TestCase):
         )
         counters = graph.search_counters()
         self.assertEqual(counters["distinct_commands"], 2.0)
+        self.assertEqual(counters["rejected_commands"], 1.0)
+        self.assertEqual(counters["cache_hits"], 1.0)  # "bad" drawn again in round 2
+        self.assertGreater(counters["completed_simulations"], 0.0)
         self.assertEqual(counters["accepted_edges"], 1.0)
         self.assertGreaterEqual(counters["widening_rounds"], 1.0)
         self.assertGreaterEqual(counters["raw_draws"], counters["distinct_commands"])

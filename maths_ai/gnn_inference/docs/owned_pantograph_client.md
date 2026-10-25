@@ -77,7 +77,7 @@ Best-first and PUCT search use the same installed client API. Each theorem owns 
 state scope; a PUCT leaf stays allocated until all its candidate tactics finish, and
 each successful alternative is converted through the adapter to canonical goals and
 released at once. An overlapping `prove` on the same reasoner is rejected before it
-touches the running search's cached roots, pending actions, greedy mode, or result.
+touches the running search's cached roots, pending actions, proposal spec, or result.
 A transport failure or timeout ends the search; the pool, not the reasoner, replaces
 the complete client/reasoner worker.
 
