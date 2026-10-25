@@ -55,6 +55,21 @@
       "target_base_sha256": "4705e044fbc9ed43c6f92bcbf43a7ca46adce7457aa4fa391b576c9e3c2ac4e8"
     },
     {
+      "path": "maths_ai/gnn_inference/docs/dev_plans/progressive_widening_and_sampled_mcts_evaluation.md",
+      "sha256": "2a89ce517e2c5abc20a7dd5388497476768f2a5d6521b2551fb33de12f91a8f1",
+      "target_base_sha256": null
+    },
+    {
+      "path": "maths_ai/gnn_inference/docs/mcts_widening_evaluation_handoff.md",
+      "sha256": "d5f6a28a3d80871f33ddf6516a048c8158ed9f57c23f49a904fb3824e8a30404",
+      "target_base_sha256": null
+    },
+    {
+      "path": "maths_ai/gnn_inference/docs/rl_process_walkthrough.md",
+      "sha256": "8ba67c3c19204b6e7e3fc45dba1ddbd4966cb0330fd6e786525d925f51611b46",
+      "target_base_sha256": "cf92eda91db17cbc4a0ac9f26fa2ab5e265398db818e0369f8cec55e8466ae52"
+    },
+    {
       "path": "maths_ai/gnn_inference/inference_engine.py",
       "sha256": "33f0d5fc0d77d7912351a39e936d199f048eb45730fc47e27acf6eca15c6afca",
       "target_base_sha256": "2ef1f51200ac86d2a8dd7b1a475d05d926216012afe3e1d7199c833123f0e695"
