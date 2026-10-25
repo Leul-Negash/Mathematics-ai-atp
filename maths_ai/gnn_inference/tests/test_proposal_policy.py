@@ -163,6 +163,66 @@ class ArityTests(unittest.TestCase):
         self.assertEqual(float(sample.arg_logp[0]), 0.0)
 
 
+class EncodeOnceTests(unittest.TestCase):
+    """One proposal round encodes each state once and draws only what it asks for."""
+
+    def setUp(self):
+        torch.manual_seed(0)
+        self.datas, vocab = _graphs(*STATES, "x : Nat\n⊢ x = x")
+        self.model = actor_critic(len(vocab), len(ID_TO_TACTIC))
+        self.model.eval()
+        self.batch = Batch.from_data_list(self.datas)
+
+    def propose(self, counts, **kwargs):
+        with torch.no_grad():
+            return self.model.propose_actions(self.batch, counts, id_to_tactic=ID_TO_TACTIC, **kwargs)
+
+    def test_one_encoder_pass_for_a_multi_draw_round(self):
+        calls = []
+        encode = self.model.encode_graph
+        self.model.encode_graph = lambda data: calls.append(data.num_graphs) or encode(data)
+        sample, rows = self.propose([4, 2, 1], generator=torch.Generator().manual_seed(0))
+        self.assertEqual(calls, [3])
+        self.assertEqual(rows.tolist(), [0, 0, 0, 0, 1, 1, 2])
+        self.assertEqual(sample.tactic_action.shape, (7,))
+
+    def test_unequal_counts_give_exactly_the_requested_instances(self):
+        sample, rows = self.propose([0, 3, 1], generator=torch.Generator().manual_seed(1))
+        self.assertEqual(rows.tolist(), [1, 1, 1, 2])
+        self.assertEqual(sample.arities.shape, (4,))
+        with self.assertRaises(ValueError):
+            self.propose([1, 1])
+
+    def test_each_instance_has_its_own_conditional_argument_probability(self):
+        mask = torch.zeros(3, len(ID_TO_TACTIC), dtype=torch.bool)
+        mask[:, [0, 1]] = True  # exact (one argument) or have (two)
+        sample, rows = self.propose([3, 3, 3], generator=torch.Generator().manual_seed(3), tactic_mask=mask)
+        for instance, row in enumerate(rows.tolist()):
+            arity = int(sample.arities[instance])
+            args = torch.tensor([[int(step[instance]) for step in sample.arg_actions[:arity]]])
+            with torch.no_grad():
+                tactic_logp, arg_logp, *_ = self.model.evaluate_actions(
+                    Batch.from_data_list([self.datas[row]]),
+                    sample.tactic_action[instance : instance + 1],
+                    args,
+                    tactic_mask=mask[row : row + 1],
+                )
+            # The instance's prior equals the recomputed probability of its own
+            # tactic and arguments on its own state.
+            self.assertAlmostEqual(float(sample.tactic_logp[instance]), float(tactic_logp[0]), places=5)
+            self.assertAlmostEqual(float(sample.arg_logp[instance]), float(arg_logp[0]), places=5)
+
+    def test_a_fixed_seed_repeats_and_leaves_the_global_rng_alone(self):
+        before = torch.get_rng_state()
+        first, _ = self.propose([2, 2, 2], generator=torch.Generator().manual_seed(7))
+        second, _ = self.propose([2, 2, 2], generator=torch.Generator().manual_seed(7))
+        self.assertTrue(torch.equal(torch.get_rng_state(), before))
+        self.assertTrue(torch.equal(first.tactic_action, second.tactic_action))
+        for a, b in zip(first.arg_actions, second.arg_actions):
+            self.assertTrue(torch.equal(a, b))
+        self.assertTrue(torch.allclose(first.arg_logp, second.arg_logp))
+
+
 class SeedDerivationTests(unittest.TestCase):
     def test_seeds_depend_only_on_request_coordinates(self):
         seed = seed_from_text(goal="True")

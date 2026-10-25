@@ -220,6 +220,80 @@ class ActorCriticWithArgsClassifier(nn.Module):
         tactic's arity; without it, every row owns ``max_args`` steps.
         """
         node_embeddings, state_emb, tactic_logits, values = self.encode(data, tactic_mask=tactic_mask)
+        return self._act_from_encoding(
+            data, node_embeddings, state_emb, tactic_logits, values,
+            rows=None, id_to_tactic=id_to_tactic, greedy=greedy, generator=generator,
+        )
+
+    def propose_actions(
+        self,
+        data,
+        counts: list[int],
+        *,
+        tactic_mask: Tensor | None = None,
+        id_to_tactic: dict[int, str] | None = None,
+        greedy: bool = False,
+        generator: torch.Generator | None = None,
+    ) -> tuple[ActionSample, Tensor]:
+        """Encode ``data`` once and propose ``counts[b]`` actions for state ``b``.
+
+        Return the actions as one ``ActionSample`` over action instances, in
+        row-major order, and ``rows[i]``, the state instance ``i`` belongs to.
+        Tactics are drawn with replacement from the state's cached logits; each
+        instance's arguments are chosen against that state's cached node
+        embeddings, conditioned on the instance's own tactic and earlier
+        arguments. No instance is drawn for a state beyond its count.
+        """
+        if len(counts) != int(data.num_graphs) or any(count < 0 for count in counts):
+            raise ValueError("counts must give a non-negative action count per state")
+        node_embeddings, state_emb, tactic_logits, values = self.encode(data, tactic_mask=tactic_mask)
+        rows = torch.repeat_interleave(
+            torch.arange(len(counts), device=tactic_logits.device),
+            torch.tensor(counts, dtype=torch.long, device=tactic_logits.device),
+        )
+        sample = self._act_from_encoding(
+            data, node_embeddings, state_emb, tactic_logits, values,
+            rows=rows, id_to_tactic=id_to_tactic, greedy=greedy, generator=generator,
+        )
+        return sample, rows
+
+    def _act_from_encoding(
+        self,
+        data,
+        node_embeddings: Tensor,
+        state_emb: Tensor,
+        tactic_logits: Tensor,
+        values: Tensor,
+        *,
+        rows: Tensor | None,
+        id_to_tactic: dict[int, str] | None,
+        greedy: bool,
+        generator: torch.Generator | None,
+    ) -> ActionSample:
+        """Choose one action per instance from an existing encoding.
+
+        ``rows`` maps instances to encoded states (None: one instance per
+        state). Instances of one state share its encoding but have their own
+        node copies in the pointer batch, so each instance's argument scores
+        follow its own tactic and argument history.
+        """
+        premise_mask = resolve_premise_mask(data, node_embeddings.device)
+        batch_index = data.batch.to(device=node_embeddings.device)
+        if rows is not None:
+            graph_nodes = [
+                torch.nonzero(batch_index == b, as_tuple=False).squeeze(-1)
+                for b in range(state_emb.size(0))
+            ]
+            picked = [graph_nodes[row] for row in rows.tolist()]
+            node_index = (
+                torch.cat(picked) if picked else torch.empty(0, dtype=torch.long, device=batch_index.device)
+            )
+            node_embeddings = node_embeddings[node_index]
+            premise_mask = premise_mask[node_index]
+            batch_index = torch.cat(
+                [torch.full_like(nodes, instance) for instance, nodes in enumerate(picked)]
+            ) if picked else node_index
+            state_emb, tactic_logits, values = state_emb[rows], tactic_logits[rows], values[rows]
 
         tactic_action, tactic_logp = choose_categorical(
             tactic_logits, greedy=greedy, generator=generator
@@ -245,8 +319,6 @@ class ActorCriticWithArgsClassifier(nn.Module):
         arg_step_valid: list[Tensor] = []
         if n_steps > 0:
             tactic_emb = self.tactic_embedding(tactic_action)  # [B, H]
-            premise_mask = resolve_premise_mask(data, node_embeddings.device)
-            batch_index = data.batch.to(device=node_embeddings.device)
 
             prev_arg_emb: Tensor | None = None
             for step in range(n_steps):

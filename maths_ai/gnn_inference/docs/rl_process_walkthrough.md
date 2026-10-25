@@ -214,9 +214,13 @@ fingerprint; evaluation from `eval_seed`, the repeat and the input. Neither
 depends on which worker ran the search. Draws repeat for a fixed seed, model,
 input and device; equality across devices is not promised.
 
-`model.act` runs under `model.eval()` and `torch.no_grad()`. In `sample` mode
-it draws a tactic and then each argument; in `greedy` mode it takes the argmax
-of the tactic and then of each argument step, given the arguments before it.
+A proposal round calls `model.propose_actions` under `model.eval()` and
+`torch.no_grad()`: it encodes each state once and draws exactly the requested
+number of actions per state, in row-major order. Each action's arguments are
+chosen against its state's cached node embeddings, conditioned on its own
+tactic and earlier arguments. In `sample` mode it draws a tactic and then each
+argument; in `greedy` mode it takes the argmax of the tactic and then of each
+argument step, given the arguments before it.
 Greedy is step-wise, not a search for the most probable argument sequence. A
 multi-graph batch runs as many pointer steps as its largest arity, and each
 row keeps only the steps its own tactic owns (`ActionSample.arities`). The
@@ -310,12 +314,17 @@ capacity(v) = min(widening_max_actions,
 
 distinct commands, accepted or rejected, and at most `widening_max_draws` raw
 draws in total. Defaults are 4, 2.0, 0.5, 32 and 128; best-first rejects
-explicit values. Selection stops at a node whose capacity has grown and
-requests one proposal round there, sized before drawing as the minimum of
-`top_k_tactics`, the remaining capacity and the remaining draws. Otherwise it
-selects an edge by PUCT; with no selectable edge the node is deferred. Every
-node a simulation selected gets one visit when it backs up, so a rejected or
-deferred node's capacity can grow. A node is dead only when its source is
+explicit values. Selection stops at a node that may propose (capacity and
+draws left, and its next round is due) and requests one proposal round there, sized before drawing as the minimum of
+`top_k_tactics`, the remaining capacity and the remaining draws. Rounds at one
+node are spaced by completed visits, with a gap that grows by one visit per
+round, so a node keeps retrying while capacity and draws remain, including
+after its capacity has saturated, and the visits in between descend through
+its existing edges. Otherwise selection takes an edge by PUCT; with no
+selectable edge the node is deferred. Every node a simulation selected gets
+one visit when it backs up, so a rejected or deferred node's capacity can
+grow. The generic engine is asked for each node's own count of ranked
+candidates. A node is dead only when its source is
 closed (`widening_bound`, a finite provider's single round, or a path limit)
 and no edge survives; a closed node is never reopened. The generic engine and
 the greedy actor are finite sources and close after one round.

@@ -199,8 +199,9 @@ class RLHybridReasoner(HybridReasoner):
     ) -> List[List[ProposedAction]]:
         """Propose ``draws[row]`` actions for each row (``top_k_tactics`` by default).
 
-        The forward runs as many times as the largest request; a row keeps only
-        its first ``draws[row]`` draws, so its count is fixed before drawing.
+        One encoder pass covers the whole round (``model.propose_actions``); only
+        the requested action instances are drawn, so each row's count is fixed
+        before drawing and nothing is discarded.
         """
         pendings: List[_PendingNode] = []
         dags = []
@@ -236,47 +237,46 @@ class RLHybridReasoner(HybridReasoner):
         batch = Batch.from_data_list(datas).to(self.device)
 
         proposals: List[Dict[tuple, ProposedAction]] = [{} for _ in sub_goals]
+        if sum(counts) == 0:
+            return [[] for _ in sub_goals]
         self.model.eval()
         with torch.no_grad():
-            for draw in range(max(counts, default=0)):
-                sample = self.model.act(
-                    batch,
-                    id_to_tactic=self.id_to_tactic,
-                    greedy=self._proposal.greedy,
-                    generator=self._generator,
+            sample, rows = self.model.propose_actions(
+                batch,
+                counts,
+                id_to_tactic=self.id_to_tactic,
+                greedy=self._proposal.greedy,
+                generator=self._generator,
+            )
+            for instance, row in enumerate(rows.tolist()):
+                dag, pending, declarations = dags[row], pendings[row], declaration_maps[row]
+                proposal, action = self._decode_row(
+                    sample,
+                    instance,
+                    dag,
+                    declarations,
+                    pending.graph_fingerprint,
                 )
-                for row, (dag, pending, declarations) in enumerate(
-                    zip(dags, pendings, declaration_maps)
-                ):
-                    if draw >= counts[row]:
-                        continue
-                    proposal, action = self._decode_row(
-                        sample,
-                        row,
-                        dag,
-                        declarations,
-                        pending.graph_fingerprint,
+                raw_id = (action.tactic_id, action.arg_indices)
+                if proposal is None:
+                    known = pending.unrenderable.get(raw_id)
+                    pending.unrenderable[raw_id] = (
+                        action if known is None
+                        else replace(known, multiplicity=known.multiplicity + 1)
                     )
-                    raw_id = (action.tactic_id, action.arg_indices)
-                    if proposal is None:
-                        known = pending.unrenderable.get(raw_id)
-                        pending.unrenderable[raw_id] = (
-                            action if known is None
-                            else replace(known, multiplicity=known.multiplicity + 1)
+                    continue
+                existing = pending.draws.get(raw_id)
+                if existing is not None:
+                    if abs(existing.proposal.log_prior - proposal.log_prior) > 1e-4:
+                        raise RuntimeError(
+                            f"Raw action {raw_id} changed its log-prior within one round."
                         )
-                        continue
-                    existing = pending.draws.get(raw_id)
-                    if existing is not None:
-                        if abs(existing.proposal.log_prior - proposal.log_prior) > 1e-4:
-                            raise RuntimeError(
-                                f"Raw action {raw_id} changed its log-prior within one round."
-                            )
-                        existing.action = replace(
-                            existing.action, multiplicity=existing.action.multiplicity + 1
-                        )
-                        continue
-                    pending.draws[raw_id] = _PendingDraw(action=action, proposal=proposal)
-                    proposals[row][raw_id] = proposal
+                    existing.action = replace(
+                        existing.action, multiplicity=existing.action.multiplicity + 1
+                    )
+                    continue
+                pending.draws[raw_id] = _PendingDraw(action=action, proposal=proposal)
+                proposals[row][raw_id] = proposal
         return [list(row.values()) for row in proposals]
 
     def _decode_row(

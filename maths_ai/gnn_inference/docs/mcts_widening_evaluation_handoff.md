@@ -41,9 +41,14 @@ earlier manifests, which are unchanged.
   rounds, in place of `edge_actions` and `failure_actions`.
 - **Progressive widening.** A PUCT node's source stays open across rounds,
   bounded by `WideningPolicy` (distinct commands grow with completed visits;
-  raw draws are capped). Selection requests a round where the capacity has
-  grown since the node's last round, defers nodes with nothing to propose or
-  select, and gives every selected node a visit at backup. A node is dead only
+  raw draws are capped). Rounds at a node are spaced by completed visits, so
+  it keeps retrying until a bound closes it while its children are explored
+  in between; selection defers nodes with nothing to propose or select, and
+  gives every selected node a visit at backup. The generic engine honors each
+  node's requested count.
+- **One encoding per round.** `propose_actions` encodes each state once and
+  draws only the requested actions; the sampling schedule is versioned in
+  the saved search settings. A node is dead only
   when its source is closed and no edge survives. Harvest returns unknown for
   an open node whose known edges all failed.
 - **Evaluation.** `eval_proposal_mode`, `eval_seed`, `eval_repeats` (and CLI

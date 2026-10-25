@@ -138,6 +138,24 @@ class GenericProviderLawTests(unittest.TestCase):
         self.assertEqual(_ranked_choice_log_prior(scores, []), 0.0)
 
 
+def _stack(samples: list[ActionSample]) -> ActionSample:
+    """One ActionSample whose instances are ``samples`` in order."""
+    cat = torch.cat
+    return ActionSample(
+        tactic_action=cat([s.tactic_action for s in samples]),
+        tactic_logp=cat([s.tactic_logp for s in samples]),
+        tactic_entropy=cat([s.tactic_entropy for s in samples]),
+        arg_actions=[cat(step) for step in zip(*(s.arg_actions for s in samples))],
+        arg_logp=cat([s.arg_logp for s in samples]),
+        value=cat([s.value for s in samples]),
+        tactic_logits=cat([s.tactic_logits for s in samples]),
+        arities=cat([s.arities for s in samples]),
+        complete=cat([s.complete for s in samples]),
+        arg_step_logp=[cat(step) for step in zip(*(s.arg_step_logp for s in samples))],
+        arg_step_valid=[cat(step) for step in zip(*(s.arg_step_valid for s in samples))],
+    )
+
+
 class _CountingExecutor:
     """Accepts every command with QED and counts the Lean calls."""
 
@@ -194,8 +212,8 @@ class ActorPriorTests(unittest.TestCase):
         reasoner, model, _vocab = _make_reasoner(executor, top_k=3)
         _goal, _dag, _data, hyp, fv = self._positions(reasoner)
         # Both the Hyp node and its FV render "exact p": two raw actions, one command.
-        draws = iter([self._exact(hyp, -0.1), self._exact(fv, -2.0), self._exact(hyp, -0.1)])
-        model.act = lambda *_args, **_kwargs: next(draws)
+        draws = [self._exact(hyp, -0.1), self._exact(fv, -2.0), self._exact(hyp, -0.1)]
+        model.propose_actions = lambda *_args, **_kwargs: (_stack(draws), torch.tensor([0, 0, 0]))
         result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
 
         self.assertEqual(executor.calls, ["exact p"])

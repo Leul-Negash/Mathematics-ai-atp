@@ -371,7 +371,9 @@ class DeclarationResolutionTests(unittest.TestCase):
                         self._positions(model_goal_to_dag(leaf), label)[kind] for leaf in batch
                     ]
                     reasoner._pending = {}
-                    reasoner.model.act = lambda *_args, **_kwargs: self._sample(indices)
+                    reasoner.model.propose_actions = lambda *_args, **_kwargs: (
+                        self._sample(indices), torch.arange(len(indices))
+                    )
                     proposals = reasoner._predict_next_tactics_batch(
                         batch, node_ids=list(range(1, rows + 1))
                     )

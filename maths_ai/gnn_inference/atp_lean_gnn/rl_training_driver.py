@@ -344,6 +344,10 @@ def search_settings(cfg: RLTrainingConfig) -> dict[str, object]:
             "seed": cfg.seed,
             "seed_derivation": SEED_DERIVATION_VERSION,
             "greedy": "stepwise-argmax-v1",
+            # One encoding per round, then each state's requested draws in
+            # row-major order. A seed from another schedule does not reproduce
+            # the same actions.
+            "sampling_schedule": "encode-once-row-major-v1",
         },
         "prior": {
             "semantics": PRIOR_SEMANTICS,
