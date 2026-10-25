@@ -239,6 +239,20 @@ class WideningSearchTests(unittest.TestCase):
         self.assertEqual(graph.end_reason, SearchEndReason.NUM_SIMULATIONS)
         self.assertEqual(graph.root.visits, 5)
 
+    def test_repeated_draws_at_a_node_do_not_starve_its_children(self):
+        # The root's later rounds only repeat its one accepted command; the
+        # search must still descend and solve the child.
+        graph, reasoner, executor = search(
+            {GOAL_EXPR: [["a", "a"]], "A": [["done"]]},
+            {"a": ["A"], "done": []},
+            num_simulations=10,
+            widening_initial_actions=2,
+        )
+        self.assertTrue(graph.is_solved())
+        self.assertEqual(executor.calls, ["a", "done"])
+        # The root widened only when its capacity grew, not on every visit.
+        self.assertLess(graph.root.proposal_rounds, graph.root.visits)
+
     def test_round_draws_are_fixed_from_completed_visits(self):
         _graph, reasoner, _executor = search(
             {GOAL_EXPR: [["a", "b", "c"]] * 20},

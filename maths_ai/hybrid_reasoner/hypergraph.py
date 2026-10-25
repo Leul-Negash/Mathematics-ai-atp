@@ -134,6 +134,9 @@ class ProofNode:
     # (``closure_reason``); finishing one round does not close it.
     proposal_rounds: int = 0
     proposal_draws: int = 0
+    # Widening capacity when the last round was scheduled; the next widening
+    # round waits until the capacity has grown past it.
+    round_capacity: int = 0
     # Completed simulations whose selection included this node, whether or not
     # they chose one of its edges; progressive widening grows with it.
     visits: int = 0

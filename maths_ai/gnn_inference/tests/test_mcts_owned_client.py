@@ -37,6 +37,7 @@ from maths_ai.hybrid_reasoner.mcts_diagnostics import (
     verify_learning_round,
     verify_mcts_search,
     verify_shared_device_workers,
+    verify_widening,
 )
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
 from pantograph_async import (
@@ -644,6 +645,21 @@ def test_actual_puct_and_best_first_search_over_the_installed_client(live_env):
         "cooperative-deadline-scope-closure",
         "repeated-searches-20",
     } <= set(checks)
+
+
+@pytest.mark.pantograph_live
+def test_actual_widening_finds_a_later_action_after_a_checked_rejection(live_env):
+    async def run():
+        client = await create_model_sexpr_client(live_env)
+        async with client:
+            return await verify_widening(client)
+
+    assert asyncio.run(run()) == [
+        "widening-later-action-after-checked-rejection",
+        "widening-rejection-served-from-cache",
+        "widening-and-obligations-kept",
+        "widening-priors-normalized",
+    ]
 
 
 @pytest.mark.pantograph_live

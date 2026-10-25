@@ -25,6 +25,7 @@ def test_actual_executable_model_ownership_and_repeated_proofs(live_env):
 def test_actual_factory_executor_and_two_independent_workers(live_env):
     import torch
     from maths_ai.data_models.proof_components import TacticCandidate
+    from maths_ai.gnn_inference.tests.model_helpers import scored
     from maths_ai.hybrid_reasoner.joint_inference import (
         HybridReasoner,
         PantographExecutor,
@@ -42,7 +43,7 @@ def test_actual_factory_executor_and_two_independent_workers(live_env):
         def predict_next_tactic(self, goal):
             goal.require_model_state()
             return [
-                TacticCandidate(tactic_name="trivial", arguments=[], probability=1.0)
+                scored(TacticCandidate(tactic_name="trivial", arguments=[], probability=1.0))
             ]
 
     async def run():

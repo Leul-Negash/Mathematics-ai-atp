@@ -709,13 +709,18 @@ class HybridReasoner:
         """How many raw draws a proposal round at ``node`` may make now.
 
         Zero when its source is closed or, under widening, when its capacity
-        at the node's completed visits is already used. Without widening
-        (best-first), an OPEN node gets one round of ``top_k_tactics``.
+        at the node's completed visits is already used or has not grown since
+        its last round. The second condition keeps a node whose draws repeat
+        known commands from widening on every visit and starving its
+        children. Without widening (best-first), an OPEN node gets one round
+        of ``top_k_tactics``.
         """
         if node.exhausted or node.status in (NodeStatus.SOLVED, NodeStatus.DEAD):
             return 0
         if self.widening is None:
             return self.top_k_tactics if node.status == NodeStatus.OPEN else 0
+        if node.proposal_rounds and self.widening.capacity(node.visits) <= node.round_capacity:
+            return 0
         return self.widening.draws_for(
             visits=node.visits,
             attempted=node.attempted_commands,
@@ -781,6 +786,8 @@ class HybridReasoner:
             if current is not None:
                 materialized.append((node, current))
                 draws.append(count)
+                if self.widening is not None:
+                    node.round_capacity = self.widening.capacity(node.visits)
         if not materialized:
             return
 

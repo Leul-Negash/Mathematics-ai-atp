@@ -393,6 +393,7 @@ def _prepared_features(row, node_vocab):
 @pytest.mark.pantograph_live
 def test_live_search_nodes_see_the_source_identity(mathlib_env):
     from maths_ai.data_models.proof_components import TacticCandidate
+    from maths_ai.gnn_inference.tests.model_helpers import scored
     from maths_ai.hybrid_reasoner.joint_inference import HybridReasoner, PantographExecutor
     from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
 
@@ -402,9 +403,9 @@ def test_live_search_nodes_see_the_source_identity(mathlib_env):
 
         def predict_next_tactic(self, goal):
             return [
-                TacticCandidate(
+                scored(TacticCandidate(
                     tactic_name="have hnew : True := trivial", arguments=[], probability=1.0
-                )
+                ))
             ]
 
     seed = dataset_row(5).structured_seed()
@@ -417,7 +418,7 @@ def test_live_search_nodes_see_the_source_identity(mathlib_env):
                 None, None, None, executor=PantographExecutor(client), use_pln=False,
                 max_depth=1, max_nodes=4,
             )
-            graph = await reasoner.prove(seed, proposal=SAMPLE)
+            graph = await reasoner.prove(seed)
             root = graph.nodes[graph.root_id].goal
             assert [(l.user_name, l.context_index) for l in root.locals] == source
             children = [node.goal for node in graph.nodes.values() if node.id != graph.root_id]
