@@ -16,6 +16,7 @@ from pantograph_async.diagnostics import verify_live_client
 from pantograph_async.probes import require
 
 from .pantograph_adapter import execution_goal_to_goal, require_client_compatibility
+from .pantograph_model_sexpr import materialize_seed
 
 
 GOLDEN_PATH = (
@@ -45,7 +46,7 @@ async def verify_canonical_graphs(client: PantographClient) -> list[str]:
     goldens = json.loads(GOLDEN_PATH.read_text())["goals"]
     async with client.state_scope() as scope:
         for label, expression, tactic in GRAPH_CASES:
-            root = await scope.start_goal(expression)
+            root = await scope.start_goal(expression, levels=())
             state = await scope.apply_tactic(root, tactic)
             require(
                 len(state.goals) == len(goldens[label]),
@@ -75,20 +76,9 @@ async def verify_canonical_graphs(client: PantographClient) -> list[str]:
                     and dag.state_root_id == expected["state_root_id"],
                     f"Graph roots changed: {label}",
                 )
-                replay = goal.replay_spec()
-                replay_root = await scope.start_goal(replay.expression)
-                replayed = await scope.apply_tactic(
-                    replay_root,
-                    (
-                        f"intro {' '.join(replay.local_names)}"
-                        if replay.local_names
-                        else "skip"
-                    ),
-                )
+                _, replayed, _ = await materialize_seed(scope, goal.replay_seed())
                 require(
-                    len(replayed.goals) == 1
-                    and execution_goal_to_goal(replayed.goals[0]).state_fingerprint()
-                    == goal.state_fingerprint(),
+                    replayed.state_fingerprint() == goal.state_fingerprint(),
                     f"Canonical replay round trip changed: {label}",
                 )
             outcomes.append(f"canonical-graph-{label}")
@@ -101,21 +91,18 @@ async def verify_canonical_graphs(client: PantographClient) -> list[str]:
                 "exact h",
             ),
         ):
-            start = await scope.start_goal(expression)
+            start = await scope.start_goal(expression, levels=())
             state = await scope.apply_tactic(start, intro)
             goal = execution_goal_to_goal(state.goals[0])
             require(
                 any(local.is_let for local in goal.locals),
                 "Local-let regression lost its definition.",
             )
-            replay = goal.replay_spec()
-            replayed = await scope.apply_tactic(
-                await scope.start_goal(replay.expression),
-                f"intro {' '.join(replay.local_names)}",
+            replayed, replayed_goal, _ = await materialize_seed(
+                scope, goal.replay_seed()
             )
             require(
-                execution_goal_to_goal(replayed.goals[0]).state_fingerprint()
-                == goal.state_fingerprint(),
+                replayed_goal.state_fingerprint() == goal.state_fingerprint(),
                 "Dependent local-let replay changed the model state.",
             )
             require(

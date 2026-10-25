@@ -11,8 +11,8 @@ from torch_geometric.data import Data
 from maths_ai.data_models.proof_components import Goal, GoalLocal
 from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
 from maths_ai.gnn_inference.atp_lean_gnn.inference import (
-    _local_names_by_fv_label,
     _resolve_local_node_name,
+    local_declarations,
 )
 from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_goal
 from pantograph_async import (
@@ -106,10 +106,10 @@ class NormalizedGraphTests(unittest.TestCase):
         eq_app = next(node for node in dag.nodes if node.label == ":app")
         self.assertEqual(eq_app.children.count(fv_id), 2)
 
-        local_names = _local_names_by_fv_label(dag)
-        self.assertEqual(_resolve_local_node_name(hyp, dag, local_names), "h")
+        declarations = local_declarations(goal)
+        self.assertEqual(_resolve_local_node_name(hyp, dag, declarations), "h")
         self.assertEqual(
-            _resolve_local_node_name(dag.nodes[fv_id], dag, local_names), "h"
+            _resolve_local_node_name(dag.nodes[fv_id], dag, declarations), "h"
         )
 
     def test_goal_root_does_not_depend_on_last_allocated_expression_node(self):

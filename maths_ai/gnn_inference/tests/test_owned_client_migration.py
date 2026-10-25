@@ -11,10 +11,11 @@ import torch
 
 from maths_ai.data_models.proof_components import TacticCandidate
 from maths_ai.gnn_inference.model import GNNPredictor
-from maths_ai.gnn_inference.atp_lean_gnn.inference import InferencePipeline
+from maths_ai.gnn_inference.atp_lean_gnn.inference import InferencePipeline, local_declarations
 from maths_ai.gnn_inference.tests.model_helpers import structured_goal, pantograph_goal
 from maths_ai.hybrid_reasoner.joint_inference import HybridReasoner, PantographExecutor
 from maths_ai.hybrid_reasoner.pantograph_adapter import execution_goal_to_translator
+from maths_ai.lean_replay import seed_from_text
 from pantograph_async import PantographStateError
 
 
@@ -51,7 +52,8 @@ def test_prediction_is_synchronous_canonical_and_gradient_free_in_active_loop():
     seen = []
     pipeline = object.__new__(InferencePipeline)
 
-    def predict(dag, *, top_k):
+    def predict(dag, *, top_k, declarations):
+        assert declarations == local_declarations(goal)
         seen.append(
             (torch.is_grad_enabled(), (parameter * 2).requires_grad, dag.state_root_id)
         )
@@ -76,7 +78,7 @@ def test_overlapping_prove_is_rejected_before_changing_search_state():
 
     async def run():
         with pytest.raises(PantographStateError):
-            await reasoner.prove("True")
+            await reasoner.prove(seed_from_text(goal="True"))
 
     asyncio.run(run())
     assert reasoner._proving is True
@@ -136,7 +138,7 @@ def test_lazy_exports_preserve_existing_package_api():
 
 
 CLIENT_REPOSITORY = "https://github.com/123nol/Pantograph-Client"
-CLIENT_COMMIT = "664bcaa10578cb933afc618b8e8cb20a1b751106"
+CLIENT_COMMIT = "d1dac7e8a8ea296192e7a5b2616114b73e0812b7"
 
 
 def test_dependency_is_the_pinned_client_and_not_pypantograph():
@@ -169,6 +171,7 @@ def test_dependency_is_the_pinned_client_and_not_pypantograph():
 
 
 MANIFEST = Path(__file__).parent / "fixtures/pantograph/mcts_owned_client/source_manifest.json"
+PORT_MANIFEST = Path(__file__).parent / "fixtures/dataset_replay/mcts_port/source_manifest.json"
 
 
 def test_port_sources_match_the_recorded_lineage_and_current_adaptations():
@@ -189,6 +192,15 @@ def test_port_sources_match_the_recorded_lineage_and_current_adaptations():
     for entry in current["sources"]:
         if entry["path"] in expected:
             assert entry["port_source_sha256"] == expected[entry["path"]]
+        expected[entry["path"]] = entry["sha256"]
+    # The dataset-reconstruction port is the next link: every file it changed
+    # was recorded at the hash the previous link left it at.
+    port = json.loads(PORT_MANIFEST.read_text())
+    assert port["target_base_commit"] == "61f6d384730fca3dd7a56918377af4efb2c912cc"
+    assert port["application_source_commit"] == "54d7cefe04aed980734798f06528ed80c71b81ac"
+    for entry in port["sources"]:
+        if entry["path"] in expected:
+            assert entry["target_base_sha256"] == expected[entry["path"]], entry["path"]
         expected[entry["path"]] = entry["sha256"]
     for path, digest in expected.items():
         assert hashlib.sha256((root / path).read_bytes()).hexdigest() == digest, path

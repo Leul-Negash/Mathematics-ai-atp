@@ -45,32 +45,47 @@ def _is_playable_local_name(value: str) -> bool:
     return bool(core) and core.isidentifier()
 
 
-def _local_names_by_fv_label(dag: DAGBuilder) -> dict[str, str]:
-    names: dict[str, str] = {}
-    for node in dag.nodes:
-        if node.label != "Hyp" or len(node.children) != 4:
-            continue
-        context_label = dag.nodes[node.children[0]].label
-        if _FV_LABEL_RE.match(context_label):
-            names[context_label] = dag.nodes[node.children[1]].label
-    return names
+def local_declarations(goal) -> dict[str, str]:
+    """Each local's model context label (``FVk``) mapped to its live Lean name.
+
+    The label is the declaration's identity in the graph: context indices are
+    unique in a goal, while display names need not be (a shadowed source name
+    and a new local can share one).
+    """
+    return {
+        f"FV{local.context_index}": local.execution_or_live_name
+        for local in goal.locals or []
+    }
 
 
 def _resolve_local_node_name(
     node: GraphNode,
     dag: DAGBuilder,
-    local_names: dict[str, str] | None = None,
+    declarations: dict[str, str] | None = None,
 ) -> str:
-    """Resolve a structured local node to a Lean-usable user name."""
-    if node.label == "Hyp" and node.children:
-        name_index = 1 if len(node.children) == 4 else 0
-        result = dag.nodes[node.children[name_index]].label
+    """Resolve a selected local to the name Lean knows that declaration by.
+
+    A structured local (a four-child ``Hyp`` or its ``FVk`` node) is looked up
+    by its context label in ``declarations``, never by its display name. A
+    graph built from printed text has no context identity; there the
+    declaration's own name node is the name.
+    """
+    if node.label == "Hyp" and len(node.children) == 4:
+        label = dag.nodes[node.children[0]].label
     elif _FV_LABEL_RE.match(node.label):
-        result = (local_names or {}).get(node.label, node.label)
+        label = node.label
+    elif node.label == "Hyp" and node.children:
+        label = None
     else:
         raise ValueError(
             f"Selected node {node.label!r} is not a structured local declaration."
         )
+    if label is None:
+        result = dag.nodes[node.children[0]].label
+    elif declarations is None or label not in declarations:
+        raise ValueError(f"Selected local {label} has no live declaration.")
+    else:
+        result = declarations[label]
     if not _is_playable_local_name(result):
         raise ValueError(
             f"Selected local {result!r} is not a playable Lean identifier."
@@ -216,9 +231,17 @@ class InferencePipeline:
     def predict_from_goal(self, goal, *, top_k: int = 1) -> InferenceResult:
         """Predict synchronously from one complete canonical model state."""
         dag = model_goal_to_dag(goal.require_model_state())
-        return self._predict_from_dag(dag, top_k=top_k)
+        return self._predict_from_dag(
+            dag, top_k=top_k, declarations=local_declarations(goal)
+        )
 
-    def _predict_from_dag(self, dag: DAGBuilder, *, top_k: int = 1) -> InferenceResult:
+    def _predict_from_dag(
+        self,
+        dag: DAGBuilder,
+        *,
+        top_k: int = 1,
+        declarations: dict[str, str] | None = None,
+    ) -> InferenceResult:
         """Core prediction logic from a pre-built DAG."""
         data = dag_to_pyg(dag, self.node_vocab)
 
@@ -260,8 +283,6 @@ class InferencePipeline:
             k=self.k,
         )
         pool = pools[0]
-        local_names = _local_names_by_fv_label(dag)
-
         top_tactic_predictions: list[dict[str, object]] = []
         for candidate in top_candidates:
             tactic_id = int(candidate["tactic_id"])
@@ -339,7 +360,7 @@ class InferencePipeline:
                     idx = int(idx)
                     cid = pool.candidate_ids[idx]
                     node = dag.nodes[cid]
-                    arg_str = _resolve_local_node_name(node, dag, local_names)
+                    arg_str = _resolve_local_node_name(node, dag, declarations)
                     arguments.append(arg_str)
                     score_val = (
                         float(local_scores[local_sorted[rank]].item())
@@ -382,7 +403,7 @@ class InferencePipeline:
 
                 if source == "local":
                     node = dag.nodes[cid]
-                    arg_str = _resolve_local_node_name(node, dag, local_names)
+                    arg_str = _resolve_local_node_name(node, dag, declarations)
                 else:
                     if self.lemma_corpus and cid in self.lemma_corpus:
                         arg_str = self.lemma_corpus[cid].name

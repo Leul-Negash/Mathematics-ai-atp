@@ -24,7 +24,6 @@ from maths_ai.gnn_inference.tests.model_helpers import FakeStateScope, ScopedFak
 from maths_ai.data_models.proof_components import (
     Goal,
     GoalLocal,
-    LeanGoalSeed,
     TacticCandidate,
 )
 from maths_ai.hybrid_reasoner.joint_inference import (
@@ -32,6 +31,8 @@ from maths_ai.hybrid_reasoner.joint_inference import (
     PantographExecutor,
     render_tactic_command,
 )
+from maths_ai.hybrid_reasoner.pantograph_model_sexpr import materialize_replay
+from maths_ai.lean_replay import ReplayInputError, render_replay, seed_from_text
 
 
 def _tactic(name: str, *arguments: str) -> TacticCandidate:
@@ -157,62 +158,86 @@ class ScopedReplayTests(unittest.TestCase):
                 raise error
 
             client._start_goal = reject
-            with self.assertRaises(type(error)):
+            # Lean rejecting the input is a property of the seed; the rest are
+            # infrastructure failures and keep their own types.
+            expected = (
+                ReplayInputError if isinstance(error, PantographGoalRejected) else type(error)
+            )
+            with self.assertRaises(expected):
                 asyncio.run(
-                    _reasoner(client)._start_state(LeanGoalSeed(expression="p → p"))
+                    _reasoner(client)._materialize_goal(seed_from_text(goal="p → p"))
                 )
             self.assertEqual(len(calls), 1)
 
     def test_hypotheses_are_quantified_then_introduced(self):
         healthy = _HealthyClient()
-        state = asyncio.run(
-            _reasoner(healthy)._start_state(
-                LeanGoalSeed(expression="q ∨ p", hypotheses=["p : Prop", "h : p ∨ q"])
-            )
+        replay = render_replay(
+            seed_from_text(goal="q ∨ p", hypotheses=["p : Prop", "h : p ∨ q"])
         )
+        state = asyncio.run(materialize_replay(FakeStateScope(healthy), replay))
         self.assertEqual(healthy.started, ["∀ (p : Prop), ∀ (h : p ∨ q), q ∨ p"])
+        self.assertEqual(healthy.started_levels, ())
         self.assertEqual(state, "goal-state+intro p h")
+
+    def test_universe_levels_reach_goal_start(self):
+        healthy = _HealthyClient()
+        replay = render_replay(
+            seed_from_text(goal="a = a", hypotheses=["α : Type u_1", "a : α"])
+        )
+        asyncio.run(materialize_replay(FakeStateScope(healthy), replay))
+        self.assertEqual(healthy.started, ["∀ (α : Type u_1), ∀ (a : α), a = a"])
+        self.assertEqual(healthy.started_levels, ("u_1",))
 
     def test_structured_replay_preserves_binder_roles_and_local_let(self):
         healthy = _HealthyClient()
-        reasoner = _reasoner(healthy)
         goal = Goal(
             expression="x = x",
             goal_model_sexp="(:app (:c Eq) (:fv FV2) (:fv FV2))",
+            goal_sexp="((:c Eq) (:fv _a) (:fv _x) (:fv _x))",
             locals=[
                 GoalLocal(
                     user_name="α",
+                    internal_name="_a",
                     context_index=0,
                     binder_role=":implicit",
                     type_pp="Type",
                     type_model_sexp="(:sort 1)",
+                    type_sexp="(:sort 1)",
                 ),
                 GoalLocal(
                     user_name="inst",
+                    internal_name="_inst",
                     context_index=1,
-                    binder_role=":instImplicit",
+                    binder_role=":instance-implicit",
                     is_instance=True,
                     type_pp="Inhabited α",
                     type_model_sexp="(:app (:c Inhabited) (:fv FV0))",
+                    type_sexp="((:c Inhabited) (:fv _a))",
                 ),
                 GoalLocal(
                     user_name="x",
+                    internal_name="_x",
                     context_index=2,
-                    binder_role=":explicit",
+                    binder_role=":let",
                     is_let=True,
                     type_pp="α",
                     type_model_sexp="(:fv FV0)",
+                    type_sexp="(:fv _a)",
                     value_pp="default",
                     value_model_sexp="(:c default)",
+                    value_sexp="((:c default) (:fv _a) (:fv _inst))",
                 ),
             ],
             model_sexp_version=1,
         )
 
-        state = asyncio.run(reasoner._start_state(goal))
+        state = asyncio.run(materialize_replay(FakeStateScope(healthy), goal.replay_spec()))
 
         self.assertEqual(
             healthy.started,
-            ["∀ {α : Type}, ∀ [inst : Inhabited α], let x : α := default; x = x"],
+            [
+                "∀ {α : (Sort 1)}, ∀ [inst : (@Inhabited @α)], "
+                "let x : @α := (@default @α @inst); (@Eq @α @x @x)"
+            ],
         )
         self.assertEqual(state, "goal-state+intro α inst x")

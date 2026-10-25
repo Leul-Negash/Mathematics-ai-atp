@@ -43,10 +43,11 @@ from maths_ai.hybrid_reasoner.joint_inference import (
     ExpansionResult,
     HybridReasoner,
 )
+from maths_ai.lean_replay import LeanGoalSeed
 from pantograph_async import PantographStateError
 
 from .actor_critic import ActorCriticWithArgsClassifier
-from .inference import _local_names_by_fv_label, _resolve_local_node_name
+from .inference import _resolve_local_node_name, local_declarations
 from .labels import get_tactic_arity
 from .pln_rl_training import EdgeAction, FailureRecord, make_dag_featurizer
 
@@ -167,7 +168,7 @@ class RLHybridReasoner(HybridReasoner):
         pendings: List[_PendingNode] = []
         dags = []
         datas = []
-        local_name_maps: list[dict[str, str]] = []
+        declaration_maps: list[dict[str, str]] = []
         if node_ids is not None and len(node_ids) != len(sub_goals):
             raise ValueError("node_ids must align with sub_goals")
         for row, sub_goal in enumerate(sub_goals):
@@ -188,7 +189,8 @@ class RLHybridReasoner(HybridReasoner):
             pendings.append(pending)
             dags.append(dag)
             datas.append(data)
-            local_name_maps.append(_local_names_by_fv_label(dag))
+            # Each row resolves arguments only through its own goal's locals.
+            declaration_maps.append(local_declarations(sub_goal))
         batch = Batch.from_data_list(datas).to(self.device)
 
         all_candidates: List[List[TacticCandidate]] = [[] for _ in sub_goals]
@@ -196,14 +198,14 @@ class RLHybridReasoner(HybridReasoner):
         with torch.no_grad():
             for _ in range(self.top_k_tactics):
                 sample = self.model.act(batch, id_to_tactic=self.id_to_tactic, greedy=self._greedy)
-                for row, (dag, pending, local_names) in enumerate(
-                    zip(dags, pendings, local_name_maps)
+                for row, (dag, pending, declarations) in enumerate(
+                    zip(dags, pendings, declaration_maps)
                 ):
                     candidate, action = self._decode_row(
                         sample,
                         row,
                         dag,
-                        local_names,
+                        declarations,
                         pending.graph_fingerprint,
                     )
                     if candidate is None:
@@ -228,7 +230,7 @@ class RLHybridReasoner(HybridReasoner):
         sample,
         row: int,
         dag,
-        local_names: dict[str, str],
+        declarations: dict[str, str],
         graph_fingerprint: str,
     ) -> tuple[Optional[TacticCandidate], EdgeAction]:
         """Turn row ``row`` of a batched ``ActionSample`` into
@@ -238,7 +240,8 @@ class RLHybridReasoner(HybridReasoner):
         vocab (or the ``<UNK>`` family) is unplayable — drop the draw. Arguments: each
         sampled index is a padded per-graph position, which equals the node's offset in
         this row's ``dag.nodes`` (``_score_nodes`` assigns offsets within each graph),
-        so render it with ``_resolve_local_node_name``. The number of argument steps in
+        so render it with ``_resolve_local_node_name`` through ``declarations``, the
+        row's own context-label -> live-name map (``local_declarations``). The number of argument steps in
         a multi-graph batch follows the batch's MAX sampled arity, so rows whose tactic
         has a smaller arity are truncated to their own arity — matching what a
         single-graph proposal would have sampled. Out-of-range indices (padding) are
@@ -269,7 +272,7 @@ class RLHybridReasoner(HybridReasoner):
                 return None, action
             try:
                 arguments.append(
-                    _resolve_local_node_name(dag.nodes[idx], dag, local_names)
+                    _resolve_local_node_name(dag.nodes[idx], dag, declarations)
                 )
             except ValueError:
                 return None, action
@@ -284,12 +287,12 @@ class RLHybridReasoner(HybridReasoner):
         self,
         sample,
         dag,
-        local_names: dict[str, str],
+        declarations: dict[str, str],
         graph_fingerprint: str,
     ) -> tuple[Optional[TacticCandidate], EdgeAction]:
         """Batch-size-1 view of ``_decode_row`` (kept for tests and callers
         holding a single-graph ``ActionSample``)."""
-        return self._decode_row(sample, 0, dag, local_names, graph_fingerprint)
+        return self._decode_row(sample, 0, dag, declarations, graph_fingerprint)
 
     # ------------------------------------------------------------------
     # Stash migration: fingerprint → edge.id on link, failures on flush
@@ -356,9 +359,8 @@ class RLHybridReasoner(HybridReasoner):
 
     async def prove(
         self,
-        goal: str,
+        seed: LeanGoalSeed,
         *,
-        hypotheses: Optional[List[str]] = None,
         greedy: bool = False,
         deadline: Optional[float] = None,
     ) -> RLSearchResult:
@@ -384,7 +386,7 @@ class RLHybridReasoner(HybridReasoner):
         self._greedy = greedy
         self._result = RLSearchResult(graph=None)  # graph attached after the base search
         try:
-            graph = await super().prove(goal, hypotheses=hypotheses, deadline=deadline)
+            graph = await super().prove(seed, deadline=deadline)
             if self._pending:
                 raise AssertionError(
                     "Normal search completion left sampled actions without an expansion outcome."

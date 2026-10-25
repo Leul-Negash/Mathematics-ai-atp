@@ -10,7 +10,13 @@ from unittest.mock import patch
 import torch
 from torch.optim import AdamW
 
-from maths_ai.data_models.proof_components import Goal, LeanGoalSeed, STV
+from maths_ai.data_models.proof_components import Goal, STV
+from maths_ai.lean_replay import (
+    ReplayFailure,
+    ReplayInputError,
+    render_replay,
+    seed_from_text,
+)
 from maths_ai.hybrid_reasoner.hypergraph import TacticOutcome
 from maths_ai.pln_inference.model import PLNResult
 
@@ -36,11 +42,16 @@ from maths_ai.gnn_inference.atp_lean_gnn.rl_live_collection import LiveReasonerP
 from maths_ai.gnn_inference.atp_lean_gnn import rl_training_driver
 from maths_ai.gnn_inference.atp_lean_gnn.rl_resources import ResourcePlan
 from pantograph_async import (
+    ExecutionGoal,
+    ExecutionLocal,
     PantographConfigurationError,
+    PantographEnv,
+    PantographGoalRejected,
     PantographProtocolError,
     PantographRequestTimeout,
     PantographStateError,
     PantographTransportError,
+    WireExpression,
 )
 from maths_ai.gnn_inference.tests.model_helpers import (
     ScopedFakeClient,
@@ -86,6 +97,21 @@ class _QEDExecutor:
         return TacticOutcome(success=True, subgoals=[])
 
 
+class _InadmissibleServer(_FakeServer):
+    """Lean rejects every root, as it would a statement it cannot elaborate."""
+
+    async def _start_goal(self, expression):
+        raise PantographGoalRejected("cannot elaborate reconstructed goal")
+
+
+class _InadmissibleExecutor:
+    def __init__(self):
+        self.server = _InadmissibleServer()
+
+    async def apply(self, server, state, tactic):
+        raise AssertionError("tactics must not run when the root cannot be replayed")
+
+
 class _RejectExecutor:
     def __init__(self):
         self.server = _FakeServer()
@@ -109,12 +135,12 @@ class _RaisingReasoner:
         self.model = inner.model
         self.dag_featurize_data = inner.dag_featurize_data
 
-    async def prove(self, goal, *, hypotheses=None, greedy=False, deadline=None):
+    async def prove(self, seed, *, greedy=False, deadline=None):
         idx = self._calls
         self._calls += 1
         if idx in self._raise_on:
             raise RuntimeError("simulated Lean transport failure")
-        return await self._inner.prove(goal, hypotheses=hypotheses, greedy=greedy, deadline=deadline)
+        return await self._inner.prove(seed, greedy=greedy, deadline=deadline)
 
 
 TACTIC_VOCAB = {"trivial": 0, "intro": 1, "exact": 2, "<UNK_TACTIC>": 3}
@@ -147,7 +173,7 @@ def _make_reasoner(model, node_vocab, executor, *, top_k=3):
 def _items(n: int) -> list[TheoremItem]:
     return [
         TheoremItem(
-            goal=LeanGoalSeed(expression=GOAL_EXPR, hypotheses=HYPS),
+            seed=seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS),
             tactic_label="intro",
             size=10 + i,
         )
@@ -223,6 +249,27 @@ def _qed_factory(model, node_vocab, tactic_vocab, cfg):
 
 def _reject_factory(model, node_vocab, tactic_vocab, cfg):
     return _make_reasoner(model, node_vocab, _RejectExecutor(), top_k=cfg.top_k_tactics)
+
+
+def _inadmissible_factory(model, node_vocab, tactic_vocab, cfg):
+    return _make_reasoner(model, node_vocab, _InadmissibleExecutor(), top_k=cfg.top_k_tactics)
+
+
+class _InadmissibleAfter:
+    """Searches normally for the first ``searches`` calls, then every seed is
+    inadmissible -- a round with no usable root after rounds that filled replay."""
+
+    def __init__(self, inner, searches: int):
+        self._inner = inner
+        self._searches = searches
+        self.model = inner.model
+        self.dag_featurize_data = inner.dag_featurize_data
+
+    async def prove(self, seed, *, greedy=False, deadline=None):
+        if self._searches <= 0:
+            raise ReplayInputError(ReplayFailure.LEAN_REJECTED, "unknown identifier")
+        self._searches -= 1
+        return await self._inner.prove(seed, greedy=greedy, deadline=deadline)
 
 
 class ConfigTests(unittest.TestCase):
@@ -378,66 +425,367 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cfg.num_simulations, 8)
 
 
+def _wire(text: str) -> WireExpression:
+    return WireExpression(pp=text, sexp=text, model_sexp="(:c Test)", model_sexp_version=1)
+
+
+class _ReplayState:
+    def __init__(self, goal: ExecutionGoal):
+        self.goals = [goal]
+
+
+class _ReplayClient(ScopedFakeClient):
+    """Answers each replay with the goal ``respond(expression, tactic)`` builds.
+
+    Expressions containing a ``rejected`` marker fail as Lean would on an
+    unknown identifier.
+    """
+
+    def __init__(self, respond=None, rejected: tuple[str, ...] = ()):
+        self.respond = respond or _intro_goal
+        self.rejected = rejected
+        self.started: list[str] = []
+
+    async def _start_goal(self, expression):
+        self.started.append(expression)
+        if any(marker in expression for marker in self.rejected):
+            raise PantographGoalRejected("unknown identifier 'span'")
+        return expression
+
+    async def _apply_tactic(self, state, tactic):
+        return _ReplayState(self.respond(state, tactic))
+
+
+def _intro_goal(expression: str, tactic: str) -> ExecutionGoal:
+    """A goal whose locals are the names the intro pattern introduced."""
+    names = tactic.split()[1:] if tactic.startswith("intro") else []
+    return ExecutionGoal(
+        goal_name="g",
+        case_tag=None,
+        is_conversion=False,
+        fragment="tactic",
+        target=_wire("(:c True)"),
+        locals=tuple(
+            ExecutionLocal(
+                internal_name=f"_live.{index}",
+                user_name=name,
+                context_index=index,
+                binder_role=":explicit",
+                is_instance=False,
+                is_let=False,
+                is_inaccessible=False,
+                type=_wire("(:sort 0)"),
+            )
+            for index, name in enumerate(names)
+        ),
+    )
+
+
+def _factory(client):
+    async def create():
+        return client
+
+    return create
+
+
+def _env(tmp: Path) -> PantographEnv:
+    return PantographEnv(source_root=tmp, pantograph_repl=tmp / "repl")
+
+
+def _structured_row(index: int, *, let: bool = False) -> DatasetRow:
+    context = [
+        {
+            "binder_role": ":let" if let else ":explicit",
+            "context_index": 0,
+            "internal_name": "_uniq.1",
+            "is_instance": False,
+            "is_let": let,
+            "user_name": "p",
+        }
+    ]
+    return DatasetRow(
+        state="p : Prop\n⊢ p → p",
+        theorem=f"demo{index}",
+        tactic="intro",
+        split="train",
+        row_index=index,
+        dataset_name="jajostrains/Mathlib-Normalized-Sexpr",
+        raw_goal_sexp="(:forall h (:fv _uniq.1) (:fv _uniq.1))",
+        raw_hyp_sexps=json.dumps([{"name": "p", "sexp": "(:sort 0)"}]),
+        local_context=json.dumps(context),
+        raw_schema_version=4,
+    )
+
+
+def _structured_goal(expression: str, tactic: str) -> ExecutionGoal:
+    """What Lean prints after replaying ``_structured_row``."""
+    return ExecutionGoal(
+        goal_name="g",
+        case_tag=None,
+        is_conversion=False,
+        fragment="tactic",
+        target=_wire("(:forall h (:fv _live.1) (:fv _live.1))"),
+        locals=(
+            ExecutionLocal(
+                internal_name="_live.1",
+                user_name="p",
+                context_index=0,
+                binder_role=":explicit",
+                is_instance=False,
+                is_let=False,
+                is_inaccessible=False,
+                type=_wire("(:sort 0)"),
+            ),
+        ),
+    )
+
+
+def _write_theorems(tmp: Path, rows: list[dict]) -> Path:
+    path = tmp / "theorems.jsonl"
+    with open(path, "w") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+    return path
+
+
+def _report(directory: Path) -> dict:
+    (path,) = directory.iterdir()
+    return json.loads(path.read_text())
+
+
 class PoolTests(unittest.TestCase):
-    @patch("maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver.iter_dataset_rows")
-    def test_dataset_name_is_forwarded_to_stream(self, mock_iter_dataset_rows):
+    @patch("maths_ai.gnn_inference.atp_lean_gnn.seed_admission.iter_dataset_rows")
+    def test_dataset_rows_replay_from_their_raw_columns(self, mock_iter_dataset_rows):
         mock_iter_dataset_rows.return_value = iter(
-            [
-                DatasetRow(
-                    state="p : Prop\n|- p → p",
-                    theorem="demo",
-                    tactic="intro",
-                    split="train",
-                    row_index=0,
-                    dataset_name="jajostrains/Mathlib-Normalized-Sexpr",
-                )
-            ]
+            [_structured_row(0), _structured_row(1, let=True)]
         )
+        client = _ReplayClient(_structured_goal)
         with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
             cfg = _write_config(
-                Path(tmp),
+                tmp,
                 dataset_name="jajostrains/Mathlib-Normalized-Sexpr",
-                max_pool_size=1,
+                max_pool_size=5,
+                max_scan_rows=7,
                 eval_pool_size=0,
             )
-            pool = build_theorem_pool(cfg)
+            pool = asyncio.run(
+                build_theorem_pool(
+                    cfg, _env(tmp), report_dir=tmp / "admission", client_factory=_factory(client)
+                )
+            )
+            report = _report(tmp / "admission")
         self.assertEqual(len(pool.train_items), 1)
+        self.assertEqual(pool.train_items[0].seed.source_dict["theorem"], "demo0")
+        self.assertEqual(client.started, ["∀ (p : (Sort 0)), (∀ (h : @p), @p)"])
         mock_iter_dataset_rows.assert_called_once_with(
             dataset_name="jajostrains/Mathlib-Normalized-Sexpr",
             split="train",
-            sample_limit=2,
+            sample_limit=7,
+            revision=cfg.dataset_revision,
+        )
+        # Schema 4 records no let values: the row is quarantined, not guessed.
+        self.assertEqual(report["quarantined"], {"missing-context": 1})
+        self.assertEqual((report["scanned"], report["admitted"]), (2, 1))
+        self.assertEqual(
+            report["coverage"]["size:<=200"], {"admitted": 1, "quarantined": 1}
         )
 
     def test_file_mode_pool(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            theorem_file = tmp / "theorems.jsonl"
-            rows = [
-                {"goal": "p → p", "hypotheses": ["p : Prop"], "tactic": "intro"},
-                {"goal": "q ∨ p", "hypotheses": ["p : Prop", "q : Prop", "h : p ∨ q"]},
-                {"goal": "x" * 500, "hypotheses": []},  # over max_state_chars → dropped
-            ]
-            with open(theorem_file, "w") as f:
-                for r in rows:
-                    f.write(json.dumps(r) + "\n")
-            cfg = _write_config(
-                tmp, data_source="file", theorem_file=theorem_file,
-                max_state_chars=400, eval_pool_size=0,
+            theorem_file = _write_theorems(
+                tmp,
+                [
+                    {"goal": "p → p", "hypotheses": ["p : Prop"], "tactic": "intro"},
+                    {"goal": "q ∨ p", "hypotheses": ["p q : Prop", "h : p ∨ q"]},
+                    {"goal": "x" * 500, "hypotheses": []},  # over max_state_chars
+                ],
             )
-            pool = build_theorem_pool(cfg)
+            cfg = _write_config(
+                tmp,
+                data_source="file",
+                theorem_file=theorem_file,
+                max_state_chars=400,
+                eval_pool_size=0,
+            )
+            pool = asyncio.run(build_theorem_pool(cfg, _env(tmp), client_factory=_factory(_ReplayClient())))
             total = len(pool.train_items) + len(pool.eval_items)
-            self.assertEqual(total, 2)  # oversized row dropped
-            self.assertEqual(pool.train_items[0].goal.expression, "p → p")  # size-sorted
+            self.assertEqual(total, 2)  # oversized row skipped
+            self.assertEqual(pool.train_items[0].seed.target, "p → p")  # size-sorted
             self.assertEqual(pool.train_items[0].tactic_label, "intro")
+            # Grouped names are separate locals in the replay.
+            self.assertEqual(
+                [local.name for local in pool.train_items[1].seed.locals], ["p", "q", "h"]
+            )
 
-    def test_universe_placeholders_are_not_term_metavariables(self):
-        from maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver import _has_metavariable
-
-        goal = LeanGoalSeed(
-            expression="x = x",
-            hypotheses=["alpha : Type ?u.319125", "x : alpha"],
+    def test_unreconstructable_rows_are_quarantined_by_reason(self):
+        """Holes, universe metavariables and Lean rejections never become roots,
+        and each is reported under its own reason rather than as `dropped`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            theorem_file = _write_theorems(
+                tmp,
+                [
+                    {"goal": "p → p", "hypotheses": ["p : Prop"], "tactic": "intro"},
+                    {"goal": "?m.4519 = ?m.4519", "hypotheses": []},
+                    {"goal": "p → p", "hypotheses": ["h : ?m.2235"]},
+                    {"goal": "x = x", "hypotheses": ["α : Type ?u.319125", "x : α"]},
+                    {"goal": "span R s = N", "hypotheses": []},
+                    {"goal": "q ∨ p", "hypotheses": ["p : Prop", "q : Prop", "h : p ∨ q"]},
+                ],
+            )
+            cfg = _write_config(
+                tmp, data_source="file", theorem_file=theorem_file, eval_pool_size=0
+            )
+            pool = asyncio.run(
+                build_theorem_pool(
+                    cfg,
+                    _env(tmp),
+                    report_dir=tmp / "admission",
+                    client_factory=_factory(_ReplayClient(rejected=("span",))),
+                )
+            )
+            report = _report(tmp / "admission")
+        self.assertEqual(len(pool.train_items), 2)
+        self.assertEqual(
+            report["quarantined"],
+            {"lean-rejected": 1, "unresolved-term": 2, "unresolved-universe": 1},
         )
-        self.assertFalse(_has_metavariable(goal))
+        self.assertEqual(report["candidates"], 3)
+
+    def test_universe_metavariables_are_not_erased(self):
+        """`Type ?u.319125` has no assignment to replay; turning it into `Type`
+        could change the statement, so the seed is rejected instead."""
+        seed = seed_from_text(goal="x = x", hypotheses=["α : Type ?u.319125", "x : α"])
+        with self.assertRaises(ReplayInputError) as error:
+            render_replay(seed)
+        self.assertIs(error.exception.reason, ReplayFailure.UNRESOLVED_UNIVERSE)
+
+    def test_a_replay_that_loses_the_client_is_skipped_on_a_fresh_one(self):
+        """A heavy row whose replay kills the session (the REPL printing an
+        uncaught heartbeat error) is skipped and a fresh client continues."""
+
+        class _DyingClient(_ReplayClient):
+            async def _start_goal(self, expression):
+                if "boom" in expression:
+                    self.is_usable = False
+                    raise PantographProtocolError("Unsolicited REPL stdout")
+                return await super()._start_goal(expression)
+
+        created = []
+
+        async def factory():
+            created.append(_DyingClient())
+            return created[-1]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rows = [{"goal": "boom", "hypotheses": []}, {"goal": "p → p", "hypotheses": ["p : Prop"]}]
+            cfg = _write_config(
+                tmp, data_source="file", theorem_file=_write_theorems(tmp, rows), eval_pool_size=0
+            )
+            pool = asyncio.run(
+                build_theorem_pool(
+                    cfg, _env(tmp), report_dir=tmp / "admission", client_factory=factory
+                )
+            )
+            report = _report(tmp / "admission")
+            self.assertEqual(len(pool.train_items), 1)
+            self.assertEqual(report["skipped"], {"replay-repl-failure": 1})
+            self.assertEqual(report["quarantined"], {})
+            self.assertEqual(len(created), 2)
+
+            # Consecutive heavy rows of one proof are each skipped, not fatal.
+            many = tmp / "many"
+            many.mkdir()
+            rows = [{"goal": "boom", "hypotheses": []}] * 3 + [{"goal": "True", "hypotheses": []}]
+            cfg = _write_config(
+                many, data_source="file", theorem_file=_write_theorems(many, rows), eval_pool_size=0
+            )
+            pool = asyncio.run(build_theorem_pool(cfg, _env(many), client_factory=factory))
+            self.assertEqual(len(pool.train_items), 1)
+
+            # A client that cannot start ends admission.
+            async def broken():
+                raise PantographProtocolError("probe failed")
+
+            with self.assertRaises(PantographProtocolError):
+                asyncio.run(build_theorem_pool(cfg, _env(many), client_factory=broken))
+
+    def test_oversized_replays_are_skipped_before_sending(self):
+        client = _ReplayClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rows = [{"goal": "x = " + "x" * 300, "hypotheses": []}, {"goal": "True", "hypotheses": []}]
+            cfg = _write_config(
+                tmp,
+                data_source="file",
+                theorem_file=_write_theorems(tmp, rows),
+                max_replay_chars=100,
+                eval_pool_size=0,
+            )
+            pool = asyncio.run(
+                build_theorem_pool(
+                    cfg, _env(tmp), report_dir=tmp / "admission", client_factory=_factory(client)
+                )
+            )
+            report = _report(tmp / "admission")
+        self.assertEqual(len(pool.train_items), 1)
+        self.assertEqual(report["skipped"], {"over-size-replay": 1})
+        self.assertEqual(client.started, ["True"])
+
+    def test_validation_cache_is_reused_only_for_the_same_identity(self):
+        from maths_ai.gnn_inference.atp_lean_gnn.seed_admission import ValidationCache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            identity = {"repl_sha256": "a", "client": {"commit": "c"}}
+            cache = ValidationCache(path, identity)
+            cache.add("fingerprint")
+            cache.save()
+            self.assertIn("fingerprint", ValidationCache(path, identity))
+            changed = dict(identity, repl_sha256="b")
+            self.assertNotIn("fingerprint", ValidationCache(path, changed))
+
+    def test_cached_seeds_are_admitted_without_a_replay(self):
+        client = _ReplayClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rows = [{"goal": "p → p", "hypotheses": ["p : Prop"]}]
+            cfg = _write_config(
+                tmp,
+                data_source="file",
+                theorem_file=_write_theorems(tmp, rows),
+                seed_cache_path=tmp / "cache.json",
+                eval_pool_size=0,
+            )
+            for _ in range(2):
+                asyncio.run(
+                    build_theorem_pool(
+                        cfg, _env(tmp), report_dir=tmp / "admission", client_factory=_factory(client)
+                    )
+                )
+            reports = [
+                json.loads(path.read_text())
+                for path in sorted((tmp / "admission").iterdir())
+            ]
+        # Two runs wrote two reports; the second reused the validation.
+        self.assertEqual(len(reports), 2)
+        self.assertEqual([r["cache_hits"] for r in reports], [0, 1])
+        self.assertEqual(len(client.started), 1)
+
+    def test_no_validated_seed_is_an_error_not_an_empty_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            theorem_file = _write_theorems(tmp, [{"goal": "span R s = N", "hypotheses": []}])
+            cfg = _write_config(tmp, data_source="file", theorem_file=theorem_file)
+            with self.assertRaisesRegex(RuntimeError, "No seed passed Lean validation"):
+                asyncio.run(
+                    build_theorem_pool(
+                        cfg, _env(tmp), client_factory=_factory(_ReplayClient(rejected=("span",)))
+                    )
+                )
 
     def test_curriculum_window_and_growth(self):
         pool = _pool(n_items=10)
@@ -756,6 +1104,89 @@ class HTPSDriverTests(unittest.TestCase):
                 ))
 
 
+class InadmissibleRootTests(unittest.TestCase):
+    """A root that cannot be replayed was never searched: it is not a failed
+    proof, it adds no learning rows, and it leaves the solve-rate window alone."""
+
+    def _rows(self, tmp: Path) -> list[dict]:
+        run_dir = next((tmp / "runs").iterdir())
+        rows = [json.loads(l) for l in (run_dir / "metrics.jsonl").read_text().splitlines()]
+        return [row for row in rows if "num_transitions" in row]
+
+    def test_an_inadmissible_root_is_not_a_failed_search(self):
+        node_vocab = _build_node_vocab()
+        reasoner = _make_reasoner(_make_model(node_vocab), node_vocab, _InadmissibleExecutor())
+        results, stats = asyncio.run(collect_round(reasoner, _items(2), timeout_s=10.0))
+        self.assertEqual(results, [])
+        self.assertEqual(stats["seeds_inadmissible"], 2.0)
+        self.assertEqual(stats["searches_failed"], 0.0)
+        self.assertEqual(stats["collected"], 0.0)
+        self.assertEqual(reasoner._pending, {})
+
+    def test_evaluation_counts_only_searched_seeds(self):
+        node_vocab = _build_node_vocab()
+        model = _make_model(node_vocab)
+        inner = _make_reasoner(model, node_vocab, _QEDExecutor())
+        stats = asyncio.run(
+            evaluate_proof_rate(_InadmissibleAfter(inner, searches=1), _items(3), timeout_s=10.0)
+        )
+        self.assertEqual((stats["solved"], stats["seeds_inadmissible"]), (1.0, 2.0))
+        self.assertEqual(stats["proof_rate"], 1.0)
+
+    def test_rounds_without_searched_seeds_leave_the_solve_rate_window(self):
+        settings = dict(
+            num_rounds=2,
+            curriculum_window_rounds=1,
+            curriculum_solve_threshold=0.0,
+            max_dead_rounds=5,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            cfg = _write_config(tmp, **settings)
+            torch.manual_seed(0)
+            asyncio.run(run_rl_training(cfg, reasoner_factory=_inadmissible_factory, pool=_pool()))
+            rows = self._rows(tmp)
+        # A zero rate appended for an unsearched round would meet the threshold
+        # and widen the window; skipping the round keeps it where it was.
+        self.assertEqual([row["curriculum_size"] for row in rows], [4, 4])
+        self.assertEqual([row["seeds_inadmissible"] for row in rows], [2.0, 2.0])
+        self.assertEqual([row["searches_failed"] for row in rows], [0.0, 0.0])
+        for key in ("imitation_samples_mined", "tactic_queue_len", "critic_queue_len"):
+            self.assertEqual([row[key] for row in rows], [0.0, 0.0], key)
+        self.assertEqual([row["parameter_updates_this_round"] for row in rows], [0.0, 0.0])
+
+        # The same settings do widen it once a round is actually searched.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            cfg = _write_config(tmp, **settings)
+            torch.manual_seed(0)
+            asyncio.run(run_rl_training(cfg, reasoner_factory=_qed_factory, pool=_pool()))
+            self.assertGreater(self._rows(tmp)[0]["curriculum_size"], 4)
+
+    def test_replay_updates_continue_on_a_round_without_usable_roots(self):
+        def factory(model, node_vocab, tactic_vocab, cfg):
+            inner = _make_reasoner(model, node_vocab, _QEDExecutor(), top_k=cfg.top_k_tactics)
+            return _InadmissibleAfter(inner, searches=cfg.theorems_per_round)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            cfg = _write_config(
+                tmp, num_rounds=2, htps_steps_per_round=2, htps_batch_size=4, max_dead_rounds=5
+            )
+            torch.manual_seed(0)
+            asyncio.run(run_rl_training(cfg, reasoner_factory=factory, pool=_pool()))
+            first, second = self._rows(tmp)
+        self.assertEqual(second["seeds_inadmissible"], 2.0)
+        self.assertEqual(second["imitation_samples_mined"], 0.0)
+        self.assertEqual(second["tactic_queue_len"], first["tactic_queue_len"])
+        self.assertEqual(second["critic_queue_len"], first["critic_queue_len"])
+        # No on-policy step without searched roots; HTPS still learns from the
+        # validated entries already in replay.
+        self.assertEqual(second["onpolicy_optimizer_step"], 0.0)
+        self.assertEqual(second["htps_optimizer_steps"], 2.0)
+        self.assertEqual(second["model_generation"], first["model_generation"] + 2.0)
+
+
 class PLNKillSwitchDriverTests(unittest.TestCase):
     """use_pln=False: config roundtrip and threading to the reasoner factory."""
 
@@ -801,15 +1232,13 @@ class _ErrorReasoner:
         self.server = inner.server
         self.calls = 0
 
-    async def prove(self, goal, *, hypotheses=None, greedy=False, deadline=None):
+    async def prove(self, seed, *, greedy=False, deadline=None):
         self.calls += 1
         if self.calls == 1:
             if self._retire_client:
                 await self.server.aclose()
             raise self._error
-        return await self._inner.prove(
-            goal, hypotheses=hypotheses, greedy=greedy, deadline=deadline
-        )
+        return await self._inner.prove(seed, greedy=greedy, deadline=deadline)
 
 
 class SingleReasonerFailureTests(unittest.TestCase):
