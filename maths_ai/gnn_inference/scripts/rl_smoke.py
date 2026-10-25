@@ -36,6 +36,7 @@ from torch.optim import AdamW
 
 from maths_ai.lean_replay import seed_from_text
 from maths_ai.hybrid_reasoner.joint_inference import PantographExecutor
+from maths_ai.hybrid_reasoner.proposal import PROPOSAL_MODES, ProposalSpec
 from pantograph_async import PantographEnv
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import (
     create_model_sexpr_client,
@@ -99,7 +100,13 @@ def build_model(node_vocab: dict[str, int]) -> ActorCriticWithArgsClassifier:
     return model
 
 
-async def run_smoke(env: PantographEnv, *, use_pln: bool = True, **search) -> None:
+async def run_smoke(
+    env: PantographEnv,
+    *,
+    use_pln: bool = True,
+    proposal: ProposalSpec = ProposalSpec(mode="sample", seed=0),
+    **search,
+) -> None:
     torch.manual_seed(0)
 
     env.verify()
@@ -133,10 +140,10 @@ async def run_smoke(env: PantographEnv, *, use_pln: bool = True, **search) -> No
         )
 
         print(
-            f"[rl_smoke] collect ({reasoner.selection_policy}): proving "
+            f"[rl_smoke] collect ({reasoner.selection_policy}, {proposal.mode} proposals): proving "
             f"`{SEED_GOAL}` with hyps {SEED_HYPS}"
         )
-        result = await reasoner.prove(seed)
+        result = await reasoner.prove(seed, proposal=proposal)
 
         graph = result.graph
         print(
@@ -191,6 +198,11 @@ def main() -> None:
     parser.add_argument(
         "--no-pln", action="store_true", help="Run without the petta binary"
     )
+    parser.add_argument(
+        "--proposal-mode", choices=PROPOSAL_MODES, default="sample",
+        help="'sample' draws tactics and arguments; 'greedy' takes the step-wise argmax of both",
+    )
+    parser.add_argument("--proposal-seed", type=int, default=0, help="Seed of the search's draws")
     args = parser.parse_args()
     search = (
         {
@@ -208,7 +220,8 @@ def main() -> None:
         pantograph_repl=Path(args.pantograph_repl),
         imports=("Init", "Mathlib"),
     )
-    asyncio.run(run_smoke(env, use_pln=not args.no_pln, **search))
+    proposal = ProposalSpec(mode=args.proposal_mode, seed=args.proposal_seed)
+    asyncio.run(run_smoke(env, use_pln=not args.no_pln, proposal=proposal, **search))
 
 
 if __name__ == "__main__":

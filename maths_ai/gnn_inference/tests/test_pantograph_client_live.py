@@ -73,7 +73,8 @@ def test_actual_factory_executor_and_two_independent_workers(live_env):
             assert len({client.session_id for client in clients}) == 2
             assert pool.workers[0].model is pool.workers[1].model
             result = await pool.collect_round(
-                [seed_from_text(goal="True")] * 4, timeout_s=30, model_generation=0
+                [seed_from_text(goal="True")] * 4, timeout_s=30, model_generation=0,
+                proposals=[None] * 4,
             )
             assert result.stats["solved"] == 4 and len(result.results) == 4
             for client in clients:

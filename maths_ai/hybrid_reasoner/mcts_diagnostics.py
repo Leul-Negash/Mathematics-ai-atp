@@ -30,6 +30,7 @@ from .hypergraph import EdgeStatus, NodeStatus, SearchEndReason
 from .joint_inference import HybridReasoner, PantographExecutor
 from .pantograph_diagnostics import verify_live_application
 from .pantograph_model_sexpr import create_model_sexpr_client, materialize_seed
+from .proposal import ProposalSpec
 
 
 # The theorems the live checks search, as the typed seeds search accepts.
@@ -262,7 +263,7 @@ async def verify_shared_device_workers(env: PantographEnv) -> list[str]:
     def reasoner_factory(_worker_id, _device, _model, server):
         return _puct_reasoner(server)
 
-    async def search_factory(reasoner, theorem, _greedy, deadline):
+    async def search_factory(reasoner, theorem, _proposal, deadline):
         return await reasoner.prove(theorem, deadline=deadline)
 
     pool = await LiveReasonerPool.create(
@@ -287,8 +288,9 @@ async def verify_shared_device_workers(env: PantographEnv) -> list[str]:
             "Workers on one device did not share the model replica.",
         )
         pool.assert_generation(0)
+        # Scripted reasoners propose no policy actions, so their proposals are unused.
         result = await pool.collect_round(
-            [CONJUNCTION] * 4, timeout_s=120, model_generation=0
+            [CONJUNCTION] * 4, timeout_s=120, model_generation=0, proposals=[None] * 4
         )
         require(result.stats["solved"] == 4, "Pool workers did not prove every theorem.")
         for client in clients:
@@ -370,7 +372,7 @@ async def verify_learning_round(client: PantographClient) -> dict:
             **PUCT_SETTINGS,
         )
         baseline = (await client.stat()).n_goals
-        result = await reasoner.prove(CONJUNCTION)
+        result = await reasoner.prove(CONJUNCTION, proposal=ProposalSpec(mode="sample", seed=0))
         require((await client.stat()).n_goals == baseline, "Learning search leaked states.")
         require(
             bool(result.edge_actions or result.failure_actions),

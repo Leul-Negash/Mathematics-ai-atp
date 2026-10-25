@@ -40,6 +40,9 @@ from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import (
 )
 from maths_ai.gnn_inference.atp_lean_gnn.rl_reasoner import RLHybridReasoner
 from maths_ai.gnn_inference.atp_lean_gnn.search_harvest import extract_transitions
+from maths_ai.hybrid_reasoner.proposal import ProposalSpec
+
+SAMPLE = ProposalSpec(mode="sample", seed=0)
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +194,10 @@ class DecodeTests(unittest.TestCase):
             arg_logp=torch.tensor([-0.3]),
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
+            arities=torch.tensor([1]),
+            complete=torch.tensor([True]),
+            arg_step_logp=[torch.tensor([-0.3])],
+            arg_step_valid=[torch.tensor([True])],
         )
         from maths_ai.gnn_inference.atp_lean_gnn.inference import local_declarations
         candidate, action = reasoner._decode(
@@ -215,6 +222,10 @@ class DecodeTests(unittest.TestCase):
             arg_logp=torch.tensor([0.0]),
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
+            arities=torch.tensor([1]),
+            complete=torch.tensor([True]),
+            arg_step_logp=[torch.tensor([0.0])],
+            arg_step_valid=[torch.tensor([True])],
         )
         from maths_ai.gnn_inference.atp_lean_gnn.inference import local_declarations
         candidate, action = reasoner._decode(
@@ -240,6 +251,10 @@ class DeclarationResolutionTests(unittest.TestCase):
             arg_logp=torch.tensor([-0.3] * rows),
             value=torch.tensor([0.0] * rows),
             tactic_logits=torch.zeros(rows, 3),
+            arities=torch.tensor([1] * rows),
+            complete=torch.tensor([True] * rows),
+            arg_step_logp=[torch.tensor([-0.3] * rows)],
+            arg_step_valid=[torch.tensor([True] * rows)],
         )
 
     @staticmethod
@@ -324,6 +339,8 @@ class DeclarationResolutionTests(unittest.TestCase):
             top_k_tactics=1,
         )
         reasoner.petta_chainer = _StubPLN()
+        # Proposals outside prove() need the search's proposal and generator.
+        reasoner._proposal, reasoner._generator = SAMPLE, torch.Generator()
 
         # FV5 is in every leaf; FV6 only in the two-local leaves.
         cases = (("FV5", ["x_1", "y_1", "w"], 3), ("FV6", ["x", "z"], 2))
@@ -346,9 +363,46 @@ class DeclarationResolutionTests(unittest.TestCase):
                     self.assertEqual(sorted(reasoner._pending), list(range(1, rows + 1)))
 
 
+class ProposalSeedTests(unittest.TestCase):
+    """A search's draws come from its own seed, never from the global RNG."""
+
+    @staticmethod
+    def _draws(result):
+        return sorted(
+            (action.tactic_id, action.arg_indices, action.multiplicity)
+            for action in [*result.edge_actions.values(), *(f.action for f in result.failure_actions)]
+        )
+
+    def test_the_same_seed_repeats_a_search_and_leaves_the_global_rng_alone(self):
+        reasoner, _model, _vocab = _make_reasoner(_RejectExecutor(), top_k=4)
+        proposal = ProposalSpec(mode="sample", seed=11)
+        before = torch.get_rng_state()
+        first = asyncio.run(reasoner.prove(SEED, proposal=proposal))
+        second = asyncio.run(reasoner.prove(SEED, proposal=proposal))
+        self.assertTrue(torch.equal(torch.get_rng_state(), before))
+        self.assertEqual(self._draws(first), self._draws(second))
+        other = [
+            self._draws(asyncio.run(reasoner.prove(SEED, proposal=ProposalSpec(mode="sample", seed=s))))
+            for s in range(1, 6)
+        ]
+        self.assertTrue(any(draws != self._draws(first) for draws in other))
+
+    def test_greedy_draws_one_action_k_times(self):
+        reasoner, _model, _vocab = _make_reasoner(_RejectExecutor(), top_k=4)
+        result = asyncio.run(reasoner.prove(SEED, proposal=ProposalSpec(mode="greedy", seed=0)))
+        draws = self._draws(result)
+        self.assertEqual(len(draws), 1)
+        self.assertEqual(draws[0][2], 4)
+
+    def test_prove_requires_a_proposal_spec(self):
+        reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
+        with self.assertRaises(TypeError):
+            asyncio.run(reasoner.prove(SEED, proposal="sample"))
+
+
 class RolloutTests(unittest.TestCase):
     def _prove(self, reasoner):
-        return asyncio.run(reasoner.prove(SEED))
+        return asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
 
     def test_qed_rollout_stash_migrates_to_edge_ids(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
@@ -410,7 +464,7 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_train_step_onpolicy_updates_params(self):
         reasoner, model, _vocab = _make_reasoner(_QEDExecutor())
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
 
         optimizer = AdamW(model.parameters(), lr=0.01)
         before = [p.detach().clone() for p in model.parameters()]
@@ -426,7 +480,7 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_failure_only_batch_is_actor_only(self):
         reasoner, model, _vocab = _make_reasoner(_RejectExecutor())
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         self.assertGreater(len(result.failure_actions), 0)
 
         loss_result = compute_onpolicy_loss(
@@ -441,7 +495,7 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_multiplicity_weights_actor_term(self):
         reasoner, model, _vocab = _make_reasoner(_QEDExecutor())
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         transitions = extract_transitions(
             result.graph, RewardConfig(step_penalty=0.0),
             edge_ids=list(result.edge_actions.keys()),
@@ -477,7 +531,7 @@ class MCTSSearchTests(unittest.TestCase):
     ROOT = GOAL_EXPR  # "p → p"
 
     def _prove(self, reasoner):
-        return asyncio.run(reasoner.prove(SEED))
+        return asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
 
     def test_default_legacy_loop_never_touches_visit_stats(self):
         # selection_policy="legacy" (default): the best-first loop runs
@@ -580,7 +634,7 @@ class MCTSSearchTests(unittest.TestCase):
             selection_policy="puct", num_simulations=6, sim_batch_size=2,
         )
         result = asyncio.run(
-            reasoner.prove(SEED, deadline=time.monotonic() - 1.0)
+            reasoner.prove(SEED, deadline=time.monotonic() - 1.0, proposal=SAMPLE)
         )
         # The loop stopped before the first simulation batch: only the root
         # exists, unexpanded, and the partial graph came back instead of an error.
@@ -746,7 +800,7 @@ class PLNDisabledTests(unittest.TestCase):
     """use_pln=False: no PLN objects exist, no petta subprocess, terminal-only reward."""
 
     def _prove(self, reasoner):
-        return asyncio.run(reasoner.prove(SEED))
+        return asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
 
     def test_no_pln_objects_constructed(self):
         # use_pln=False: petta_chainer and dts_sampler must both be None —

@@ -172,6 +172,7 @@ def test_collection_overlaps_workers_and_restores_input_order():
                 ["solve-a", "solve-b"],
                 timeout_s=1.0,
                 model_generation=0,
+                proposals=[None] * 2,
             )
             return round_result, time.perf_counter() - started
 
@@ -220,6 +221,7 @@ def test_hard_timeout_replaces_worker_before_next_theorem():
                 ["hang", "solve-after-replacement"],
                 timeout_s=0.02,
                 model_generation=0,
+                proposals=[None] * 2,
             )
         return result, starts, servers
 
@@ -239,6 +241,7 @@ def test_cooperative_deadline_keeps_partial_result_without_replacing_worker():
                 ["cooperative-deadline", "solve-after-deadline"],
                 timeout_s=1.0,
                 model_generation=0,
+                proposals=[None] * 2,
             )
         return result, servers
 
@@ -291,6 +294,7 @@ def test_replacement_failure_removes_only_the_affected_worker():
                 ["hang-on-worker-zero", "solve-b", "solve-c"],
                 timeout_s=0.02,
                 model_generation=0,
+                proposals=[None] * 3,
             )
             active_ids = [worker.worker_id for worker in pool.active_workers]
         return result, active_ids
@@ -317,7 +321,8 @@ def test_transport_failure_is_not_harvested_and_replaces_before_next_search():
         pool.search_factory = search
         async with pool:
             result = await pool.collect_round(
-                ["crash", "solve-next"], timeout_s=1, model_generation=0
+                ["crash", "solve-next"], timeout_s=1, model_generation=0,
+                proposals=[None] * 2,
             )
             assert result.records[0].result is None
             assert result.records[0].outcome == "error"
@@ -346,7 +351,8 @@ def test_inadmissible_seed_is_recorded_without_replacing_the_worker():
         pool.search_factory = search
         async with pool:
             result = await pool.collect_round(
-                ["unreplayable", "solve-next"], timeout_s=1, model_generation=0
+                ["unreplayable", "solve-next"], timeout_s=1, model_generation=0,
+                proposals=[None] * 2,
             )
             record = result.records[0]
             assert record.result is None
@@ -376,7 +382,8 @@ def test_request_timeout_is_a_hard_timeout_that_retires_the_worker():
         pool.search_factory = search
         async with pool:
             result = await pool.collect_round(
-                ["slow-request", "solve-next"], timeout_s=1, model_generation=0
+                ["slow-request", "solve-next"], timeout_s=1, model_generation=0,
+                proposals=[None] * 2,
             )
         return result, servers
 
@@ -403,7 +410,8 @@ def test_fatal_contract_state_or_configuration_error_aborts_without_replacement(
         async with pool:
             with pytest.raises(error):
                 await pool.collect_round(
-                    ["first", "second"], timeout_s=1, model_generation=0
+                    ["first", "second"], timeout_s=1, model_generation=0,
+                    proposals=[None] * 2,
                 )
             assert len(servers) == 1
         assert all(server.closed for server in servers)
@@ -491,13 +499,13 @@ def test_model_synchronization_and_overlapping_rounds_are_rejected_during_collec
         pool.search_factory = search
         async with pool:
             task = asyncio.create_task(
-                pool.collect_round(["a", "b"], timeout_s=1, model_generation=0)
+                pool.collect_round(["a", "b"], timeout_s=1, model_generation=0, proposals=[None] * 2)
             )
             await entered.wait()
             with pytest.raises(PantographStateError):
                 pool.synchronize(model, 1)
             with pytest.raises(PantographStateError):
-                await pool.collect_round([], timeout_s=1, model_generation=0)
+                await pool.collect_round([], timeout_s=1, model_generation=0, proposals=[])
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -531,7 +539,8 @@ def test_close_joins_owned_collection_without_leaking_replacement_or_deadlocking
         async def collect_in_context():
             async with pool:
                 await pool.collect_round(
-                    ["first", "second"], timeout_s=10, model_generation=0
+                    ["first", "second"], timeout_s=10, model_generation=0,
+                    proposals=[None] * 2,
                 )
 
         task = asyncio.create_task(collect_in_context())
@@ -555,7 +564,7 @@ def test_concurrent_closes_join_one_shutdown():
         await asyncio.gather(pool.close(), pool.close(), pool.close())
         assert all(server.closed for server in servers)
         with pytest.raises(RuntimeError, match="closed"):
-            await pool.collect_round(["solve-a"], timeout_s=1, model_generation=0)
+            await pool.collect_round(["solve-a"], timeout_s=1, model_generation=0, proposals=[None] * 1)
 
     asyncio.run(run())
 
@@ -609,7 +618,8 @@ def test_collection_rejects_mixed_generation_before_search():
         async with pool:
             with pytest.raises(RuntimeError, match="does not match canonical"):
                 await pool.collect_round(
-                    ["solve-a"], timeout_s=1.0, model_generation=1
+                    ["solve-a"], timeout_s=1.0, model_generation=1,
+                    proposals=[None] * 1,
                 )
 
     asyncio.run(run())

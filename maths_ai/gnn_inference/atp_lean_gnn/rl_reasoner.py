@@ -43,12 +43,12 @@ from maths_ai.hybrid_reasoner.joint_inference import (
     ExpansionResult,
     HybridReasoner,
 )
+from maths_ai.hybrid_reasoner.proposal import ProposalSpec
 from maths_ai.lean_replay import LeanGoalSeed
 from pantograph_async import PantographStateError
 
-from .actor_critic import ActorCriticWithArgsClassifier
+from .actor_critic import ActorCriticWithArgsClassifier, action_arity
 from .inference import _resolve_local_node_name, local_declarations
-from .labels import get_tactic_arity
 from .pln_rl_training import EdgeAction, FailureRecord, make_dag_featurizer
 
 
@@ -116,8 +116,9 @@ class RLHybridReasoner(HybridReasoner):
         # expansion finishes).
         self._pending: Dict[int, _PendingNode] = {}
         self._result: Optional[RLSearchResult] = None
-        # Argmax proposals (evaluation) vs. i.i.d. sampling (training); set per prove().
-        self._greedy: bool = False
+        # The running search's proposal mode and its own generator; set per prove().
+        self._proposal: Optional[ProposalSpec] = None
+        self._generator: Optional[torch.Generator] = None
 
     def _build_gnn_engine(self, **_kwargs):
         """No checkpoint engine: tactics come from ``self.model.act`` (on-policy)."""
@@ -137,8 +138,8 @@ class RLHybridReasoner(HybridReasoner):
         sub-dict; ``_link`` claims the ones that produce edges and
         ``_on_expansion_complete`` converts the rest into failure records.
 
-        If ``self._greedy`` is True (set by ``prove(greedy=True)``), draw k argmax
-        actions instead of sampling — used for evaluation.
+        Under a ``greedy`` proposal every draw is the same step-wise argmax
+        action, so the k draws become one candidate with multiplicity k.
         """
         return self.predict_next_tactics_batch([sub_goal])[0]
 
@@ -154,10 +155,17 @@ class RLHybridReasoner(HybridReasoner):
     def predict_next_tactics_for_nodes(
         self, nodes: List[ProofNode]
     ) -> List[List[TacticCandidate]]:
-        return self._predict_next_tactics_batch(
-            [node.goal.require_model_state() for node in nodes],
-            node_ids=[node.id for node in nodes],
+        # Rows go to the policy in node-id order, so a seeded search draws the
+        # same actions however its simulations happened to list the leaves.
+        order = sorted(range(len(nodes)), key=lambda index: nodes[index].id)
+        proposed = self._predict_next_tactics_batch(
+            [nodes[index].goal.require_model_state() for index in order],
+            node_ids=[nodes[index].id for index in order],
         )
+        candidates: List[List[TacticCandidate]] = [[] for _ in nodes]
+        for position, index in enumerate(order):
+            candidates[index] = proposed[position]
+        return candidates
 
     def _predict_next_tactics_batch(
         self,
@@ -193,11 +201,18 @@ class RLHybridReasoner(HybridReasoner):
             declaration_maps.append(local_declarations(sub_goal))
         batch = Batch.from_data_list(datas).to(self.device)
 
+        if self._proposal is None or self._generator is None:
+            raise PantographStateError("Actions are proposed only inside prove().")
         all_candidates: List[List[TacticCandidate]] = [[] for _ in sub_goals]
         self.model.eval()
         with torch.no_grad():
             for _ in range(self.top_k_tactics):
-                sample = self.model.act(batch, id_to_tactic=self.id_to_tactic, greedy=self._greedy)
+                sample = self.model.act(
+                    batch,
+                    id_to_tactic=self.id_to_tactic,
+                    greedy=self._proposal.greedy,
+                    generator=self._generator,
+                )
                 for row, (dag, pending, declarations) in enumerate(
                     zip(dags, pendings, declaration_maps)
                 ):
@@ -238,24 +253,26 @@ class RLHybridReasoner(HybridReasoner):
 
         Tactic: ``tactic_id → name`` via the inverted tactic vocab; an id outside the
         vocab (or the ``<UNK>`` family) is unplayable — drop the draw. Arguments: each
-        sampled index is a padded per-graph position, which equals the node's offset in
+        chosen index is a padded per-graph position, which equals the node's offset in
         this row's ``dag.nodes`` (``_score_nodes`` assigns offsets within each graph),
         so render it with ``_resolve_local_node_name`` through ``declarations``, the
-        row's own context-label -> live-name map (``local_declarations``). The number of argument steps in
-        a multi-graph batch follows the batch's MAX sampled arity, so rows whose tactic
-        has a smaller arity are truncated to their own arity — matching what a
-        single-graph proposal would have sampled. Out-of-range indices (padding) are
-        dropped from the argument list but KEPT in ``arg_indices`` — the recompute must
-        evaluate the log-prob of what was actually sampled, and ``forced_step`` zeroes
-        invalid rows.
+        row's own context-label -> live-name map (``local_declarations``). A
+        multi-graph batch runs as many argument steps as its largest arity; the row
+        keeps only the ``sample.arities[row]`` steps it owns (``action_arity``),
+        matching what a single-graph proposal would have chosen. The draw is
+        unplayable when its tactic needs more arguments than the model chooses, or
+        when one of its own steps had no legal premise (that index is a
+        placeholder). Out-of-range indices (padding) are dropped from the argument
+        list but KEPT in ``arg_indices`` — the recompute must evaluate the log-prob of
+        what was actually chosen, and ``forced_step`` zeroes invalid rows.
         """
         tactic_id = int(sample.tactic_action[row])
         tactic_name = self.id_to_tactic.get(tactic_id)
-        arity = (
-            min(get_tactic_arity(tactic_name), self.model.max_args)
-            if tactic_name is not None and not tactic_name.startswith("<")
-            else len(sample.arg_actions)
-        )
+        arity, complete = action_arity(tactic_name, self.model.max_args)
+        if int(sample.arities[row]) != arity:
+            raise AssertionError(
+                f"Row {row} owns {int(sample.arities[row])} argument steps, expected {arity}."
+            )
         arg_indices = tuple(int(a[row]) for a in sample.arg_actions[:arity])
         action = EdgeAction(
             tactic_id=tactic_id,
@@ -263,7 +280,9 @@ class RLHybridReasoner(HybridReasoner):
             multiplicity=1,
             graph_fingerprint=graph_fingerprint,
         )
-        if tactic_name is None or tactic_name.startswith("<"):
+        if not complete or not all(
+            bool(valid[row]) for valid in sample.arg_step_valid[:arity]
+        ):
             return None, action
 
         arguments: List[str] = []
@@ -361,7 +380,7 @@ class RLHybridReasoner(HybridReasoner):
         self,
         seed: LeanGoalSeed,
         *,
-        greedy: bool = False,
+        proposal: ProposalSpec,
         deadline: Optional[float] = None,
     ) -> RLSearchResult:
         """Run the search and return ``RLSearchResult(graph, edge_actions, failure_actions)``.
@@ -369,21 +388,25 @@ class RLHybridReasoner(HybridReasoner):
         Stashes are reset per call, so one reasoner instance must run searches
         sequentially (cross-theorem concurrency needs per-search instances).
 
-        ``greedy=True`` makes the proposal seams draw argmax actions instead of
-        i.i.d. samples — used by evaluation to measure the deterministic policy. The
-        stash still fills, but the caller ignores it (no gradient step follows an eval).
+        ``proposal`` fixes how actions are proposed (``sample`` or step-wise
+        ``greedy``) and seeds a generator owned by this search on the model's
+        device; the global Torch RNG is not used. The stash fills in both modes;
+        evaluation callers ignore it (no gradient step follows an eval).
 
         ``deadline`` (a ``time.monotonic()`` timestamp) is forwarded to the base
         search loop, which stops cleanly between expansions / simulation batches
         and returns the partial graph.
 
         An overlapping call is rejected before it can touch the running search's
-        pending actions, greedy mode, or result.
+        pending actions, proposal, or result.
         """
         if self._proving:
             raise PantographStateError("A reasoner supports only one active search.")
+        if not isinstance(proposal, ProposalSpec):
+            raise TypeError(f"prove() needs a ProposalSpec, got {type(proposal).__name__}.")
         self._pending = {}
-        self._greedy = greedy
+        self._proposal = proposal
+        self._generator = torch.Generator(device=self.device).manual_seed(proposal.seed)
         self._result = RLSearchResult(graph=None)  # graph attached after the base search
         try:
             graph = await super().prove(seed, deadline=deadline)
@@ -395,6 +418,7 @@ class RLHybridReasoner(HybridReasoner):
             result, self._result = self._result, None
         finally:
             self._pending.clear()
-            self._greedy = False
+            self._proposal = None
+            self._generator = None
             self._result = None
         return result

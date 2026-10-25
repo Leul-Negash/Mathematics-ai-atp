@@ -46,6 +46,10 @@ from pantograph_async import (
     PantographTacticRejected,
     PantographTransportError,
 )
+from maths_ai.hybrid_reasoner.proposal import ProposalSpec
+
+SAMPLE = ProposalSpec(mode="sample", seed=0)
+GREEDY = ProposalSpec(mode="greedy", seed=0)
 
 
 TACTIC_VOCAB = {"trivial": 0, "intro": 1, "exact": 2}
@@ -231,7 +235,7 @@ class SearchModeOwnershipTests(unittest.TestCase):
     def test_best_first_uses_scoped_execution(self):
         client = _RecordingClient({0: ["A", "B"]})
         reasoner = _reasoner(client)
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         self.assertTrue(result.graph.is_solved())
         self._assert_owned_execution(client, reasoner, result)
         for edge in result.graph.edges.values():
@@ -240,7 +244,7 @@ class SearchModeOwnershipTests(unittest.TestCase):
     def test_puct_uses_scoped_execution(self):
         client = _RecordingClient({0: ["A", "B"]})
         reasoner = _reasoner(client, **_puct())
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         self.assertTrue(result.graph.is_solved())
         self._assert_owned_execution(client, reasoner, result)
         self.assertTrue(any(e.visit_stats.N for e in result.graph.edges.values()))
@@ -250,7 +254,7 @@ class SearchModeOwnershipTests(unittest.TestCase):
     def test_multi_leaf_batch_keeps_each_leaf_state_until_all_alternatives_finish(self):
         client = _RecordingClient({0: ["A", "B"], "A": "reject"})
         reasoner = _reasoner(client, top_k=3, **_puct())
-        asyncio.run(reasoner.prove(SEED))
+        asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
 
         # One policy forward proposed several leaves together.
         self.assertTrue(any(len(batch) > 1 for batch in reasoner.proposal_batches))
@@ -291,7 +295,7 @@ class SearchModeOwnershipTests(unittest.TestCase):
 
         client.outcome_for = outcome_for
         reasoner = _reasoner(client, top_k=3, **_puct(num_simulations=4))
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = result.graph
 
         executed = dict(reasoner.executed)
@@ -359,7 +363,7 @@ class BatchCompositionTests(unittest.TestCase):
             **_puct(num_simulations=4),
         )
         reasoner.executed, reasoner.proposal_batches, reasoner.leaf_batches = [], [], []
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = result.graph
 
         a, b, c = (graph.nodes[child] for child in graph.edges[0].child_ids)
@@ -380,7 +384,7 @@ class BatchCompositionTests(unittest.TestCase):
         client = _RecordingClient({0: ["A", "B"]})
         reasoner = _reasoner(client, **_puct(num_simulations=4))
         reasoner.max_depth = 1
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         leaves = [
             node for node in result.graph.nodes.values() if node.id != result.graph.root_id
         ]
@@ -408,20 +412,20 @@ class OverlappingSearchTests(unittest.TestCase):
             client.gate = asyncio.Event()
             client.entered_apply = asyncio.Event()
             first = asyncio.create_task(
-                reasoner.prove(SEED, greedy=True)
+                reasoner.prove(SEED, proposal=GREEDY)
             )
             await client.entered_apply.wait()
-            pending, result, greedy = reasoner._pending, reasoner._result, reasoner._greedy
+            pending, result, proposal = reasoner._pending, reasoner._result, reasoner._proposal
             pending_snapshot = {key: dict(value.actions) for key, value in pending.items()}
             with self.assertRaises(PantographStateError):
-                await reasoner.prove(SEED)
+                await reasoner.prove(SEED, proposal=SAMPLE)
             self.assertIs(reasoner._pending, pending)
             self.assertEqual(
                 {key: dict(value.actions) for key, value in pending.items()},
                 pending_snapshot,
             )
             self.assertIs(reasoner._result, result)
-            self.assertIs(reasoner._greedy, greedy)
+            self.assertIs(reasoner._proposal, proposal)
             self.assertEqual(len(client.scopes), 1)
             client.gate.set()
             return await first
@@ -449,7 +453,7 @@ class FailureInjectionTests(unittest.TestCase):
         self.assertEqual(reasoner._pending, {})
         self.assertIsNone(reasoner._result)
         self.assertFalse(reasoner._proving)
-        self.assertFalse(reasoner._greedy)
+        self.assertIsNone(reasoner._proposal)
         _assert_scoped_cleanly(self, client)
 
     def test_cancellation_during_leaf_execution_releases_everything(self):
@@ -471,7 +475,7 @@ class FailureInjectionTests(unittest.TestCase):
                 await original(node_id)
 
             client.before_apply = block_on_leaf
-            task = asyncio.create_task(reasoner.prove(SEED))
+            task = asyncio.create_task(reasoner.prove(SEED, proposal=SAMPLE))
             await first_round.wait()
             graph = captured["graph"]
             self.assertEqual(
@@ -494,7 +498,7 @@ class FailureInjectionTests(unittest.TestCase):
         reasoner = _reasoner(client, **_puct())
         captured = self._capture_graph(reasoner)
         with self.assertRaises(PantographTransportError):
-            asyncio.run(reasoner.prove(SEED))
+            asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = captured["graph"]
         self.assertEqual(graph.end_reason, SearchEndReason.EXTERNAL_ABORT)
         self.assertEqual(graph.nodes[1].closure_reason, NodeClosureReason.EXTERNAL_ABORT)
@@ -509,7 +513,7 @@ class FailureInjectionTests(unittest.TestCase):
         reasoner = _reasoner(client, **_puct())
         captured = self._capture_graph(reasoner)
         with self.assertRaises(PantographProtocolError):
-            asyncio.run(reasoner.prove(SEED))
+            asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = captured["graph"]
         self.assertEqual(graph.nodes[1].closure_reason, NodeClosureReason.EXTERNAL_ABORT)
         self._assert_released(reasoner, client, graph)
@@ -519,7 +523,7 @@ class FailureInjectionTests(unittest.TestCase):
         client = _RecordingClient({0: ["A", "B"], "B": "reject"})
         client.unelaborated.add(structured_goal("A", HYPS).replay_spec().expression)
         reasoner = _reasoner(client, top_k=1, **_puct(num_simulations=4))
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = result.graph
 
         self.assertEqual(len(graph.nodes[0].outgoing_edge_ids), 1)
@@ -549,7 +553,7 @@ class FailureInjectionTests(unittest.TestCase):
         client = _RecordingClient({0: ["A"]})
         client.unelaborated.add(structured_goal("A", HYPS).replay_spec().expression)
         reasoner = _reasoner(client, **_puct(num_simulations=2, sim_batch_size=1))
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         root_edge = result.graph.edges[result.graph.nodes[0].outgoing_edge_ids[0]]
         self.assertEqual(root_edge.visit_stats.N, 1)
         self.assertEqual(root_edge.visit_stats.N_v, 0)
@@ -570,7 +574,7 @@ class CooperativeDeadlineTests(unittest.TestCase):
             return checks == 1
 
         reasoner._within_deadline = within_deadline
-        result = asyncio.run(reasoner.prove(SEED, deadline=0.0))
+        result = asyncio.run(reasoner.prove(SEED, deadline=0.0, proposal=SAMPLE))
         graph = result.graph
         self.assertEqual(graph.end_reason, SearchEndReason.DEADLINE)
         self.assertFalse(graph.is_solved())

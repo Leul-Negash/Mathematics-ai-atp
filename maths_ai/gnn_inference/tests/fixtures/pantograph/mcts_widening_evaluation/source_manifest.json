@@ -1,0 +1,93 @@
+{
+  "kind": "mcts-widening-evaluation-source-manifest",
+  "target_branch": "MCTS-AC-branch",
+  "target_base_commit": "dd6eedc100321af5d8c39a97abfec4a7addf8fb7",
+  "note": "Files changed by the complete-action prior, progressive widening and sampled evaluation work, with their MCTS-AC-branch base and current hashes. Earlier manifests are unchanged.",
+  "sources": [
+    {
+      "path": "maths_ai/gnn_inference/atp_lean_gnn/actor_critic.py",
+      "sha256": "de983a9d7b5d1c347cafa3cc12b615624b8bd0d5a20eab06d5e721f26d723ae9",
+      "target_base_sha256": "d127a07c3f90ec92009bdfa78fdfc8dbcb421a9b644be3c3b69732f9e992ebd2"
+    },
+    {
+      "path": "maths_ai/gnn_inference/atp_lean_gnn/argument_selector.py",
+      "sha256": "b5aa61b5a89d83fb718b1b2e138f781454f0813c1d80b7c8daca4e68e299de68",
+      "target_base_sha256": "eb56557dff9345268c08d560d7ce791b2b202d7c06bc5651d69c667f67ca6dc9"
+    },
+    {
+      "path": "maths_ai/gnn_inference/atp_lean_gnn/rl_live_collection.py",
+      "sha256": "e2b1649a92ac08684229674a107b5f1276d30b9a689f7e89fbeb12e11d77aa84",
+      "target_base_sha256": "c7b160ed4c4c2057a2dd819967bf6cc1a9a2675a52a94022fd5d8585938b558d"
+    },
+    {
+      "path": "maths_ai/gnn_inference/atp_lean_gnn/rl_reasoner.py",
+      "sha256": "4598a1953def27eef52964b0dff94aa8481c2398d24b810abce1cf0bb51661da",
+      "target_base_sha256": "bb1d2001f4fcf3962136bab99e6c7a850116dc76ad3df25f20def29a3b5ea953"
+    },
+    {
+      "path": "maths_ai/gnn_inference/atp_lean_gnn/rl_training_driver.py",
+      "sha256": "49a3529f7f676b047df4354d078b23d05fc2db6184d57d985333d29e19fddeab",
+      "target_base_sha256": "efc4b08a0555b86f0650a8015975997be2d9a7a0feb87340c70fe498dc184252"
+    },
+    {
+      "path": "maths_ai/gnn_inference/scripts/rl_smoke.py",
+      "sha256": "fee43addf00997f3ffd56f70f81a84d9c4be9deef015e170e3e6cce07eaf919d",
+      "target_base_sha256": "f1487234a0557df79a221db1184f4067a1c385320b4172958035b74701a00795"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_dataset_replay.py",
+      "sha256": "d6e63982596aebcdf9f0d46de3d5d0d14cd20efed5c6318cd9f0345b543f273e",
+      "target_base_sha256": "d095b3628958a8cdb8a0f1384b7824683e32531381eff886e5012cbed4efe82d"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_mcts_owned_client.py",
+      "sha256": "d1fe4970f4078b51e8b45bfa983fcfc381d926adc98964f3324bcf7905f9879d",
+      "target_base_sha256": "028ca85742feb238af88ce71baa1154e1e9c2a73484508e9eb007ffabf0040f5"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_owned_client_migration.py",
+      "sha256": "639b50c122c36c68147db7a63930755d7c6ed890beeb09f98157d29eeb744903",
+      "target_base_sha256": "b1ab6efc205020029a8491169a39067303f9bfb879c7e3f9a19bef11913549eb"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_pantograph_client_live.py",
+      "sha256": "5bc6ec11517219490b54cf36b29b60b1ca1c20f820c5e9bd75d18b8b8058357a",
+      "target_base_sha256": "ae9eb276b42d3e92b6668e102149bc7d458a33f74665e45a3ae743f4e929930c"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_proposal_policy.py",
+      "sha256": "3da09f340c56428896387993ad6ab682497e248c6e28333ae3e8e43082f745dc",
+      "target_base_sha256": null
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_rl_live_collection.py",
+      "sha256": "5afa482e8b0e44e6305893018bd90a501d58133869f871b518cb92a93ec3baa8",
+      "target_base_sha256": "23cf6b33c95c60f76fe6ee8cc8f85f6a8a47006176818bd8b89f2d6a9fcd3cb8"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_rl_live_collection_children.py",
+      "sha256": "a99768e9ecc7878d3eed52b3b832bdf921159243554e4e50faaecbd3c1371df0",
+      "target_base_sha256": "ecba29e75fbd47b43dd15f6ba9aef261a573dcf3358415d7efe1fb1fc108a2f5"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_rl_reasoner.py",
+      "sha256": "0d0cc65e491a46583793a6d93c10f01161ef97591ddb1a2e9d1a00580f4194ef",
+      "target_base_sha256": "6a0e14f9b5f9eadfea9c86621dbd2b5d0ee50db3143494a495996fd8a913bf87"
+    },
+    {
+      "path": "maths_ai/gnn_inference/tests/test_rl_training_driver.py",
+      "sha256": "7475f281442a286107244e8a5767302bc91ee00bc6f4008ecd88eeaef4699ac0",
+      "target_base_sha256": "903ecacffb7f8f481e2ecf4507be60b5ac3ee36936092be071b4fecc259450fa"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/mcts_diagnostics.py",
+      "sha256": "89a782d8fc5fde42966c0185201a18bdeb8bc00e0d97c7864660569d7ea690b4",
+      "target_base_sha256": "ff3dece17584a9b8308f075216560eacaeb328c992f9a9e585689bc1872e70de"
+    },
+    {
+      "path": "maths_ai/hybrid_reasoner/proposal.py",
+      "sha256": "e0304363ed1c47d0dde922bcb354bb17a473066f044de94d7a7797da0c7d2838",
+      "target_base_sha256": null
+    }
+  ]
+}

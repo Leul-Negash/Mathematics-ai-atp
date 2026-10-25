@@ -33,6 +33,27 @@ def resolve_premise_mask(data, device) -> Tensor:
     return (node_types >= 0) & (node_types <= 2)
 
 
+def choose_categorical(
+    logits: Tensor, *, greedy: bool, generator: torch.Generator | None = None
+) -> tuple[Tensor, Tensor]:
+    """Choose one index per row of ``logits`` and return it with its log-prob.
+
+    ``greedy`` takes the argmax; otherwise the index is drawn with
+    ``generator`` (the global RNG when it is None). Shared by the tactic head
+    and the pointer so both follow one proposal mode. The log-prob is
+    differentiable with respect to ``logits``.
+    """
+    log_probs = torch.log_softmax(logits, dim=-1)
+    if greedy:
+        selected = logits.argmax(dim=-1)
+    else:
+        with torch.no_grad():
+            selected = torch.multinomial(
+                log_probs.exp(), 1, replacement=True, generator=generator
+            ).squeeze(-1)
+    return selected, log_probs.gather(-1, selected.unsqueeze(-1)).squeeze(-1)
+
+
 class ArgumentSelector(nn.Module):
     """Score every node in the DAG as a candidate tactic argument.
 
@@ -76,7 +97,7 @@ class ArgumentSelector(nn.Module):
         selected_emb = padded_keys[torch.arange(batch_size, device=device), selected_idx]  # [B, H]
         return scores, selected_emb
 
-    def sample_step(
+    def choose_step(
         self,
         state_emb: Tensor,
         tactic_emb: Tensor,
@@ -84,13 +105,19 @@ class ArgumentSelector(nn.Module):
         premise_mask: Tensor,
         batch_index: Tensor,
         prev_arg_emb: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Sampling variant for on-policy RL (B2).
+        *,
+        greedy: bool = False,
+        generator: torch.Generator | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """One autoregressive pointer choice for on-policy RL (B2).
 
-        Return ``(arg_logits, selected_idx, log_prob, selected_emb)`` where ``selected_idx``
-        is SAMPLED from ``softmax(arg_logits)`` (not argmax), ``log_prob`` is its log-prob
-        under the pointer policy (carries gradient — this is the argument policy gradient),
-        and ``selected_emb`` is the sampled node's embedding for the next autoregressive step.
+        Return ``(arg_logits, selected_idx, log_prob, selected_emb, valid_rows)``.
+        ``selected_idx`` is drawn from ``softmax(arg_logits)`` with ``generator``,
+        or is its argmax when ``greedy``; ``log_prob`` is its log-probability
+        under the pointer (carries gradient) and ``selected_emb`` the chosen
+        node's embedding for the next step. A row with no legal premise has
+        ``valid_rows`` False, log-prob 0 and a zero embedding: its index is a
+        placeholder, not a choice.
         """
         scores, padded_keys = self._score_nodes(
             state_emb, tactic_emb, node_embeddings, premise_mask, batch_index, prev_arg_emb
@@ -103,13 +130,13 @@ class ArgumentSelector(nn.Module):
         # has an argument slot. Keep the row executable with zero policy credit
         # instead of constructing Categorical from all -inf logits.
         safe_scores = torch.where(valid_rows.unsqueeze(1), scores, torch.zeros_like(scores))
-        dist = torch.distributions.Categorical(logits=safe_scores)
-        selected_idx = dist.sample()          # [B]
-        log_prob = dist.log_prob(selected_idx)  # [B] — differentiable w.r.t. pointer params
+        selected_idx, log_prob = choose_categorical(
+            safe_scores, greedy=greedy, generator=generator
+        )
         selected_emb = padded_keys[torch.arange(batch_size, device=device), selected_idx]  # [B, H]
         log_prob = torch.where(valid_rows, log_prob, torch.zeros_like(log_prob))
         selected_emb = selected_emb * valid_rows.unsqueeze(1).to(selected_emb.dtype)
-        return scores, selected_idx, log_prob, selected_emb
+        return scores, selected_idx, log_prob, selected_emb, valid_rows
 
     def forced_step(
         self,
