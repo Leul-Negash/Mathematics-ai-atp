@@ -240,11 +240,13 @@ def compute_backups(
                         outcome for outcome in outcomes
                         if outcome.validity == BackupValidity.VALID
                     ]
-                    result = (
-                        max(valid, key=lambda outcome: float(outcome.value))
-                        if valid
-                        else BackupValue.unknown()
-                    )
+                    best = max(valid, key=lambda outcome: float(outcome.value)) if valid else None
+                    # An open proposal source can still add an alternative, so
+                    # its known edges failing is not a complete failure.
+                    if best is None or (not node.exhausted and best.value == 0.0):
+                        result = BackupValue.unknown()
+                    else:
+                        result = best
 
             if result.validity == BackupValidity.UNKNOWN and visit_threshold is not None:
                 soft = _soft_target(graph, node_id, visit_threshold)

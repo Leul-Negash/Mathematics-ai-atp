@@ -36,17 +36,17 @@
     },
     {
       "path": "maths_ai/gnn_inference/atp_lean_gnn/rl_reasoner.py",
-      "sha256": "5308347552943be421b2c839d239578488536dadf64e923c960c36a3bedb851d",
+      "sha256": "32a0f945a28a19ccac81e5803c15bd3214513ae64d56dc83a2d6d416ffecf50b",
       "target_base_sha256": "bb1d2001f4fcf3962136bab99e6c7a850116dc76ad3df25f20def29a3b5ea953"
     },
     {
       "path": "maths_ai/gnn_inference/atp_lean_gnn/rl_training_driver.py",
-      "sha256": "c14b1ce57ff68eee8e1fdfbb34c4f26d0cb989664e90b4682c1d9a5c19798317",
+      "sha256": "f582e73b724759080acaae3e82d63cb976f404a8ab21f95bb424f82a68dd60a0",
       "target_base_sha256": "efc4b08a0555b86f0650a8015975997be2d9a7a0feb87340c70fe498dc184252"
     },
     {
       "path": "maths_ai/gnn_inference/atp_lean_gnn/search_harvest.py",
-      "sha256": "a16014a5cb4ee89a2151dd1b839fc468f0fb5c29b05ad677a409f6433d3349c1",
+      "sha256": "9c91f9e0163ca5d2bae3d9e237a5df79a11ab2b1c7edfadcfb57a95a9e816d58",
       "target_base_sha256": "a88e3652cc368ecec3ecac6ba4f366fde916d3c278fc070c7202615c31e0f723"
     },
     {
@@ -76,7 +76,7 @@
     },
     {
       "path": "maths_ai/gnn_inference/tests/test_mcts_owned_client.py",
-      "sha256": "cfd2c2e894b7c60f5c82bda594e3a0b04076a37523f7d2a86df2bb39c28bd130",
+      "sha256": "04354f068a4505f010acabc3345bb709400b0fdc0d390bb29776cb84bf4322af",
       "target_base_sha256": "028ca85742feb238af88ce71baa1154e1e9c2a73484508e9eb007ffabf0040f5"
     },
     {
@@ -100,6 +100,11 @@
       "target_base_sha256": "7bd708811207871d1bd1c1194bddb46709224a2a8373ced7efd2311acc5ff4f1"
     },
     {
+      "path": "maths_ai/gnn_inference/tests/test_progressive_widening.py",
+      "sha256": "867823156d992c4c72b8c9594917be438026e3fb9908f5a6d3034eeef8265426",
+      "target_base_sha256": null
+    },
+    {
       "path": "maths_ai/gnn_inference/tests/test_proposal_policy.py",
       "sha256": "3da09f340c56428896387993ad6ab682497e248c6e28333ae3e8e43082f745dc",
       "target_base_sha256": null
@@ -116,17 +121,17 @@
     },
     {
       "path": "maths_ai/gnn_inference/tests/test_rl_reasoner.py",
-      "sha256": "82468a73497c26e165862894f54c0ff4b4523bee2e89f9ef24519c80a18c79d0",
+      "sha256": "05bbfdb3f06c2b43caa925ab43e4fe6e3c3bec6a2384f3270b33fd19c11e457e",
       "target_base_sha256": "6a0e14f9b5f9eadfea9c86621dbd2b5d0ee50db3143494a495996fd8a913bf87"
     },
     {
       "path": "maths_ai/gnn_inference/tests/test_rl_training_driver.py",
-      "sha256": "7475f281442a286107244e8a5767302bc91ee00bc6f4008ecd88eeaef4699ac0",
+      "sha256": "ed6d09c11b1608e7d4a7fa04504e96587b40d648d6ef0a13a98abfb0c7a68251",
       "target_base_sha256": "903ecacffb7f8f481e2ecf4507be60b5ac3ee36936092be071b4fecc259450fa"
     },
     {
       "path": "maths_ai/gnn_inference/tests/test_search_harvest.py",
-      "sha256": "25fffb7be1df31f7fe7ec01dd632fb2666f613f333a0634761bf390e3d1431d7",
+      "sha256": "bc814361ca9e97f5c92cc686b65cdd5e62525430b9c1365a1fe3138ec7ce72f4",
       "target_base_sha256": "3f2b57b1cd13de9a8f5fafe6861fd18a9572ab99ce166cfe2800f78c5fd658dd"
     },
     {
@@ -141,12 +146,12 @@
     },
     {
       "path": "maths_ai/hybrid_reasoner/hypergraph.py",
-      "sha256": "5c268da7f16a0c81cebe9cbd062191731146909566959a6c3354aab7d62aea0e",
+      "sha256": "9a46e9dab3a4a4b2b86ce5f5e6f4114b69662111b31da916ba75111fbfa9e233",
       "target_base_sha256": "a625425b0d0aff5cbc39db0298cac6e536117663fc72e9b73e69104e80fdac16"
     },
     {
       "path": "maths_ai/hybrid_reasoner/joint_inference.py",
-      "sha256": "8760068a1088e474907cd7ccf45b563d28bea80e0e9768cf9d44e0a554e9e380",
+      "sha256": "21d049821807b01d26255645493e808355587d39f14bb19d026227a55de0e3cb",
       "target_base_sha256": "76c17eefa43fb84163f16f656a5c0112b821245a07f4b42b8d389a59e0d24f02"
     },
     {
@@ -161,7 +166,7 @@
     },
     {
       "path": "maths_ai/hybrid_reasoner/selection_policy.py",
-      "sha256": "b7f32f93d64247a2fb8ccd1db070bfb9b68cc9a604e36f5fe19e19e0103f6978",
+      "sha256": "5cbfb745880b343f913a624665fb40678628832d350dd75d483d31bfda3ef6bd",
       "target_base_sha256": "11b43c60d96eff04ddf7a5dc8d7beeff76732969fe492252956997c00efb4c7d"
     }
   ]

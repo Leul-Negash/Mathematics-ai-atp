@@ -363,6 +363,11 @@ class RLHybridReasoner(HybridReasoner):
         holding a single-graph ``ActionSample``)."""
         return self._decode_row(sample, 0, dag, declarations, graph_fingerprint)
 
+    def _proposal_source_is_finite(self) -> bool:
+        """Sampling can propose new actions every round; step-wise greedy
+        proposes the same one, so its source closes after one round."""
+        return self._proposal is not None and self._proposal.greedy
+
     # ------------------------------------------------------------------
     # Settlement: checked outcomes become policy observations
     # ------------------------------------------------------------------

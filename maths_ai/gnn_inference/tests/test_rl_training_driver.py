@@ -325,6 +325,8 @@ class ConfigTests(unittest.TestCase):
                 max_depth=7,
                 max_nodes=33,
                 use_pln=False,
+                widening_max_actions=9,
+                widening_max_draws=40,
             )
             node_vocab = _build_node_vocab()
             model = _make_model(node_vocab)
@@ -383,6 +385,8 @@ class ConfigTests(unittest.TestCase):
                         "max_depth",
                         "max_nodes",
                         "use_pln",
+                        "widening_max_actions",
+                        "widening_max_draws",
                     )
                     self.assertEqual(
                         {key: replacement.reasoner.kwargs[key] for key in settings},
@@ -409,6 +413,8 @@ class ConfigTests(unittest.TestCase):
                         self.assertEqual(reasoner.kwargs["max_depth"], 7)
                         self.assertEqual(reasoner.kwargs["max_nodes"], 33)
                         self.assertFalse(reasoner.kwargs["use_pln"])
+                        self.assertEqual(reasoner.kwargs["widening_max_actions"], 9)
+                        self.assertEqual(reasoner.kwargs["widening_max_draws"], 40)
                 finally:
                     asyncio.run(live_pool.close())
 
@@ -1225,6 +1231,21 @@ class EvaluationSettingsTests(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text()), report)
             with self.assertRaises(FileExistsError):
                 write_evaluation_report(report, path)
+
+
+class WideningConfigTests(unittest.TestCase):
+    def test_widening_settings_are_validated_and_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "widening"):
+                _write_config(tmp, widening_max_draws=10)  # best-first does not widen
+            with self.assertRaises(ValueError):
+                _write_config(tmp, selection_policy="puct", num_simulations=4, widening_exponent=1.5)
+            cfg = _write_config(tmp, selection_policy="puct", num_simulations=4, widening_max_actions=8)
+            saved = rl_training_driver.search_settings(cfg)
+            self.assertEqual(saved["widening"]["max_actions"], 8)
+            self.assertEqual(saved["widening"]["initial_actions"], 4)
+            self.assertIsNone(rl_training_driver.search_settings(_write_config(tmp))["widening"])
 
 
 class InadmissibleRootTests(unittest.TestCase):

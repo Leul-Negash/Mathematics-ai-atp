@@ -50,7 +50,11 @@ from maths_ai.hybrid_reasoner.hypergraph import (
     TacticOutcome,
     SearchEndReason,
 )
-from maths_ai.hybrid_reasoner.selection_policy import puct_score, resolve_search_params
+from maths_ai.hybrid_reasoner.selection_policy import (
+    puct_score,
+    resolve_search_params,
+    resolve_widening,
+)
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import (
     create_model_sexpr_client,
     materialize_seed,
@@ -92,13 +96,20 @@ def render_tactic_command(tactic: TacticCandidate) -> Optional[str]:
 
 @dataclass
 class _Simulation:
-    """One selected partial hypertree: the OR-choice made at each EXPANDED
-    node (``chosen_edges[node_id] = edge_id``) and the unexpanded OPEN
-    leaves the descent reached.
+    """One selected partial hypertree.
+
+    ``chosen_edges[node_id] = edge_id`` is the OR-choice at each node the
+    descent passed through. ``leaves`` are the nodes where it stopped to
+    request a proposal round: an OPEN node's first round, or a widening round
+    at an expanded node whose capacity grew. ``deferred`` are unresolved nodes
+    with nothing to propose or select yet. ``selected`` is every node the
+    simulation included; each gets one visit when the simulation backs up.
     """
 
     chosen_edges: Dict[int, int] = field(default_factory=dict)
     leaves: List[int] = field(default_factory=list)
+    deferred: List[int] = field(default_factory=list)
+    selected: List[int] = field(default_factory=list)
 
 
 # Failures of the session itself, never of the goal or tactic being tried.
@@ -241,6 +252,11 @@ class HybridReasoner:
         num_simulations: Optional[int] = None,
         sim_batch_size: Optional[int] = None,
         puct_c: Optional[float] = None,
+        widening_initial_actions: Optional[int] = None,
+        widening_coefficient: Optional[float] = None,
+        widening_exponent: Optional[float] = None,
+        widening_max_actions: Optional[int] = None,
+        widening_max_draws: Optional[int] = None,
         dts_sampler: Optional[DynamicThompsonSampler] = None,
         dts_c: float = None,
         dts_random_seed: Optional[int] = None,
@@ -306,6 +322,15 @@ class HybridReasoner:
         # (legacy receives placeholders its loop never reads).
         self.num_simulations, self.sim_batch_size, self.puct_c = resolve_search_params(
             selection_policy, num_simulations, sim_batch_size, puct_c
+        )
+        # PUCT widens every node within these bounds; best-first has none.
+        self.widening = resolve_widening(
+            selection_policy,
+            widening_initial_actions,
+            widening_coefficient,
+            widening_exponent,
+            widening_max_actions,
+            widening_max_draws,
         )
 
     # GNN side
@@ -631,48 +656,80 @@ class HybridReasoner:
             graph.end_reason = SearchEndReason.FRONTIER_EMPTY
 
     def _select_partial_hypertree(self, graph: ProofHypergraph) -> Optional["_Simulation"]:
-        """Descend from the root, at each EXPANDED node picking the non-DEAD
-        edge that maximizes ``puct_score`` and entering **every** child of
-        that edge — a simulation must reach a full set of leaves consistent
-        with one candidate proof (the AND semantics). Each traversed edge's
-        ``virtual_loss`` is incremented so the next selection in the same
-        batch is steered away from this in-flight path.
+        """Descend from the root, entering **every** child of each chosen edge
+        — a simulation must reach a full set of leaves consistent with one
+        candidate proof (the AND semantics).
 
-        Returns ``None`` when no path exists (the root is resolved, or every
-        edge under it is DEAD) — the caller stops the simulation batch.
+        At each unresolved node, in order: if its proposal source may propose
+        now (its first round, or its widening capacity has grown since the
+        last), stop there and request a round; otherwise pick the non-DEAD
+        edge that maximizes ``puct_score`` and increment its
+        ``virtual_loss``, so the next selection in the same batch is steered
+        away from this in-flight path; with no such edge, the node is
+        deferred — the simulation still visits it, so its capacity can grow.
+
+        Returns ``None`` when nothing is selectable (the root is resolved).
         """
-        chosen_edges: Dict[int, int] = {}
-        leaves: List[int] = []
+        simulation = _Simulation()
         stack: List[int] = [graph.root_id]
         while stack:
             node_id = stack.pop()
             node = graph.nodes[node_id]
             if node.status in (NodeStatus.SOLVED, NodeStatus.DEAD):
                 continue  # terminal for this simulation; backup reads the status
-            if node.status == NodeStatus.OPEN:
-                leaves.append(node_id)
+            simulation.selected.append(node_id)
+            if self._round_draws(node) > 0:
+                simulation.leaves.append(node_id)
                 continue
-            # EXPANDED: OR-choice over surviving tactic edges.
             viable = [
                 graph.edges[eid]
                 for eid in node.outgoing_edge_ids
                 if graph.edges[eid].status != EdgeStatus.DEAD
             ]
             if not viable:
-                continue  # stuck node (all edges dead, not yet propagated DEAD)
+                # Open source, nothing known to select, no capacity yet.
+                simulation.deferred.append(node_id)
+                graph.deferred_selections += 1
+                continue
             total_visits = sum(e.visit_stats.N + e.visit_stats.virtual_loss for e in viable)
             priors = graph.puct_priors(node_id)
             best = max(
                 viable,
                 key=lambda e: puct_score(e.visit_stats, priors[e.id], total_visits, self.puct_c),
             )
-            chosen_edges[node_id] = best.id
+            simulation.chosen_edges[node_id] = best.id
             best.visit_stats.virtual_loss += 1
             stack.extend(best.child_ids)
 
-        if not chosen_edges and not leaves:
+        if not simulation.selected:
             return None
-        return _Simulation(chosen_edges=chosen_edges, leaves=leaves)
+        return simulation
+
+    def _round_draws(self, node: ProofNode) -> int:
+        """How many raw draws a proposal round at ``node`` may make now.
+
+        Zero when its source is closed or, under widening, when its capacity
+        at the node's completed visits is already used. Without widening
+        (best-first), an OPEN node gets one round of ``top_k_tactics``.
+        """
+        if node.exhausted or node.status in (NodeStatus.SOLVED, NodeStatus.DEAD):
+            return 0
+        if self.widening is None:
+            return self.top_k_tactics if node.status == NodeStatus.OPEN else 0
+        return self.widening.draws_for(
+            visits=node.visits,
+            attempted=node.attempted_commands,
+            draws=node.proposal_draws,
+            per_round=self.top_k_tactics,
+        )
+
+    def _proposal_source_is_finite(self) -> bool:
+        """The provider gives the same candidates every round, so one is enough.
+
+        The generic engine ranks deterministically; the RL subclass is finite
+        only under a greedy proposal.
+        """
+        return True
 
     def predict_next_tactics_batch(self, sub_goals: List[Goal]) -> List[List[ProposedAction]]:
         """Propose tactic candidates for several goals at once.
@@ -695,16 +752,22 @@ class HybridReasoner:
         return self.predict_next_tactics_batch([node.goal.require_model_state() for node in nodes])
 
     async def _expand_leaves(self, graph: ProofHypergraph, leaf_ids: List[int]) -> None:
-        """Materialize a PUCT leaf batch, propose once, then execute sequentially.
+        """Materialize a batch of proposal requests, propose once, then execute
+        sequentially.
 
-        Every leaf state stays allocated until all of its candidate tactics have
-        finished, and is released as soon as they have. On an exception the
-        search scope releases whatever is still allocated.
+        A request is a node's first round or a widening round; a node appears
+        at most once per batch, and its round's draw count is fixed from its
+        completed visits before any draw. Every node state stays allocated
+        until all of its candidate tactics have finished, and is released as
+        soon as they have. On an exception the search scope releases whatever
+        is still allocated.
         """
         materialized: List[tuple[ProofNode, MaterializedGoal]] = []
-        for node_id in dict.fromkeys(leaf_ids):
+        draws: List[int] = []
+        for node_id in sorted(set(leaf_ids)):
             node = graph.nodes[node_id]
-            if node.status != NodeStatus.OPEN:
+            count = self._round_draws(node)
+            if count <= 0:
                 continue  # resolved by an earlier leaf's propagation this batch
             if node.depth >= self.max_depth:
                 graph.mark_node_exhausted(
@@ -717,21 +780,24 @@ class HybridReasoner:
             current = await self._materialize_for_expansion(graph, node)
             if current is not None:
                 materialized.append((node, current))
+                draws.append(count)
         if not materialized:
             return
 
-        proposals = self.predict_next_tactics_for_nodes(
-            [node for node, _current in materialized]
+        nodes = [node for node, _current in materialized]
+        proposals = (
+            self.predict_next_tactics_for_nodes(nodes)
+            if self.widening is None
+            else self.predict_next_tactics_for_nodes(nodes, draws)
         )
 
         if len(proposals) != len(materialized):
             raise RuntimeError("Batched proposals do not align with the leaf batch.")
 
-        for (node, current), candidates in zip(materialized, proposals):
+        for (node, current), candidates, count in zip(materialized, proposals, draws):
             if not candidates:
-                graph.mark_node_exhausted(
-                    node.id,
-                    reason=NodeClosureReason.NO_CANDIDATES,
+                self._settle_round(
+                    graph, node, count, closure=NodeClosureReason.NO_CANDIDATES,
                     note="GNN returned no viable tactic",
                 )
                 self._on_expansion_complete(node, ExpansionResult.NO_CANDIDATES)
@@ -741,8 +807,43 @@ class HybridReasoner:
                     node,
                     candidates,
                     materialized=current,
+                    draws=count,
                 )
             await self._release_materialized(current)
+
+    def _settle_round(
+        self,
+        graph: ProofHypergraph,
+        node: ProofNode,
+        draws: int,
+        *,
+        closure: NodeClosureReason,
+        note: Optional[str],
+    ) -> None:
+        """Account one finished round and close the source only if it is spent.
+
+        Best-first and finite providers close after their one round, with
+        ``closure``. A widening source closes when a hard bound is reached;
+        otherwise it stays open, and a node whose known edges all failed is
+        not dead yet.
+        """
+        node.proposal_rounds += 1
+        node.proposal_draws += draws
+        if self.widening is None or self._proposal_source_is_finite():
+            if note:
+                print(f"  [Node {node.id} EXHAUSTED] {note}")
+            graph.mark_node_exhausted(node.id, reason=closure, note=note)
+        elif self.widening.exhausted(attempted=node.attempted_commands, draws=node.proposal_draws):
+            graph.mark_node_exhausted(
+                node.id,
+                reason=NodeClosureReason.WIDENING_BOUND,
+                note=(
+                    f"widening bound reached ({node.attempted_commands} commands, "
+                    f"{node.proposal_draws} draws)"
+                ),
+            )
+        else:
+            graph.settle_proposal_round(node.id)
 
     @staticmethod
     def _release_virtual_losses(graph: ProofHypergraph, simulation: "_Simulation") -> None:
@@ -844,6 +945,10 @@ class HybridReasoner:
                 stats.N_v += 1
                 stats.W += edge_backup.value
             stats.virtual_loss = max(0, stats.virtual_loss - 1)
+        # One node visit per completed simulation, whatever its value's
+        # validity; no edge visit is invented where none was chosen.
+        for node_id in simulation.selected:
+            graph.nodes[node_id].visits += 1
 
     def _leaf_value(self, node: ProofNode) -> float:
         """Value estimate for an unresolved simulation leaf.
@@ -968,9 +1073,8 @@ class HybridReasoner:
         print(f"  [GNN Input] goal={node.goal.expression}  hyps={node.goal.hypotheses}")
         candidates = self.predict_next_tactics_for_nodes([node])[0]
         if not candidates:
-            graph.mark_node_exhausted(
-                node.id,
-                reason=NodeClosureReason.NO_CANDIDATES,
+            self._settle_round(
+                graph, node, self.top_k_tactics, closure=NodeClosureReason.NO_CANDIDATES,
                 note="GNN returned no viable tactic",
             )
             self._on_expansion_complete(node, ExpansionResult.NO_CANDIDATES)
@@ -990,6 +1094,7 @@ class HybridReasoner:
         proposals: List[ProposedAction],
         *,
         materialized: MaterializedGoal,
+        draws: Optional[int] = None,
     ) -> None:
         """Execute one proposal round at ``node`` and link the survivors — the
         per-node execution stage shared by the best-first path (``_expand``)
@@ -1001,7 +1106,8 @@ class HybridReasoner:
         reuses that outcome. A raw action that reaches an existing edge is
         recorded as an alias of it, which adds its prior mass once. Every
         group is reported to ``_on_command_settled``; the round ends with
-        ``mark_node_exhausted`` and ``_on_expansion_complete``.
+        ``_settle_round`` (``draws`` raw draws, ``len(proposals)`` by default)
+        and ``_on_expansion_complete``.
         """
         if materialized.fingerprint != node.goal.state_fingerprint():
             raise RuntimeError(f"Node {node.id} goal changed after action sampling.")
@@ -1079,13 +1185,12 @@ class HybridReasoner:
                 graph.observe_alias(edge.id, action)
             self._on_command_settled(node, command, actions, edge.id, executed=True)
 
-        note = None if any_applied else "executor rejected every candidate tactic"
-        if note:
-            print(f"  [Node {node.id} EXHAUSTED] {note}")
-        graph.mark_node_exhausted(
-            node.id,
-            reason=NodeClosureReason.CANDIDATES_EXHAUSTED,
-            note=note,
+        self._settle_round(
+            graph,
+            node,
+            len(proposals) if draws is None else draws,
+            closure=NodeClosureReason.CANDIDATES_EXHAUSTED,
+            note=None if any_applied else "executor rejected every candidate tactic",
         )
         self._on_expansion_complete(node, ExpansionResult.TACTICS_EXECUTED)
 

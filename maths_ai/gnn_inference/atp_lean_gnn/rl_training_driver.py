@@ -50,7 +50,12 @@ from maths_ai.hybrid_reasoner.proposal import (
     input_identity,
     proposal_specs,
 )
-from maths_ai.hybrid_reasoner.selection_policy import resolve_search_params
+from maths_ai.hybrid_reasoner.selection_policy import (
+    WIDENING_FIELDS,
+    WideningPolicy,
+    resolve_search_params,
+    resolve_widening,
+)
 
 from .actor_critic import ActorCriticWithArgsClassifier
 from .checkpointing import build_model_from_checkpoint, checkpoint_payload
@@ -165,6 +170,13 @@ class RLTrainingConfig:
     num_simulations: int | None = None
     sim_batch_size: int | None = None
     puct_c: float | None = None
+    # Progressive widening (PUCT only; see WideningPolicy). None takes the
+    # default bound; best-first rejects explicit values.
+    widening_initial_actions: int | None = None
+    widening_coefficient: float | None = None
+    widening_exponent: float | None = None
+    widening_max_actions: int | None = None
+    widening_max_draws: int | None = None
 
     # Decoupled HTPS-style step (Phases 2–3). htps_steps_per_round=0 disables it
     # entirely — no queues fill semantics change, no second optimizer steps.
@@ -224,7 +236,32 @@ class RLTrainingConfig:
         resolve_search_params(
             self.selection_policy, self.num_simulations, self.sim_batch_size, self.puct_c
         )
+        self.widening()
         self.evaluation_settings()
+
+    def widening(self) -> WideningPolicy | None:
+        return resolve_widening(
+            self.selection_policy,
+            self.widening_initial_actions,
+            self.widening_coefficient,
+            self.widening_exponent,
+            self.widening_max_actions,
+            self.widening_max_draws,
+        )
+
+    def search_kwargs(self) -> dict[str, Any]:
+        """The reasoner's search settings, as every worker is built with."""
+        return {
+            "top_k_tactics": self.top_k_tactics,
+            "max_depth": self.max_depth,
+            "max_nodes": self.max_nodes,
+            "selection_policy": self.selection_policy,
+            "num_simulations": self.num_simulations,
+            "sim_batch_size": self.sim_batch_size,
+            "puct_c": self.puct_c,
+            **{name: getattr(self, name) for name in WIDENING_FIELDS},
+            "use_pln": self.use_pln,
+        }
 
     def evaluation_settings(self) -> "EvaluationSettings":
         return EvaluationSettings(
@@ -301,6 +338,7 @@ def search_settings(cfg: RLTrainingConfig) -> dict[str, object]:
         "puct_c": cfg.puct_c,
         "use_pln": cfg.use_pln,
         "visit_threshold": cfg.visit_threshold,
+        "widening": None if cfg.widening() is None else cfg.widening().as_dict(),
         "proposal": {
             "training_mode": "sample",
             "seed": cfg.seed,
@@ -869,14 +907,7 @@ async def _create_live_reasoner_pool(
             tactic_vocab=tactic_vocab,
             executor=PantographExecutor(server),
             device=device,
-            top_k_tactics=cfg.top_k_tactics,
-            max_depth=cfg.max_depth,
-            max_nodes=cfg.max_nodes,
-            selection_policy=cfg.selection_policy,
-            num_simulations=cfg.num_simulations,
-            sim_batch_size=cfg.sim_batch_size,
-            puct_c=cfg.puct_c,
-            use_pln=cfg.use_pln,
+            **cfg.search_kwargs(),
         )
 
     async def search_factory(reasoner, theorem, proposal, deadline):

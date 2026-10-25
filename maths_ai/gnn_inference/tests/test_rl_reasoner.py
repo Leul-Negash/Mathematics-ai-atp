@@ -13,6 +13,7 @@ from torch_geometric.data import Batch
 from maths_ai.data_models.proof_components import STV, TacticCandidate
 from maths_ai.lean_replay import seed_from_text
 from maths_ai.hybrid_reasoner.hypergraph import (
+    NodeClosureReason,
     ProofHypergraph,
     SearchEndReason,
     TacticOutcome,
@@ -149,10 +150,10 @@ class _GoalTrackingReasoner(RLHybridReasoner):
     per-node execution stage runs.
     """
 
-    async def _execute_and_link(self, graph, node, candidates, *, materialized):
+    async def _execute_and_link(self, graph, node, candidates, *, materialized, draws=None):
         self.executor.current_goal = node.goal.expression
         return await super()._execute_and_link(
-            graph, node, candidates, materialized=materialized
+            graph, node, candidates, materialized=materialized, draws=draws
         )
 
 
@@ -737,6 +738,8 @@ class MCTSSearchTests(unittest.TestCase):
             scored(TacticCandidate(tactic_name="intro", arguments=[], probability=1.0)),
             [(structured_goal("A", HYPS), None), (structured_goal("B", HYPS), None)],
         )
+        # The root's proposals are spent, so simulations descend to A and B.
+        graph.mark_node_exhausted(graph.root_id, reason=NodeClosureReason.CANDIDATES_EXHAUSTED)
         return graph, edge.child_ids
 
     def test_puct_materializes_leaves_before_policy_forward(self):
@@ -752,7 +755,7 @@ class MCTSSearchTests(unittest.TestCase):
                 fingerprint=node.goal.state_fingerprint(),
             )
 
-        def propose(self, nodes):
+        def propose(self, nodes, draws=None):
             events.append(("policy", [node.id for node in nodes]))
             return [[] for _ in nodes]
 
@@ -776,7 +779,7 @@ class MCTSSearchTests(unittest.TestCase):
                 fingerprint=node.goal.state_fingerprint(),
             )
 
-        def propose(self, nodes):
+        def propose(self, nodes, draws=None):
             proposed.extend(node.id for node in nodes)
             return [[] for _ in nodes]
 
@@ -798,14 +801,14 @@ class MCTSSearchTests(unittest.TestCase):
                 fingerprint=node.goal.state_fingerprint(),
             )
 
-        def propose(self, nodes):
+        def propose(self, nodes, draws=None):
             policy_rows.append([node.id for node in nodes])
             return [
                 [TacticCandidate(tactic_name="skip", arguments=[], probability=1.0)]
                 for _ in nodes
             ]
 
-        async def execute(self, graph, node, candidates, *, materialized):
+        async def execute(self, graph, node, candidates, *, materialized, draws=None):
             executions.append((node.id, materialized.state))
 
         reasoner._materialize_for_expansion = MethodType(materialize, reasoner)

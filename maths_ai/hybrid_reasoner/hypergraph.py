@@ -55,6 +55,7 @@ class EdgeStatus:
 class NodeClosureReason(str, Enum):
     NONE = "none"
     CANDIDATES_EXHAUSTED = "candidates_exhausted"
+    WIDENING_BOUND = "widening_bound"
     NO_CANDIDATES = "no_candidates"
     DEPTH_LIMIT = "depth_limit"
     CYCLE = "cycle"
@@ -128,7 +129,14 @@ class ProofNode:
     incoming_edge_id: Optional[int] = None
     outgoing_edge_ids: List[int] = field(default_factory=list)
     combined_rank: float = 0.0
-    exhausted: bool = False
+    # The node's proposal source: rounds and raw draws spent so far. The source
+    # stays open across rounds until a bound or a path limit closes it
+    # (``closure_reason``); finishing one round does not close it.
+    proposal_rounds: int = 0
+    proposal_draws: int = 0
+    # Completed simulations whose selection included this node, whether or not
+    # they chose one of its edges; progressive widening grows with it.
+    visits: int = 0
     # Checked execution outcome of each command tried at this node: the edge
     # it created, or None for a Lean rejection. Infrastructure failures are
     # never recorded. A later draw of the same command reuses the outcome.
@@ -141,6 +149,16 @@ class ProofNode:
 
     def __post_init__(self) -> None:
         self.combined_rank = self.local_score
+
+    @property
+    def exhausted(self) -> bool:
+        """The proposal source is closed: no further actions will be proposed."""
+        return self.closure_reason != NodeClosureReason.NONE
+
+    @property
+    def attempted_commands(self) -> int:
+        """Distinct commands with a checked outcome at this node."""
+        return len(self.command_outcomes)
 
     @property
     def local_score(self) -> float:
@@ -337,6 +355,9 @@ class ProofHypergraph:
         self._next_edge_id = 0
         self.nodes: Dict[int, ProofNode] = {}
         self.edges: Dict[int, ProofHyperedge] = {}
+        # Simulation selections that reached an open node with nothing to
+        # propose or select yet (its widening capacity had not grown).
+        self.deferred_selections = 0
         self.end_reason = SearchEndReason.RUNNING
 
         self.root_id = self._new_node(goal=root_goal, depth=0, gnn_probability=1.0, stv=None)
@@ -415,7 +436,6 @@ class ProofHypergraph:
             if _state_key(goal) in ancestry:
                 child = self.nodes[child_id]
                 child.status = NodeStatus.DEAD
-                child.exhausted = True
                 child.note = "cycle: identical to an ancestor goal"
                 child.closure_reason = NodeClosureReason.CYCLE
             child_ids.append(child_id)
@@ -497,18 +517,46 @@ class ProofHypergraph:
         reason: NodeClosureReason,
         note: Optional[str] = None,
     ) -> None:
-        """No more tactic candidates remain for ``node_id`` (top-k exhausted,
-        depth limit reached, or the GNN returned no viable prediction).
-        Lets ``_recompute_node`` decide DEAD vs. staying EXPANDED/SOLVED.
+        """Close ``node_id``'s proposal source (its candidates or widening
+        bounds are spent, the depth limit is reached, the provider proposed
+        nothing, or replay failed). Lets ``_recompute_node`` decide DEAD vs.
+        staying EXPANDED/SOLVED. A node is never reopened.
         """
         node = self.nodes[node_id]
-        node.exhausted = True
+        if reason == NodeClosureReason.NONE:
+            raise ValueError("Closing a proposal source needs a reason.")
         node.closure_reason = reason
         if note:
             node.note = note
         self._propagate(node_id)
 
      
+    def settle_proposal_round(self, node_id: int) -> None:
+        """One proposal round at ``node_id`` finished and its source stays open.
+
+        The node keeps its status (OPEN without edges, EXPANDED otherwise) even
+        when every known edge failed: it can still be widened, so its known
+        alternatives are not a complete failure.
+        """
+        self._propagate(node_id)
+
+    def search_counters(self) -> dict[str, float]:
+        """Proposal and widening work over the whole graph, for reports."""
+        nodes = list(self.nodes.values())
+        closures: Dict[str, int] = {}
+        for node in nodes:
+            if node.closure_reason != NodeClosureReason.NONE:
+                closures[node.closure_reason.value] = closures.get(node.closure_reason.value, 0) + 1
+        return {
+            "proposal_rounds": float(sum(node.proposal_rounds for node in nodes)),
+            "widening_rounds": float(sum(max(node.proposal_rounds - 1, 0) for node in nodes)),
+            "raw_draws": float(sum(node.proposal_draws for node in nodes)),
+            "distinct_commands": float(sum(node.attempted_commands for node in nodes)),
+            "accepted_edges": float(len(self.edges)),
+            "deferred_selections": float(self.deferred_selections),
+            **{f"closed_{reason}": float(count) for reason, count in sorted(closures.items())},
+        }
+
     # Queries
      
     @property

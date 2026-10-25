@@ -140,7 +140,9 @@ class _RecordingClient:
 
     def __init__(self, outcomes=None):
         root = structured_goal(ROOT, HYPS)
-        self.goals = {"∀ (p : Prop), p → p": root}
+        # The seed's replay, and the canonical root's own replay for a later
+        # widening round at the root.
+        self.goals = {"∀ (p : Prop), p → p": root, root.replay_spec().expression: root}
         self.outcomes = outcomes or {}
         self.unelaborated: set[str] = set()
         self.protocol_failures: set[str] = set()
@@ -172,16 +174,16 @@ class _RecordingClient:
 class _NodeTrackingReasoner(RLHybridReasoner):
     """Tell the fake which graph node an application belongs to."""
 
-    async def _execute_and_link(self, graph, node, candidates, *, materialized):
+    async def _execute_and_link(self, graph, node, candidates, *, materialized, draws=None):
         self.server.current_node = node.id
         self.executed.append((node.id, len({candidate.command for candidate in candidates})))
         return await super()._execute_and_link(
-            graph, node, candidates, materialized=materialized
+            graph, node, candidates, materialized=materialized, draws=draws
         )
 
-    def predict_next_tactics_for_nodes(self, nodes):
+    def predict_next_tactics_for_nodes(self, nodes, draws=None):
         self.proposal_batches.append([node.id for node in nodes])
-        return super().predict_next_tactics_for_nodes(nodes)
+        return super().predict_next_tactics_for_nodes(nodes, draws)
 
 
 def _reasoner(client, *, top_k=2, seed=0, **search):
@@ -197,15 +199,29 @@ def _reasoner(client, *, top_k=2, seed=0, **search):
         max_depth=3,
         max_nodes=20,
         use_pln=False,
-        **search,
+        **_one_round_capacity(search, top_k),
     )
     reasoner.executed = []
     reasoner.proposal_batches = []
     return reasoner
 
 
+def _one_round_capacity(search, top_k):
+    """Under PUCT, let a node's first round use its whole widening capacity."""
+    if search.get("selection_policy") == "puct":
+        return {"widening_initial_actions": top_k, **search}
+    return search
+
+
 def _puct(**overrides):
-    settings = dict(selection_policy="puct", num_simulations=6, sim_batch_size=2)
+    """PUCT whose widening stays at the first round's capacity for these short
+    searches, so they test state ownership rather than widening."""
+    settings = dict(
+        selection_policy="puct",
+        num_simulations=6,
+        sim_batch_size=2,
+        widening_coefficient=0.5,
+    )
     settings.update(overrides)
     return settings
 
@@ -319,7 +335,10 @@ class SearchModeOwnershipTests(unittest.TestCase):
         solved, rejected = first_copy[0], [n for n in copies if n != first_copy[0]]
         self.assertEqual(graph.nodes[solved].status, NodeStatus.SOLVED)
         for node_id in rejected:
-            self.assertEqual(graph.nodes[node_id].status, NodeStatus.DEAD)
+            # Every known alternative was rejected, but a sampled source can
+            # still widen, so the copy is not a complete failure.
+            self.assertEqual(graph.nodes[node_id].status, NodeStatus.OPEN)
+            self.assertFalse(graph.nodes[node_id].exhausted)
 
         # Accepted actions belong to the solved copy's edges (or the root's),
         # and sampled-action multiplicity is kept per node.
@@ -345,11 +364,13 @@ class SearchModeOwnershipTests(unittest.TestCase):
 class _SkippingReasoner(_NodeTrackingReasoner):
     """Propose nothing for goal ``B``; sample normally for every other node."""
 
-    def predict_next_tactics_for_nodes(self, nodes):
+    def predict_next_tactics_for_nodes(self, nodes, draws=None):
         self.leaf_batches.append([node.id for node in nodes])
+        kept = [index for index, node in enumerate(nodes) if node.goal.expression != "B"]
         sampled = iter(
             super().predict_next_tactics_for_nodes(
-                [node for node in nodes if node.goal.expression != "B"]
+                [nodes[index] for index in kept],
+                None if draws is None else [draws[index] for index in kept],
             )
         )
         return [[] if node.goal.expression == "B" else next(sampled) for node in nodes]
@@ -371,7 +392,7 @@ class BatchCompositionTests(unittest.TestCase):
             max_depth=3,
             max_nodes=20,
             use_pln=False,
-            **_puct(num_simulations=4),
+            **_puct(num_simulations=4, widening_initial_actions=1),
         )
         reasoner.executed, reasoner.proposal_batches, reasoner.leaf_batches = [], [], []
         result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
@@ -381,7 +402,11 @@ class BatchCompositionTests(unittest.TestCase):
         # A failed to materialize, so the batch proposal held B and C only.
         self.assertIn({b.id, c.id}, [set(batch) for batch in reasoner.leaf_batches])
         self.assertEqual(a.closure_reason, NodeClosureReason.ELABORATION_ERROR)
-        self.assertEqual(b.closure_reason, NodeClosureReason.NO_CANDIDATES)
+        # A sampled round that proposed nothing does not prove the source
+        # empty: B stays open for a later round, with no failure recorded.
+        self.assertEqual(b.closure_reason, NodeClosureReason.NONE)
+        self.assertEqual(b.status, NodeStatus.OPEN)
+        self.assertGreaterEqual(b.proposal_rounds, 1)
         self.assertEqual(c.status, NodeStatus.SOLVED)
         # Only executed alternatives settle as evidence: C's accepted edge.
         self.assertEqual(failed(result), [])
@@ -423,7 +448,7 @@ class OverlappingSearchTests(unittest.TestCase):
             client.gate = asyncio.Event()
             client.entered_apply = asyncio.Event()
             first = asyncio.create_task(
-                reasoner.prove(SEED, proposal=GREEDY)
+                reasoner.prove(SEED, proposal=ProposalSpec(mode="sample", seed=1))
             )
             await client.entered_apply.wait()
             pending, result, proposal = reasoner._pending, reasoner._result, reasoner._proposal
@@ -531,9 +556,11 @@ class FailureInjectionTests(unittest.TestCase):
 
     def test_elaboration_failure_rejection_and_unknown_backup_stay_distinct(self):
         # A cannot be re-elaborated; every tactic on B is rejected by Lean.
+        # One draw per node is its whole widening budget, so B's rejected round
+        # closes its source and its failure is genuine for this search.
         client = _RecordingClient({0: ["A", "B"], "B": "reject"})
         client.unelaborated.add(structured_goal("A", HYPS).replay_spec().expression)
-        reasoner = _reasoner(client, top_k=1, **_puct(num_simulations=4))
+        reasoner = _reasoner(client, top_k=1, **_puct(num_simulations=4, widening_max_draws=1))
         result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = result.graph
 
@@ -541,7 +568,7 @@ class FailureInjectionTests(unittest.TestCase):
         root_edge = graph.edges[graph.nodes[0].outgoing_edge_ids[0]]
         elaboration, rejected = (graph.nodes[child] for child in root_edge.child_ids)
         self.assertEqual(elaboration.closure_reason, NodeClosureReason.ELABORATION_ERROR)
-        self.assertEqual(rejected.closure_reason, NodeClosureReason.CANDIDATES_EXHAUSTED)
+        self.assertEqual(rejected.closure_reason, NodeClosureReason.WIDENING_BOUND)
         # Ordinary rejection produces actor failure records for B only; the
         # unelaborated node never sampled or executed anything.
         self.assertTrue(failed(result))

@@ -6,6 +6,7 @@ from maths_ai.data_models.proof_components import STV, TacticCandidate
 from maths_ai.hybrid_reasoner.hypergraph import (
     BackupSource,
     BackupValidity,
+    BackupValue,
     EdgeStatus,
     NodeClosureReason,
     NodeStatus,
@@ -56,7 +57,6 @@ class ValidityHarvestTests(unittest.TestCase):
         graph.add_edge(edge.child_ids[0], scored(tac("qed")), [])
         graph.nodes[edge.child_ids[1]].closure_reason = NodeClosureReason.ELABORATION_ERROR
         graph.nodes[edge.child_ids[1]].status = NodeStatus.DEAD
-        graph.nodes[edge.child_ids[1]].exhausted = True
         tables = compute_backups(graph)
         self.assertEqual(tables.edge_outcomes[edge.id].validity, BackupValidity.UNKNOWN)
         transitions = extract_transitions(graph)
@@ -76,7 +76,6 @@ class ValidityHarvestTests(unittest.TestCase):
         graph.nodes[edge.child_ids[0]].closure_reason = NodeClosureReason.CANDIDATES_EXHAUSTED
         graph.nodes[edge.child_ids[1]].status = NodeStatus.DEAD
         graph.nodes[edge.child_ids[1]].closure_reason = NodeClosureReason.ELABORATION_ERROR
-        graph.nodes[edge.child_ids[1]].exhausted = True
         outcome = compute_backups(graph).edge_outcomes[edge.id]
         self.assertEqual(outcome, outcome.valid(0.0, BackupSource.SEARCH_FAILURE))
 
@@ -116,7 +115,6 @@ class ValidityHarvestTests(unittest.TestCase):
         )
         child = graph.nodes[edge.child_ids[0]]
         child.status = NodeStatus.DEAD
-        child.exhausted = True
         child.closure_reason = NodeClosureReason.ELABORATION_ERROR
         edge.visit_stats.virtual_loss = 1
         reasoner = object.__new__(HybridReasoner)
@@ -152,6 +150,23 @@ class ValidityHarvestTests(unittest.TestCase):
             [(goal(str(i)), stv()) for i in range(5)],
         )
         self.assertEqual(len(edge.child_ids), 5)
+
+    def test_an_open_source_with_only_failed_alternatives_is_unknown(self):
+        graph = ProofHypergraph(goal("P"))
+        edge = graph.add_edge(graph.root_id, scored(tac()), [(goal("A"), stv())])
+        child = graph.nodes[edge.child_ids[0]]
+        failed = graph.add_edge(child.id, scored(tac("fail")), [(goal("Z"), stv())])
+        graph.nodes[failed.child_ids[0]].closure_reason = NodeClosureReason.CANDIDATES_EXHAUSTED
+        graph.nodes[failed.child_ids[0]].status = NodeStatus.DEAD
+        failed.status = EdgeStatus.DEAD
+        # A can still widen: its one known alternative failing is no target.
+        self.assertEqual(compute_backups(graph).node_targets[child.id], BackupValue.unknown())
+        # Once its source is closed, the failure is genuine for this search.
+        graph.mark_node_exhausted(child.id, reason=NodeClosureReason.WIDENING_BOUND)
+        self.assertEqual(
+            compute_backups(graph).node_targets[child.id],
+            BackupValue.valid(0.0, BackupSource.SEARCH_FAILURE),
+        )
 
     def test_minimal_tree_requires_structural_solution(self):
         graph = ProofHypergraph(goal("P"))
