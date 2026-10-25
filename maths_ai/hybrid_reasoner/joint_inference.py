@@ -378,7 +378,13 @@ class HybridReasoner:
                 edge case) — callers must treat that as a dead branch, which
                 `_expand` below does via `graph.mark_node_exhausted`.
         """
-        return self.gnn_engine.propose(sub_goal, top_k=self.top_k_tactics)
+        return self._propose_for_goal(sub_goal, self.top_k_tactics)
+
+    def _propose_for_goal(self, sub_goal: Goal, count: int) -> List[ProposedAction]:
+        """Up to ``count`` ranked proposals from the generic engine (none for 0)."""
+        if count <= 0:
+            return []
+        return self.gnn_engine.propose(sub_goal, top_k=count)
 
     # PLN side
     def _make_dts_key(self, parent_goal: str, tactic: TacticCandidate, subgoal: Goal) -> str:
@@ -709,17 +715,19 @@ class HybridReasoner:
         """How many raw draws a proposal round at ``node`` may make now.
 
         Zero when its source is closed or, under widening, when its capacity
-        at the node's completed visits is already used or has not grown since
-        its last round. The second condition keeps a node whose draws repeat
-        known commands from widening on every visit and starving its
-        children. Without widening (best-first), an OPEN node gets one round
-        of ``top_k_tactics``.
+        at the node's completed visits is already used, or before the node's
+        next scheduled round. Rounds are spaced by completed visits
+        (``WideningPolicy.next_round_visit``), so a node whose draws repeat
+        known commands keeps retrying within its budgets, including after its
+        capacity has saturated, while the visits in between descend through
+        its existing edges. Without widening (best-first), an OPEN node gets
+        one round of ``top_k_tactics``.
         """
         if node.exhausted or node.status in (NodeStatus.SOLVED, NodeStatus.DEAD):
             return 0
         if self.widening is None:
             return self.top_k_tactics if node.status == NodeStatus.OPEN else 0
-        if node.proposal_rounds and self.widening.capacity(node.visits) <= node.round_capacity:
+        if node.visits < node.next_round_visit:
             return 0
         return self.widening.draws_for(
             visits=node.visits,
@@ -746,15 +754,22 @@ class HybridReasoner:
         return [self.predict_next_tactic(sub_goal) for sub_goal in sub_goals]
 
     def predict_next_tactics_for_nodes(
-        self, nodes: List[ProofNode]
+        self, nodes: List[ProofNode], draws: Optional[List[int]] = None
     ) -> List[List[ProposedAction]]:
         """Internal node-aware proposal seam used by both search modes.
 
-        The base reasoner needs only sanitized goals. RL overrides this method so
-        sampled actions can be owned by the exact graph node even when two nodes
-        contain identical goal text.
+        ``draws[i]`` is how many actions node ``i``'s round may propose
+        (``top_k_tactics`` for every node when None). The generic engine asks
+        for that many ranked candidates for each node's goal. RL overrides this
+        method so sampled actions can be owned by the exact graph node even when
+        two nodes contain identical goal text.
         """
-        return self.predict_next_tactics_batch([node.goal.require_model_state() for node in nodes])
+        goals = [node.goal.require_model_state() for node in nodes]
+        if draws is None:
+            return self.predict_next_tactics_batch(goals)
+        if len(draws) != len(nodes):
+            raise ValueError("draws must give one count per node")
+        return [self._propose_for_goal(goal, count) for goal, count in zip(goals, draws)]
 
     async def _expand_leaves(self, graph: ProofHypergraph, leaf_ids: List[int]) -> None:
         """Materialize a batch of proposal requests, propose once, then execute
@@ -787,16 +802,14 @@ class HybridReasoner:
                 materialized.append((node, current))
                 draws.append(count)
                 if self.widening is not None:
-                    node.round_capacity = self.widening.capacity(node.visits)
+                    node.next_round_visit = self.widening.next_round_visit(
+                        visits=node.visits, rounds=node.proposal_rounds + 1
+                    )
         if not materialized:
             return
 
         nodes = [node for node, _current in materialized]
-        proposals = (
-            self.predict_next_tactics_for_nodes(nodes)
-            if self.widening is None
-            else self.predict_next_tactics_for_nodes(nodes, draws)
-        )
+        proposals = self.predict_next_tactics_for_nodes(nodes, draws)
 
         if len(proposals) != len(materialized):
             raise RuntimeError("Batched proposals do not align with the leaf batch.")

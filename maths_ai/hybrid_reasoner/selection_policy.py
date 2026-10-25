@@ -101,7 +101,9 @@ class WideningPolicy:
     ``v`` completed simulation visits. Capacity counts commands attempted,
     accepted or rejected, so a rejection-only node cannot issue unbounded
     Lean requests; ``max_draws`` bounds raw policy draws, so a node whose
-    draws repeat cannot either.
+    draws repeat cannot either. Rounds at one node are spaced by completed
+    visits (``next_round_visit``); a node keeps retrying until a bound closes
+    its source.
     """
 
     initial_actions: int = 4
@@ -134,6 +136,15 @@ class WideningPolicy:
     def draws_for(self, *, visits: int, attempted: int, draws: int, per_round: int) -> int:
         """Raw draws one round at a node may make; 0 when it may not propose."""
         return max(0, min(per_round, self.capacity(visits) - attempted, self.max_draws - draws))
+
+    def next_round_visit(self, *, visits: int, rounds: int) -> int:
+        """Completed visits at which a node with ``rounds`` rounds may retry.
+
+        The gap grows by one visit per round, so retries never stop while
+        command capacity and draws remain, yet the node's existing edges get
+        a growing share of its visits in between.
+        """
+        return visits + rounds
 
     def exhausted(self, *, attempted: int, draws: int) -> bool:
         """The hard bounds are reached: the node's source closes for good."""

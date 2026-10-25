@@ -135,6 +135,57 @@ class WideningPolicyTests(unittest.TestCase):
         self.assertEqual(resolve_widening("puct", max_actions=9).max_actions, 9)
 
 
+class _StubEngine:
+    """The generic engine's ``propose`` contract: ranked proposals per goal."""
+
+    def __init__(self, ranked: dict[str, list[str]]):
+        self.ranked = ranked
+        self.requests: list[tuple[str, int]] = []
+
+    def propose(self, goal, top_k=3):
+        self.requests.append((goal.expression, top_k))
+        return [proposal(name) for name in self.ranked.get(goal.expression, [])[:top_k]]
+
+
+class _GenericReasoner(HybridReasoner):
+    """The base reasoner with its own node-aware seam; only the engine is stubbed."""
+
+    def __init__(self, executor, engine, **search):
+        self._engine = engine
+        super().__init__(None, None, None, executor=executor, use_pln=False, **search)
+
+    def _build_gnn_engine(self, **_kwargs):
+        return self._engine
+
+
+class GenericProviderTests(unittest.TestCase):
+    def test_the_base_seam_honors_unequal_per_node_counts(self):
+        engine = _StubEngine({"A": ["a1", "a2", "a3"], "B": ["b1", "b2"]})
+        reasoner = _GenericReasoner(_ScriptedExecutor({}), engine)
+        nodes = [
+            type("Node", (), {"goal": structured_goal(expression, HYPS)})()
+            for expression in ("A", "B")
+        ]
+        proposals = reasoner.predict_next_tactics_for_nodes(nodes, [3, 1])
+        self.assertEqual([[p.candidate.tactic_name for p in row] for row in proposals], [["a1", "a2", "a3"], ["b1"]])
+        self.assertEqual(engine.requests, [("A", 3), ("B", 1)])
+        self.assertEqual(reasoner.predict_next_tactics_for_nodes(nodes, [0, 2])[0], [])
+
+    def test_generic_puct_search_runs_through_the_base_seam(self):
+        engine = _StubEngine({GOAL_EXPR: ["bad", "good"]})
+        executor = _ScriptedExecutor({"good": []})
+        reasoner = _GenericReasoner(
+            executor, engine, selection_policy="puct", num_simulations=4, sim_batch_size=1,
+            top_k_tactics=3, max_depth=3, max_nodes=10,
+        )
+        graph = asyncio.run(reasoner.prove(SEED))
+        self.assertTrue(graph.is_solved())
+        # The first round asked for the widening capacity, not top_k: min(3, 4).
+        self.assertEqual(engine.requests[0], (GOAL_EXPR, 3))
+        # The ranked source is finite: one round, then closed.
+        self.assertEqual(graph.root.proposal_rounds, 1)
+
+
 class WideningSearchTests(unittest.TestCase):
     def test_a_later_round_adds_the_solving_action_to_a_rejected_node(self):
         graph, reasoner, executor = search(
@@ -252,6 +303,42 @@ class WideningSearchTests(unittest.TestCase):
         self.assertEqual(executor.calls, ["a", "done"])
         # The root widened only when its capacity grew, not on every visit.
         self.assertLess(graph.root.proposal_rounds, graph.root.visits)
+
+    def test_a_saturated_capacity_keeps_retrying_until_the_draw_bound(self):
+        # Default bounds, four draws per round, only duplicates: capacity
+        # saturates long before the draw budget is used.
+        graph, _reasoner, executor = search(
+            {GOAL_EXPR: [["same"] * 4]}, {}, num_simulations=2000, top_k_tactics=4
+        )
+        root = graph.root
+        self.assertEqual(executor.calls, ["same"])
+        self.assertEqual(root.closure_reason, NodeClosureReason.WIDENING_BOUND)
+        self.assertGreaterEqual(root.proposal_draws, 128)
+        self.assertEqual(graph.end_reason, SearchEndReason.ROOT_DEAD)
+
+    def test_a_later_solving_action_after_many_duplicate_rounds(self):
+        rounds = {GOAL_EXPR: [["bad", "bad"]] * 12 + [["good"]]}
+        graph, _reasoner, executor = search(
+            rounds, {"good": []}, num_simulations=400, widening_initial_actions=2
+        )
+        self.assertTrue(graph.is_solved())
+        self.assertGreater(graph.root.proposal_rounds, 12)
+        self.assertEqual(executor.calls, ["bad", "good"])
+
+    def test_children_are_explored_between_retries(self):
+        # The root keeps repeating its accepted command; its child needs a
+        # second round to find its own proof.
+        rounds = {GOAL_EXPR: [["a"]], "A": [["miss"], ["done"]]}
+        graph, reasoner, _executor = search(
+            rounds, {"a": ["A"], "done": []}, num_simulations=60,
+            top_k_tactics=1, widening_initial_actions=1, widening_coefficient=1.0,
+        )
+        self.assertTrue(graph.is_solved())
+        child = graph.nodes[graph.edges[graph.root.outgoing_edge_ids[0]].child_ids[0]]
+        self.assertGreaterEqual(child.proposal_rounds, 2)
+        # The root was still allowed to retry while its child was explored.
+        self.assertFalse(graph.root.exhausted)
+        self.assertGreater(graph.root.proposal_rounds, 1)
 
     def test_round_draws_are_fixed_from_completed_visits(self):
         _graph, reasoner, _executor = search(
