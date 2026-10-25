@@ -619,7 +619,7 @@ async def collect_round(
             proposals=proposals,
             model_generation=model_generation,
         )
-        return collected.results, collected.stats
+        return collected.results, {**collected.stats, **search_counters(collected.results)}
     results: list[RLSearchResult] = []
     solved = 0
     failed = 0
@@ -667,8 +667,37 @@ async def collect_round(
         "searches_cooperative_deadline": float(cooperative_deadlines),
         "searches_hard_timed_out": float(hard_timeouts),
         "seeds_inadmissible": float(inadmissible),
+        **search_counters(results),
     }
     return results, stats
+
+
+def search_counters(results: list[RLSearchResult]) -> dict[str, float]:
+    """Proposal, widening and observation work summed over completed searches.
+
+    ``raw_draws`` counts every draw the searches made and ``settled_draws``
+    those with a checked outcome (the observations' multiplicities); draws of
+    an interrupted round are the difference. ``accepted_edges <=
+    distinct_commands <= raw_draws`` holds for each search.
+    """
+    totals: dict[str, float] = {
+        "proposal_rounds": 0.0,
+        "widening_rounds": 0.0,
+        "raw_draws": 0.0,
+        "distinct_commands": 0.0,
+        "accepted_edges": 0.0,
+        "deferred_selections": 0.0,
+        "settled_draws": 0.0,
+        "observations": 0.0,
+    }
+    for result in results:
+        if result.graph is None:
+            continue
+        for key, value in result.graph.search_counters().items():
+            totals[key] = totals.get(key, 0.0) + value
+        totals["settled_draws"] += float(result.draws())
+        totals["observations"] += float(len(result.observations))
+    return totals
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +845,7 @@ async def evaluate_proof_rate(
         "searches_hard_timed_out": total("searches_hard_timed_out"),
         "searches_cooperative_deadline": total("searches_cooperative_deadline"),
         "seeds_inadmissible": total("seeds_inadmissible"),
+        **{key: total(key) for key in search_counters([])},
         "evaluation": settings.contract(),
         "eval_subset_size": len(eval_items),
         "eval_subset_sha256": subset_identity(eval_items),

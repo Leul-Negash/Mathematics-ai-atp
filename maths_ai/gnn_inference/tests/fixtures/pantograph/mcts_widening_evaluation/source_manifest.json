@@ -41,13 +41,18 @@
     },
     {
       "path": "maths_ai/gnn_inference/atp_lean_gnn/rl_training_driver.py",
-      "sha256": "f582e73b724759080acaae3e82d63cb976f404a8ab21f95bb424f82a68dd60a0",
+      "sha256": "91312bff14fbf33dd856a7280b73cb9462e0156f985df248b024f75b84f2a613",
       "target_base_sha256": "efc4b08a0555b86f0650a8015975997be2d9a7a0feb87340c70fe498dc184252"
     },
     {
       "path": "maths_ai/gnn_inference/atp_lean_gnn/search_harvest.py",
       "sha256": "9c91f9e0163ca5d2bae3d9e237a5df79a11ab2b1c7edfadcfb57a95a9e816d58",
       "target_base_sha256": "a88e3652cc368ecec3ecac6ba4f366fde916d3c278fc070c7202615c31e0f723"
+    },
+    {
+      "path": "maths_ai/gnn_inference/configs/rl_actor_critic.json",
+      "sha256": "a0a2877e4d1bd889af7f85c5e0387b9e240b9b515657c2c57462dbf520df93df",
+      "target_base_sha256": "4705e044fbc9ed43c6f92bcbf43a7ca46adce7457aa4fa391b576c9e3c2ac4e8"
     },
     {
       "path": "maths_ai/gnn_inference/inference_engine.py",
@@ -126,7 +131,7 @@
     },
     {
       "path": "maths_ai/gnn_inference/tests/test_rl_training_driver.py",
-      "sha256": "ed6d09c11b1608e7d4a7fa04504e96587b40d648d6ef0a13a98abfb0c7a68251",
+      "sha256": "4e467f3181fbc1a84ca283eac6cdf392a11436cdd2abc6eca282b92639235745",
       "target_base_sha256": "903ecacffb7f8f481e2ecf4507be60b5ac3ee36936092be071b4fecc259450fa"
     },
     {

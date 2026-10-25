@@ -1531,6 +1531,25 @@ class LivePoolDriverTests(unittest.TestCase):
         self.assertEqual(len(clients), 2)
         self.assertTrue(all(client.closed for client in clients))
 
+    def test_puct_rounds_widen_and_report_their_proposal_work(self):
+        for htps_steps in (0, 2):
+            with self.subTest(htps_steps=htps_steps):
+                events, rows, _clients = self._run(
+                    num_rounds=2,
+                    selection_policy="puct",
+                    num_simulations=6,
+                    sim_batch_size=2,
+                    htps_steps_per_round=htps_steps,
+                    htps_batch_size=4,
+                )
+                self._assert_round_order(events, rows, htps_steps=htps_steps)
+                for row in rows:
+                    self.assertLessEqual(row["onpolicy_optimizer_step"], 1.0)
+                    self.assertGreater(row["proposal_rounds"], 0.0)
+                    self.assertLessEqual(row["accepted_edges"], row["distinct_commands"])
+                    self.assertLessEqual(row["distinct_commands"], row["raw_draws"])
+                    self.assertLessEqual(row["settled_draws"], row["raw_draws"])
+
     def test_htps_enabled_round_order_generation_and_replica_sync(self):
         events, rows, clients = self._run(
             num_rounds=2, htps_steps_per_round=2, htps_batch_size=4
