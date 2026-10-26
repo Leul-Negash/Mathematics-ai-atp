@@ -162,6 +162,7 @@ class ReplayResult:
     certificate: Optional[CertificationResult] = None
     witness: tuple[WitnessStep, ...] = ()
     conflicts: list[ReplayConflict] = field(default_factory=list)
+    conflict_count: int = 0
     steps: int = 0
     combinations: int = 0
     continuations: list[ReplayContinuation] = field(default_factory=list)
@@ -183,6 +184,7 @@ class ReplayCoordinator:
     """
 
     MEMO_LIMIT = 4096
+    CONFLICT_LIMIT = 256
 
     def __init__(
         self,
@@ -265,7 +267,9 @@ class ReplayCoordinator:
             raise _Stop(ReplayStatus.BUDGET)
 
     def _conflict(self, node, attempt, kind, detail) -> None:
-        self._result.conflicts.append(ReplayConflict(node, attempt, kind, detail))
+        self._result.conflict_count += 1
+        if len(self._result.conflicts) < self.CONFLICT_LIMIT:
+            self._result.conflicts.append(ReplayConflict(node, attempt, kind, detail))
 
     def _remember(self, key: tuple) -> None:
         if len(self._failed) < self.MEMO_LIMIT:
