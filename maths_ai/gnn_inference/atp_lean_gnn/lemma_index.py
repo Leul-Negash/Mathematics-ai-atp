@@ -1,4 +1,6 @@
 from __future__ import annotations
+import hashlib
+from typing import Any
 
 import json
 from dataclasses import dataclass
@@ -162,3 +164,33 @@ def _normalize_rows(array: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(array, axis=1, keepdims=True)
     norms = np.clip(norms, 1e-12, None)
     return array / norms
+
+
+def _tensor_bytes(tensor: Any) -> bytes:
+    """Raw bytes of a tensor, whatever its dtype (bfloat16 has no numpy)."""
+    import torch
+
+    t = tensor.detach().cpu().contiguous()
+    try:
+        return t.numpy().tobytes()
+    except (TypeError, RuntimeError):
+        return t.view(torch.int16).numpy().tobytes() if t.element_size() == 2 else t.view(torch.uint8).numpy().tobytes()
+
+
+def state_dict_sha256(state_dict: Any) -> str:
+    """Hash an encoder's weights, independent of file layout and key order.
+
+    The same encoder weights can sit in a bare baseline checkpoint or under
+    ``backbone.`` in a pointer checkpoint (and under ``module.`` when a run
+    used DataParallel); the index may legitimately be built from either.
+    Hashing the sorted (key, dtype, shape, bytes) sequence of the tensors
+    identifies the *encoder*, not the file it happened to be saved in.
+    """
+    digest = hashlib.sha256()
+    for key in sorted(state_dict.keys()):
+        tensor = state_dict[key]
+        digest.update(str(key).encode("utf-8"))
+        digest.update(str(tensor.dtype).encode("utf-8"))
+        digest.update(str(tuple(tensor.shape)).encode("utf-8"))
+        digest.update(_tensor_bytes(tensor))
+    return digest.hexdigest()
