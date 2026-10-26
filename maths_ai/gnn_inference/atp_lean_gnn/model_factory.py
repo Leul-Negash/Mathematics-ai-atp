@@ -57,6 +57,8 @@ def build_pointer_model(
         num_tactics=num_tactics,
         dropout=model_spec.dropout,
         max_args=model_spec.max_args,
+        text_dim=model_spec.text_dim,
+        local_type_bonus_strength=model_spec.local_type_bonus_strength,
     )
     model.model_spec = model_spec
     model.model_kind = "tactic_with_args"
@@ -79,6 +81,8 @@ def build_actor_critic_model(
         num_tactics=num_tactics,
         dropout=model_spec.dropout,
         max_args=model_spec.max_args,
+        text_dim=model_spec.text_dim,
+        local_type_bonus_strength=model_spec.local_type_bonus_strength,
     )
     model.model_spec = model_spec
     model.model_kind = "actor_critic_with_args"
