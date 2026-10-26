@@ -8,6 +8,7 @@ is separate and still includes unknown simulations.
 from maths_ai.hybrid_reasoner.hypergraph import EdgeVisitStats, ProofHyperedge, ProofHypergraph
 
 from maths_ai.data_models.proof_components import Goal, TacticCandidate
+from maths_ai.gnn_inference.tests.model_helpers import scored
 
 
 def test_q_is_first_play_urgency_when_unvisited():
@@ -15,7 +16,6 @@ def test_q_is_first_play_urgency_when_unvisited():
     assert stats.N == 0
     assert stats.W == 0.0
     assert stats.virtual_loss == 0
-    assert stats.prior_prob == 0.0
     assert stats.Q == 0.5
 
 
@@ -50,11 +50,12 @@ def test_proof_hyperedge_carries_independent_stats():
     assert e2.visit_stats.W == 0.0
 
 
-def test_add_edge_stamps_tactic_probability_as_prior():
-    # add_edge is the single seam every edge creator flows through: the
-    # tactic-head probability must land in visit_stats.prior_prob at creation
-    # so puct_score never recomputes it.
+def test_add_edge_records_the_raw_action_prior_not_the_tactic_confidence():
+    # add_edge is the single seam every edge creator flows through: the raw
+    # action's log-prior lands on the edge, and the tactic's confidence stays
+    # on the candidate for ranking.
     graph = ProofHypergraph(Goal(expression="p → p", hypotheses=[]))
     tactic = TacticCandidate(tactic_name="intro", arguments=[], probability=0.37)
-    edge = graph.add_edge(graph.root_id, tactic, ranked_subgoals=[])
-    assert edge.visit_stats.prior_prob == 0.37
+    edge = graph.add_edge(graph.root_id, scored(tactic, log_prior=-2.0), ranked_subgoals=[])
+    assert edge.raw_log_priors == {("scripted", "intro", ()): -2.0}
+    assert edge.tactic.probability == 0.37

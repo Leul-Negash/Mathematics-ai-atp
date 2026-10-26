@@ -15,6 +15,7 @@ Design decisions and alternatives are recorded in
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import random
 import time
@@ -35,8 +36,26 @@ from pantograph_async import (
     PantographRequestTimeout,
     PantographTransportError,
 )
-from maths_ai.hybrid_reasoner.hypergraph import BackupSource, SearchEndReason
-from maths_ai.hybrid_reasoner.selection_policy import resolve_search_params
+from maths_ai.hybrid_reasoner.hypergraph import (
+    PRIOR_ALIAS_POLICY,
+    PRIOR_NORMALIZATION,
+    PRIOR_SEMANTICS,
+    BackupSource,
+    SearchEndReason,
+)
+from maths_ai.hybrid_reasoner.proposal import (
+    PROPOSAL_MODES,
+    SEED_DERIVATION_VERSION,
+    ProposalSpec,
+    input_identity,
+    proposal_specs,
+)
+from maths_ai.hybrid_reasoner.selection_policy import (
+    WIDENING_FIELDS,
+    WideningPolicy,
+    resolve_search_params,
+    resolve_widening,
+)
 
 from .actor_critic import ActorCriticWithArgsClassifier
 from .checkpointing import build_model_from_checkpoint, checkpoint_payload
@@ -48,7 +67,7 @@ from .pln_rl_training import make_dag_featurizer, train_step_htps_style, train_s
 from .reporting import console_print
 from .rl_live_collection import FATAL_SESSION_ERRORS, LiveReasonerPool
 from .rl_resources import ResourcePlan, plan_resources
-from .rl_reasoner import RLHybridReasoner, RLSearchResult
+from .rl_reasoner import ACTOR_PRIOR, RLHybridReasoner, RLSearchResult
 from .search_harvest import (
     CriticSample,
     TacticImitationSample,
@@ -103,6 +122,14 @@ class RLTrainingConfig:
     eval_pool_size: int = 200
     seed: int = 42
 
+    # Evaluation (standalone --eval-only and periodic): how the held-out pool is
+    # searched. "sample" draws tactics and arguments from the policy; "greedy"
+    # takes the step-wise argmax of both. Each repeat is one pass over the pool
+    # with its own derived seeds. Training collection always samples.
+    eval_proposal_mode: str = "sample"
+    eval_seed: int = 42
+    eval_repeats: int = 1
+
     # Curriculum: sliding window over the size-sorted pool.
     curriculum_start_size: int = 200
     curriculum_growth_factor: float = 1.5
@@ -143,6 +170,13 @@ class RLTrainingConfig:
     num_simulations: int | None = None
     sim_batch_size: int | None = None
     puct_c: float | None = None
+    # Progressive widening (PUCT only; see WideningPolicy). None takes the
+    # default bound; best-first rejects explicit values.
+    widening_initial_actions: int | None = None
+    widening_coefficient: float | None = None
+    widening_exponent: float | None = None
+    widening_max_actions: int | None = None
+    widening_max_draws: int | None = None
 
     # Decoupled HTPS-style step (Phases 2–3). htps_steps_per_round=0 disables it
     # entirely — no queues fill semantics change, no second optimizer steps.
@@ -201,6 +235,37 @@ class RLTrainingConfig:
         # stores the resolved values.
         resolve_search_params(
             self.selection_policy, self.num_simulations, self.sim_batch_size, self.puct_c
+        )
+        self.widening()
+        self.evaluation_settings()
+
+    def widening(self) -> WideningPolicy | None:
+        return resolve_widening(
+            self.selection_policy,
+            self.widening_initial_actions,
+            self.widening_coefficient,
+            self.widening_exponent,
+            self.widening_max_actions,
+            self.widening_max_draws,
+        )
+
+    def search_kwargs(self) -> dict[str, Any]:
+        """The reasoner's search settings, as every worker is built with."""
+        return {
+            "top_k_tactics": self.top_k_tactics,
+            "max_depth": self.max_depth,
+            "max_nodes": self.max_nodes,
+            "selection_policy": self.selection_policy,
+            "num_simulations": self.num_simulations,
+            "sim_batch_size": self.sim_batch_size,
+            "puct_c": self.puct_c,
+            **{name: getattr(self, name) for name in WIDENING_FIELDS},
+            "use_pln": self.use_pln,
+        }
+
+    def evaluation_settings(self) -> "EvaluationSettings":
+        return EvaluationSettings(
+            mode=self.eval_proposal_mode, seed=self.eval_seed, repeats=self.eval_repeats
         )
 
     @classmethod
@@ -273,7 +338,112 @@ def search_settings(cfg: RLTrainingConfig) -> dict[str, object]:
         "puct_c": cfg.puct_c,
         "use_pln": cfg.use_pln,
         "visit_threshold": cfg.visit_threshold,
+        "widening": None if cfg.widening() is None else cfg.widening().as_dict(),
+        "proposal": {
+            "training_mode": "sample",
+            "seed": cfg.seed,
+            "seed_derivation": SEED_DERIVATION_VERSION,
+            "greedy": "stepwise-argmax-v1",
+            # One encoding per round, then each state's requested draws in
+            # row-major order. A seed from another schedule does not reproduce
+            # the same actions.
+            "sampling_schedule": "encode-once-row-major-v1",
+        },
+        "prior": {
+            "semantics": PRIOR_SEMANTICS,
+            "normalization": PRIOR_NORMALIZATION,
+            "alias_policy": PRIOR_ALIAS_POLICY,
+            "provider": ACTOR_PRIOR,
+        },
+        "observations": "per-node-raw-action-ledger-v1",
     }
+
+
+# ---------------------------------------------------------------------------
+# Evaluation settings
+# ---------------------------------------------------------------------------
+
+
+# The proof rate is solved / searched seeds over every repeat. Version 2 is the
+# first with selectable sampled or step-wise greedy proposals and per-search
+# seeds; version-1 scores (tactic-only greedy) are not comparable with it.
+EVAL_METRIC_VERSION = "searched-proof-rate-v2"
+
+
+@dataclass(frozen=True)
+class EvaluationSettings:
+    """How evaluation searches the held-out pool; shared by every entry point."""
+
+    mode: str = "sample"
+    seed: int = 42
+    repeats: int = 1
+
+    def __post_init__(self) -> None:
+        if self.mode not in PROPOSAL_MODES:
+            raise ValueError(
+                f"eval_proposal_mode must be one of {list(PROPOSAL_MODES)}, got {self.mode!r}"
+            )
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
+            raise ValueError(f"eval_seed must be a non-negative integer, got {self.seed!r}")
+        if isinstance(self.repeats, bool) or not isinstance(self.repeats, int) or self.repeats < 1:
+            raise ValueError(f"eval_repeats must be a positive integer, got {self.repeats!r}")
+
+    def proposals(self, items: list[TheoremItem], repeat: int) -> list[ProposalSpec]:
+        return proposal_specs(
+            [item.seed for item in items],
+            mode=self.mode,
+            namespace="eval",
+            base_seed=self.seed,
+            pass_index=repeat,
+        )
+
+    def contract(self) -> dict[str, object]:
+        """What a stored best proof rate was measured under."""
+        return {
+            "metric": EVAL_METRIC_VERSION,
+            "mode": self.mode,
+            "seed": self.seed,
+            "repeats": self.repeats,
+            "seed_derivation": SEED_DERIVATION_VERSION,
+        }
+
+
+def training_proposals(cfg: RLTrainingConfig, batch: list[TheoremItem], round_idx: int) -> list[ProposalSpec]:
+    """Sampled proposals for one collection round, seeded by round and input."""
+    return proposal_specs(
+        [item.seed for item in batch],
+        mode="sample",
+        namespace="train",
+        base_seed=cfg.seed,
+        pass_index=round_idx,
+    )
+
+
+def apply_evaluation_overrides(
+    cfg: RLTrainingConfig,
+    *,
+    mode: str | None = None,
+    seed: int | None = None,
+    repeats: int | None = None,
+) -> EvaluationSettings:
+    """Apply command-line evaluation overrides to ``cfg`` and validate them.
+
+    They change the config itself, so periodic evaluation during training
+    uses the same settings as ``--eval-only``.
+    """
+    if mode is not None:
+        cfg.eval_proposal_mode = mode
+    if seed is not None:
+        cfg.eval_seed = seed
+    if repeats is not None:
+        cfg.eval_repeats = repeats
+    return cfg.evaluation_settings()
+
+
+def subset_identity(items: list[TheoremItem]) -> str:
+    """Digest of an ordered list of inputs, by their stable identities."""
+    body = json.dumps([input_identity(item.seed) for item in items])
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +460,8 @@ class TheoremPool:
 
     def __init__(self, items: list[TheoremItem], *, eval_pool_size: int, curriculum_size: int, seed: int) -> None:
         self._rng = random.Random(seed)
+        # Set by build_theorem_pool: the admission report this pool came from.
+        self.admission: dict[str, object] | None = None
         items = sorted(items, key=lambda t: t.size)
         # Deterministic held-out split: every k-th item of the size-sorted pool, so the
         # eval set spans all difficulty levels and is identical across runs/resumes
@@ -373,12 +545,19 @@ async def build_theorem_pool(
             f"Pool is undersized: {len(items)} validated seeds of the "
             f"{cfg.max_pool_size} requested."
         )
-    return TheoremPool(
+    pool = TheoremPool(
         items,
         eval_pool_size=cfg.eval_pool_size,
         curriculum_size=cfg.curriculum_start_size,
         seed=cfg.seed,
     )
+    report_body = json.dumps(report.as_dict(), sort_keys=True, ensure_ascii=False, default=str)
+    pool.admission = {
+        "source": report.source,
+        "admitted": report.admitted,
+        "report_sha256": hashlib.sha256(report_body.encode("utf-8")).hexdigest(),
+    }
+    return pool
 
 
 def _describe(item: TheoremItem) -> str:
@@ -417,11 +596,13 @@ async def collect_round(
     batch: list[TheoremItem],
     *,
     timeout_s: float,
-    greedy: bool = False,
+    proposals: list[ProposalSpec],
     reasoner_pool: LiveReasonerPool | None = None,
     model_generation: int = 0,
 ) -> tuple[list[RLSearchResult], dict[str, float]]:
     """Collect with per-theorem fault isolation.
+
+    ``proposals[i]`` is the proposal mode and seed of ``batch[i]``'s search.
 
     A pool uses isolated reasoners and Pantograph clients concurrently and
     replaces a worker whose client failed. The single-reasoner path remains
@@ -439,21 +620,25 @@ async def collect_round(
         collected = await reasoner_pool.collect_round(
             batch,
             timeout_s=timeout_s,
-            greedy=greedy,
+            proposals=proposals,
             model_generation=model_generation,
         )
-        return collected.results, collected.stats
+        return collected.results, {**collected.stats, **search_counters(collected.results)}
     results: list[RLSearchResult] = []
     solved = 0
     failed = 0
     cooperative_deadlines = 0
     hard_timeouts = 0
     inadmissible = 0
-    for item in batch:
+    if len(proposals) != len(batch):
+        raise ValueError(
+            f"Expected one proposal per item: {len(proposals)} for {len(batch)} items."
+        )
+    for item, proposal in zip(batch, proposals):
         try:
             deadline = time.monotonic() + timeout_s
             async with asyncio.timeout(timeout_s * 1.25):
-                result = await reasoner.prove(item.seed, greedy=greedy, deadline=deadline)
+                result = await reasoner.prove(item.seed, proposal=proposal, deadline=deadline)
             results.append(result)
             if result.graph.is_solved():
                 solved += 1
@@ -486,13 +671,48 @@ async def collect_round(
         "searches_cooperative_deadline": float(cooperative_deadlines),
         "searches_hard_timed_out": float(hard_timeouts),
         "seeds_inadmissible": float(inadmissible),
+        **search_counters(results),
     }
     return results, stats
+
+
+def search_counters(results: list[RLSearchResult]) -> dict[str, float]:
+    """Proposal, widening and observation work summed over completed searches.
+
+    ``raw_draws`` counts every draw the searches made and ``settled_draws``
+    those with a checked outcome (the observations' multiplicities); draws of
+    an interrupted round are the difference. ``accepted_edges <=
+    distinct_commands <= raw_draws`` holds for each search.
+    """
+    totals: dict[str, float] = {
+        "proposal_rounds": 0.0,
+        "widening_rounds": 0.0,
+        "raw_draws": 0.0,
+        "distinct_commands": 0.0,
+        "accepted_edges": 0.0,
+        "rejected_commands": 0.0,
+        "cache_hits": 0.0,
+        "completed_simulations": 0.0,
+        "deferred_selections": 0.0,
+        "settled_draws": 0.0,
+        "observations": 0.0,
+    }
+    for result in results:
+        if result.graph is None:
+            continue
+        for key, value in result.graph.search_counters().items():
+            totals[key] = totals.get(key, 0.0) + value
+        totals["settled_draws"] += float(result.draws())
+        totals["observations"] += float(len(result.observations))
+    return totals
 
 
 # ---------------------------------------------------------------------------
 # Checkpointing / resume
 # ---------------------------------------------------------------------------
+
+# 4: per-search proposal seeds and the evaluation contract next to the best score.
+RL_TARGET_SCHEMA_VERSION = 4
 
 
 def save_checkpoint(
@@ -511,6 +731,7 @@ def save_checkpoint(
     tactic_vocab: dict[str, int],
     graph_representation: GraphRepresentationSpec,
     saved_search_settings: dict[str, object],
+    evaluation_contract: dict[str, object],
 ) -> None:
     """Write the resume state (Decision 1.4: optimizer-htps + queues included).
 
@@ -519,11 +740,12 @@ def save_checkpoint(
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     training_state = {
-        "rl_target_schema_version": 3,
+        "rl_target_schema_version": RL_TARGET_SCHEMA_VERSION,
         "optimizer_state_dict": optimizer.state_dict(),
         "round": round_idx,
         "curriculum_size": curriculum_size,
         "best_proof_rate": best_proof_rate,
+        "evaluation_contract": evaluation_contract,
         "onpolicy_steps": onpolicy_steps,
         "search_settings": saved_search_settings,
         "torch_rng_state": torch.get_rng_state(),
@@ -564,7 +786,7 @@ def save_checkpoint(
 
 
 # ---------------------------------------------------------------------------
-# Greedy evaluation
+# Evaluation
 # ---------------------------------------------------------------------------
 
 
@@ -572,38 +794,117 @@ async def evaluate_proof_rate(
     reasoner: RLHybridReasoner,
     eval_items: list[TheoremItem],
     *,
+    settings: EvaluationSettings,
     timeout_s: float = 60.0,
     reasoner_pool: LiveReasonerPool | None = None,
     model_generation: int = 0,
-) -> dict[str, float]:
-    """Greedy proof rate on the fixed held-out pool — the model-selection metric.
+) -> dict[str, Any]:
+    """Proof rate on the fixed held-out pool — the model-selection metric.
 
-    Greedy (argmax) actions measure the policy itself, not the sampler; the fixed
-    pool makes the number comparable across rounds. Training return is neither
-    (sampled policy, shifting curriculum window), which is why it does not pick
-    ``best.pt``.
+    Runs ``settings.repeats`` passes over ``eval_items``, each with seeds
+    derived from ``settings.seed``, the repeat and the input, so a pass is
+    reproducible and independent of the worker that ran each search. The
+    proof rate counts searched seeds only; inadmissible seeds are reported
+    separately. The model is only read: no optimizer runs and the global RNG
+    is not consumed. The fixed pool makes the number comparable across rounds,
+    but only between runs with the same ``settings.contract()``.
     """
+    if not eval_items:
+        raise ValueError("The evaluation subset is empty; set eval_pool_size > 0.")
     was_training = reasoner.model.training
     reasoner.model.eval()
+    repeats: list[dict[str, Any]] = []
     try:
-        _results, stats = await collect_round(
-            reasoner,
-            eval_items,
-            timeout_s=timeout_s,
-            greedy=True,
-            reasoner_pool=reasoner_pool,
-            model_generation=model_generation,
-        )
+        for repeat in range(settings.repeats):
+            proposals = settings.proposals(eval_items, repeat)
+            _results, stats = await collect_round(
+                reasoner,
+                eval_items,
+                timeout_s=timeout_s,
+                proposals=proposals,
+                reasoner_pool=reasoner_pool,
+                model_generation=model_generation,
+            )
+            seeds = json.dumps([proposal.seed for proposal in proposals])
+            repeats.append(
+                {
+                    "repeat": repeat,
+                    "proof_rate": stats["solved"] / (_searched(stats) or 1.0),
+                    "searched": _searched(stats),
+                    "proposal_seeds_sha256": hashlib.sha256(seeds.encode("utf-8")).hexdigest(),
+                    **stats,
+                }
+            )
     finally:
         if was_training:
             reasoner.model.train()
+
+    def total(key: str) -> float:
+        return sum(float(row.get(key, 0.0)) for row in repeats)
+
+    searched = total("searched")
     return {
-        "proof_rate": stats["solved"] / (_searched(stats) or 1.0),
-        "solved": stats["solved"],
-        "attempted": stats["attempted"],
-        "searches_failed": stats["searches_failed"],
-        "seeds_inadmissible": stats.get("seeds_inadmissible", 0.0),
+        "proof_rate": total("solved") / (searched or 1.0),
+        "solved": total("solved"),
+        "attempted": total("attempted"),
+        "searched": searched,
+        "searches_failed": total("searches_failed"),
+        "searches_hard_timed_out": total("searches_hard_timed_out"),
+        "searches_cooperative_deadline": total("searches_cooperative_deadline"),
+        "seeds_inadmissible": total("seeds_inadmissible"),
+        **{key: total(key) for key in search_counters([])},
+        "evaluation": settings.contract(),
+        "eval_subset_size": len(eval_items),
+        "eval_subset_sha256": subset_identity(eval_items),
+        "repeats": repeats,
     }
+
+
+def evaluation_report(
+    cfg: RLTrainingConfig,
+    stats: dict[str, Any],
+    *,
+    pool: "TheoremPool",
+    checkpoint: str | None,
+    model_generation: int,
+) -> dict[str, Any]:
+    """The evaluation result with the settings and inputs it was measured on."""
+    return {
+        "kind": "rl-evaluation-report",
+        "result": stats,
+        "checkpoint": checkpoint,
+        "model_generation": model_generation,
+        "search_settings": search_settings(cfg),
+        "budgets": {
+            "theorem_timeout_s": cfg.theorem_timeout_s,
+            "top_k_tactics": cfg.top_k_tactics,
+            "max_depth": cfg.max_depth,
+            "max_nodes": cfg.max_nodes,
+        },
+        "dataset": {
+            "data_source": cfg.data_source,
+            "dataset_name": cfg.dataset_name,
+            "dataset_revision": cfg.dataset_revision,
+            "split": cfg.leandojo_split,
+            "theorem_file": str(cfg.theorem_file) if cfg.theorem_file else None,
+            "eval_pool_size": cfg.eval_pool_size,
+        },
+        "admission": pool.admission,
+        "workers": cfg.collection_workers,
+        "reproducibility": (
+            "Proposal draws repeat for the same seeds, model, inputs and device; "
+            "Lean and wall-clock timing (deadlines, timeouts) are not reproducible."
+        ),
+    }
+
+
+def write_evaluation_report(report: dict[str, Any], path: Path) -> Path:
+    """Write ``report`` to a new file; an existing report is never replaced."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "x", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -643,18 +944,11 @@ async def _create_live_reasoner_pool(
             tactic_vocab=tactic_vocab,
             executor=PantographExecutor(server),
             device=device,
-            top_k_tactics=cfg.top_k_tactics,
-            max_depth=cfg.max_depth,
-            max_nodes=cfg.max_nodes,
-            selection_policy=cfg.selection_policy,
-            num_simulations=cfg.num_simulations,
-            sim_batch_size=cfg.sim_batch_size,
-            puct_c=cfg.puct_c,
-            use_pln=cfg.use_pln,
+            **cfg.search_kwargs(),
         )
 
-    async def search_factory(reasoner, theorem, greedy, deadline):
-        return await reasoner.prove(theorem.seed, greedy=greedy, deadline=deadline)
+    async def search_factory(reasoner, theorem, proposal, deadline):
+        return await reasoner.prove(theorem.seed, proposal=proposal, deadline=deadline)
 
     return await LiveReasonerPool.create(
         model=model,
@@ -757,16 +1051,24 @@ async def _run_rl_training_impl(
         if not last_path.exists():
             raise FileNotFoundError(f"Resume requested but {last_path} does not exist")
         state = torch.load(last_path, map_location=device, weights_only=False)
-        if state.get("rl_target_schema_version") != 3:
+        if state.get("rl_target_schema_version") != RL_TARGET_SCHEMA_VERSION:
             raise ValueError(
-                "This checkpoint lacks canonical model-S-expression replay queues and "
-                "cannot be resumed exactly. Use its model checkpoint as a warm start "
-                "for a fresh RL run."
+                f"This checkpoint has RL schema {state.get('rl_target_schema_version')!r}, "
+                f"not {RL_TARGET_SCHEMA_VERSION}: it predates per-search proposal seeds "
+                "and the stored evaluation contract, so it cannot be resumed exactly. "
+                "Use its model checkpoint as a warm start for a fresh RL run."
             )
         if state.get("search_settings") != search_settings(cfg):
             raise ValueError(
                 "Resume configuration changes the saved search semantics. Start a fresh "
-                "RL run when changing PUCT, depth, node, tactic, PLN, or visit settings."
+                "RL run when changing PUCT, depth, node, tactic, PLN, visit, or "
+                "proposal-seed settings."
+            )
+        if state.get("evaluation_contract") != cfg.evaluation_settings().contract():
+            raise ValueError(
+                "Resume configuration changes how the saved best proof rate was "
+                "measured (evaluation mode, seed, repeats, or metric version), so it "
+                "cannot stay the incumbent. Start a fresh RL run from the model weights."
             )
         resumed_model, _resume_manifest, resume_spec = build_model_from_checkpoint(
             state,
@@ -887,6 +1189,7 @@ async def _run_rl_training_impl(
             reasoner,
             batch,
             timeout_s=cfg.theorem_timeout_s,
+            proposals=training_proposals(cfg, batch, round_idx),
             reasoner_pool=live_reasoner_pool,
             model_generation=model_generation,
         )
@@ -937,7 +1240,7 @@ async def _run_rl_training_impl(
             )
             mined = extract_minimal_hypertree(
                 result.graph,
-                result.edge_actions,
+                result.observations,
                 mine_all_solved_nodes=cfg.mine_all_solved_nodes,
             )
             imitation_mined += len(mined)
@@ -1075,6 +1378,7 @@ async def _run_rl_training_impl(
                 tactic_vocab=tactic_vocab,
                 graph_representation=metadata.graph_representation,
                 saved_search_settings=search_settings(cfg),
+                evaluation_contract=cfg.evaluation_settings().contract(),
             )
 
         if cfg.eval_every > 0 and (round_idx + 1) % cfg.eval_every == 0 and pool.eval_items:
@@ -1083,11 +1387,15 @@ async def _run_rl_training_impl(
             eval_stats = await evaluate_proof_rate(
                 reasoner,
                 pool.eval_items,
+                settings=cfg.evaluation_settings(),
                 timeout_s=cfg.theorem_timeout_s,
                 reasoner_pool=live_reasoner_pool,
                 model_generation=model_generation,
             )
-            console_print(f"  Eval: proof rate {eval_stats['proof_rate']:.3f}")
+            console_print(
+                f"  Eval ({cfg.eval_proposal_mode}, {cfg.eval_repeats} repeat(s)): "
+                f"proof rate {eval_stats['proof_rate']:.3f}"
+            )
             with open(metrics_path, "a") as f:
                 f.write(json.dumps({"round": round_idx, "eval": eval_stats}) + "\n")
             if eval_stats["proof_rate"] > best_proof_rate:
@@ -1103,6 +1411,7 @@ async def _run_rl_training_impl(
                     tactic_vocab=tactic_vocab,
                     graph_representation=metadata.graph_representation,
                     saved_search_settings=search_settings(cfg),
+                    evaluation_contract=cfg.evaluation_settings().contract(),
                 )
                 console_print(f"  New best proof rate {best_proof_rate:.3f} → best.pt")
 
@@ -1118,6 +1427,7 @@ async def _run_rl_training_impl(
         tactic_vocab=tactic_vocab,
         graph_representation=metadata.graph_representation,
         saved_search_settings=search_settings(cfg),
+        evaluation_contract=cfg.evaluation_settings().contract(),
     )
     return last_metrics
 
@@ -1145,9 +1455,23 @@ def driver_main(argv: list[str] | None = None) -> int:
         help="Dataset commit to read (default: the pinned DATASET_REVISION)",
     )
     parser.add_argument("--resume", type=str, default=None, help="Run directory to resume (contains last.pt)")
-    parser.add_argument("--eval-only", action="store_true", help="Only run the greedy proof-rate evaluation")
+    parser.add_argument("--eval-only", action="store_true", help="Only run the proof-rate evaluation")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Checkpoint override for --eval-only (defaults to warmstart_checkpoint)")
+    parser.add_argument(
+        "--eval-proposal-mode",
+        choices=PROPOSAL_MODES,
+        default=None,
+        help="Evaluation proposals, for --eval-only and periodic evaluation: 'sample' "
+        "draws tactics and arguments, 'greedy' takes the step-wise argmax of both "
+        "(default: eval_proposal_mode from the config)",
+    )
+    parser.add_argument("--eval-seed", type=int, default=None,
+                        help="Base seed of the evaluation searches (default: eval_seed)")
+    parser.add_argument("--eval-repeats", type=int, default=None,
+                        help="Seeded passes over the evaluation pool (default: eval_repeats)")
+    parser.add_argument("--eval-report", type=str, default=None,
+                        help="New JSON file for the --eval-only report (never overwritten)")
     args = parser.parse_args(argv)
 
     cfg = RLTrainingConfig.from_json(args.config)
@@ -1155,6 +1479,14 @@ def driver_main(argv: list[str] | None = None) -> int:
         cfg.dataset_name = args.dataset_name
     if args.dataset_revision:
         cfg.dataset_revision = args.dataset_revision
+    settings = apply_evaluation_overrides(
+        cfg, mode=args.eval_proposal_mode, seed=args.eval_seed, repeats=args.eval_repeats
+    )
+    if args.eval_report and not args.eval_only:
+        parser.error("--eval-report applies to --eval-only; periodic results go to metrics.jsonl")
+    report_path = Path(args.eval_report) if args.eval_report else None
+    if report_path is not None and report_path.exists():
+        parser.error(f"--eval-report {report_path} already exists; reports are never overwritten")
     if args.eval_only:
         if args.checkpoint:
             cfg.warmstart_checkpoint = Path(args.checkpoint)
@@ -1201,14 +1533,31 @@ def driver_main(argv: list[str] | None = None) -> int:
                 stats = await evaluate_proof_rate(
                     live_pool.primary,
                     theorem_pool.eval_items,
+                    settings=settings,
                     timeout_s=cfg.theorem_timeout_s,
                     reasoner_pool=live_pool,
                     model_generation=0,
                 )
+                for row in stats["repeats"]:
+                    console_print(
+                        f"  repeat {row['repeat']}: proof rate {row['proof_rate']:.3f} "
+                        f"({row['solved']:.0f}/{row['searched']:.0f} searched)"
+                    )
                 console_print(
-                    f"Proof rate: {stats['proof_rate']:.3f} "
-                    f"({stats['solved']:.0f}/{stats['attempted']:.0f})"
+                    f"Proof rate ({settings.mode}, {settings.repeats} repeat(s)): "
+                    f"{stats['proof_rate']:.3f} "
+                    f"({stats['solved']:.0f}/{stats['searched']:.0f} searched, "
+                    f"{stats['seeds_inadmissible']:.0f} inadmissible)"
                 )
+                if report_path is not None:
+                    report = evaluation_report(
+                        cfg,
+                        stats,
+                        pool=theorem_pool,
+                        checkpoint=str(cfg.warmstart_checkpoint),
+                        model_generation=0,
+                    )
+                    console_print(f"Evaluation report: {write_evaluation_report(report, report_path)}")
 
         asyncio.run(_eval())
         return 0

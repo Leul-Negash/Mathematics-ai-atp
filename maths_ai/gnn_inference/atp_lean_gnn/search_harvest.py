@@ -8,7 +8,7 @@ never converted into a numeric training label.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Sequence
 
 from maths_ai.data_models.proof_components import Goal, TacticCandidate
 from maths_ai.hybrid_reasoner.hypergraph import (
@@ -26,7 +26,7 @@ from .pln_reward import RewardConfig, edge_shaped_reward
 from .graph import dag_fingerprint, model_goal_to_dag
 
 if TYPE_CHECKING:
-    from .pln_rl_training import EdgeAction
+    from .pln_rl_training import EdgeAction, PolicyObservation
 
 
 @dataclass(frozen=True)
@@ -240,11 +240,13 @@ def compute_backups(
                         outcome for outcome in outcomes
                         if outcome.validity == BackupValidity.VALID
                     ]
-                    result = (
-                        max(valid, key=lambda outcome: float(outcome.value))
-                        if valid
-                        else BackupValue.unknown()
-                    )
+                    best = max(valid, key=lambda outcome: float(outcome.value)) if valid else None
+                    # An open proposal source can still add an alternative, so
+                    # its known edges failing is not a complete failure.
+                    if best is None or (not node.exhausted and best.value == 0.0):
+                        result = BackupValue.unknown()
+                    else:
+                        result = best
 
             if result.validity == BackupValidity.UNKNOWN and visit_threshold is not None:
                 soft = _soft_target(graph, node_id, visit_threshold)
@@ -316,11 +318,19 @@ def extract_critic_samples(
 
 def extract_minimal_hypertree(
     graph: ProofHypergraph,
-    edge_actions: Mapping[int, "EdgeAction"],
+    observations: Sequence["PolicyObservation"],
     *,
     mine_all_solved_nodes: bool = True,
 ) -> list[TacticImitationSample]:
-    """Mine policy actions only from Lean-confirmed minimal proof hypertrees."""
+    """Mine policy actions only from Lean-confirmed minimal proof hypertrees.
+
+    Each selected solved edge gives one sample: its first accepted
+    observation (the raw action that executed it), not one per alias or draw.
+    """
+    edge_actions: dict[int, "EdgeAction"] = {}
+    for observation in observations:
+        if observation.edge_id is not None:
+            edge_actions.setdefault(observation.edge_id, observation.action)
 
     steps_memo: dict[int, float] = {}
     in_progress: set[int] = set()

@@ -125,7 +125,8 @@ def test_hard_timeout_mid_request_retires_and_reaps_the_worker(setup, monkeypatc
         first = pool.workers[0].server
         async with pool:
             result = await pool.collect_round(
-                ["slow", "fast"], timeout_s=0.08, model_generation=0
+                ["slow", "fast"], timeout_s=0.08, model_generation=0,
+                proposals=[None] * 2,
             )
             assert result.records[0].outcome == "hard_timeout"
             assert [item.theorem for item in result.results] == ["fast"]
@@ -146,7 +147,7 @@ def test_cancelled_round_mid_request_closes_and_reaps(setup, monkeypatch):  # no
         pool = await _pool(env)
         async with pool:
             task = asyncio.create_task(
-                pool.collect_round(["slow", "slow"], timeout_s=5, model_generation=0)
+                pool.collect_round(["slow", "slow"], timeout_s=5, model_generation=0, proposals=[None] * 2)
             )
             await asyncio.sleep(0.1)
             task.cancel()
@@ -187,7 +188,8 @@ def test_shutdown_racing_worker_replacement_reaps_every_child(setup):  # noqa: F
         async def collect():
             async with pool:
                 await pool.collect_round(
-                    ["crash", "fast"], timeout_s=5, model_generation=0
+                    ["crash", "fast"], timeout_s=5, model_generation=0,
+                    proposals=[None] * 2,
                 )
 
         task = asyncio.create_task(collect())

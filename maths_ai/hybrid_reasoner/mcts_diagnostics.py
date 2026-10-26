@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 import subprocess
 
@@ -23,13 +24,14 @@ from pantograph_async.diagnostics import distribution_source
 from pantograph_async.probes import require
 
 from maths_ai.core.git_worktree import dirty_provenance, read_status
-from maths_ai.data_models.proof_components import TacticCandidate
+from maths_ai.data_models.proof_components import ProposedAction, TacticCandidate
 from maths_ai.lean_replay import seed_from_text
 
 from .hypergraph import EdgeStatus, NodeStatus, SearchEndReason
 from .joint_inference import HybridReasoner, PantographExecutor
 from .pantograph_diagnostics import verify_live_application
 from .pantograph_model_sexpr import create_model_sexpr_client, materialize_seed
+from .proposal import ProposalSpec
 
 
 # The theorems the live checks search, as the typed seeds search accepts.
@@ -111,15 +113,117 @@ class ScriptedSearchReasoner(HybridReasoner):
     def _build_gnn_engine(self, **_kwargs):
         return None
 
-    def predict_next_tactics_for_nodes(self, nodes):
+    def predict_next_tactics_for_nodes(self, nodes, draws=None):
         self.proposal_batches.append([node.id for node in nodes])
         return [
-            [
-                TacticCandidate(tactic_name=tactic, arguments=[], probability=probability)
-                for tactic, probability in self.script.get(node.goal.expression, ())
-            ]
+            [scripted_action(tactic, probability) for tactic, probability in self.script.get(node.goal.expression, ())]
             for node in nodes
         ]
+
+
+def scripted_action(tactic: str, probability: float) -> ProposedAction:
+    """A scripted zero-argument action whose probability is the complete action's."""
+    return ProposedAction(
+        candidate=TacticCandidate(tactic_name=tactic, arguments=[], probability=probability),
+        raw_action_id=("scripted", tactic),
+        log_prior=math.log(probability),
+        provider="scripted-v1",
+    )
+
+
+# Widening on the real REPL: the root's first round has only a rejected
+# command; its second round draws that command again (served from the node's
+# cache) and the conjunction's constructor, whose two subgoals then close.
+WIDENING_ROUNDS = {
+    "True ∧ True": (
+        (("exact False.elim", 0.6),),
+        (("exact False.elim", 0.6), ("constructor", 0.4)),
+    ),
+    "True": ((("trivial", 1.0),),),
+}
+WIDENING_SETTINGS = {
+    "selection_policy": "puct",
+    "num_simulations": 12,
+    "sim_batch_size": 1,
+    "max_depth": 4,
+    "max_nodes": 20,
+    "top_k_tactics": 2,
+    "widening_initial_actions": 1,
+    "widening_coefficient": 2.0,
+}
+
+
+class WideningScriptedReasoner(ScriptedSearchReasoner):
+    """Scripted rounds per goal text, served the way a sampling provider widens."""
+
+    def __init__(self, server: PantographClient, rounds, **search) -> None:
+        self.rounds = rounds
+        self.served: dict[int, int] = {}
+        super().__init__(server, {}, **search)
+
+    def _proposal_source_is_finite(self) -> bool:
+        return False
+
+    def predict_next_tactics_for_nodes(self, nodes, draws=None):
+        self.proposal_batches.append([node.id for node in nodes])
+        batches = []
+        for node, count in zip(nodes, draws or [self.top_k_tactics] * len(nodes)):
+            script = self.rounds.get(node.goal.expression, ())
+            index = self.served.get(node.id, 0)
+            self.served[node.id] = index + 1
+            entries = script[min(index, len(script) - 1)] if script else ()
+            batches.append([scripted_action(tactic, p) for tactic, p in entries[:count]])
+        return batches
+
+
+class _CountingExecutor:
+    """The real executor, recording every command it sends to Lean."""
+
+    def __init__(self, inner: PantographExecutor) -> None:
+        self.inner = inner
+        self.server = inner.server
+        self.commands: list[str] = []
+
+    async def apply(self, scope, state, tactic):
+        self.commands.append(" ".join([tactic.tactic_name, *tactic.arguments]))
+        return await self.inner.apply(scope, state, tactic)
+
+
+async def verify_widening(client: PantographClient) -> list[str]:
+    """A later round finds the action the first lacked, on the real REPL."""
+    baseline = (await client.stat()).n_goals
+    reasoner = WideningScriptedReasoner(client, WIDENING_ROUNDS, **WIDENING_SETTINGS)
+    executor = _CountingExecutor(reasoner.executor)
+    reasoner.executor = executor
+    graph = await reasoner.prove(CONJUNCTION)
+    require((await client.stat()).n_goals == baseline, "Widening search leaked states.")
+    require(graph.is_solved(), "Widening did not reach the conjunction's proof.")
+    root = graph.root
+    require(root.proposal_rounds >= 2, "The root was not widened.")
+    require(
+        root.command_outcomes.get(("exact False.elim", ())) is None
+        and ("exact False.elim", ()) in root.command_outcomes,
+        "The rejected command has no checked rejection on the root.",
+    )
+    require(
+        executor.commands.count("exact False.elim") == 1,
+        "A rejected command ran in Lean twice at one node.",
+    )
+    (edge,) = (graph.edges[eid] for eid in root.outgoing_edge_ids)
+    require(edge.tactic.tactic_name == "constructor", "The widened edge is not the constructor.")
+    require(len(edge.child_ids) == 2, "The constructor's AND obligations were not both kept.")
+    require(
+        abs(edge.log_mass - math.log(0.4)) < 1e-9,
+        "The constructor's prior is not its scripted complete-action probability.",
+    )
+    priors = graph.puct_priors(root.id)
+    require(abs(sum(priors.values()) - 1.0) < 1e-9, "Root priors do not sum to one.")
+    return [
+        "widening-later-action-after-checked-rejection",
+        "widening-rejection-served-from-cache",
+        "widening-and-obligations-kept",
+        "widening-priors-normalized",
+    ]
 
 
 class _FirstBatchCutoff(ScriptedSearchReasoner):
@@ -262,7 +366,7 @@ async def verify_shared_device_workers(env: PantographEnv) -> list[str]:
     def reasoner_factory(_worker_id, _device, _model, server):
         return _puct_reasoner(server)
 
-    async def search_factory(reasoner, theorem, _greedy, deadline):
+    async def search_factory(reasoner, theorem, _proposal, deadline):
         return await reasoner.prove(theorem, deadline=deadline)
 
     pool = await LiveReasonerPool.create(
@@ -287,8 +391,9 @@ async def verify_shared_device_workers(env: PantographEnv) -> list[str]:
             "Workers on one device did not share the model replica.",
         )
         pool.assert_generation(0)
+        # Scripted reasoners propose no policy actions, so their proposals are unused.
         result = await pool.collect_round(
-            [CONJUNCTION] * 4, timeout_s=120, model_generation=0
+            [CONJUNCTION] * 4, timeout_s=120, model_generation=0, proposals=[None] * 4
         )
         require(result.stats["solved"] == 4, "Pool workers did not prove every theorem.")
         for client in clients:
@@ -370,10 +475,10 @@ async def verify_learning_round(client: PantographClient) -> dict:
             **PUCT_SETTINGS,
         )
         baseline = (await client.stat()).n_goals
-        result = await reasoner.prove(CONJUNCTION)
+        result = await reasoner.prove(CONJUNCTION, proposal=ProposalSpec(mode="sample", seed=0))
         require((await client.stat()).n_goals == baseline, "Learning search leaked states.")
         require(
-            bool(result.edge_actions or result.failure_actions),
+            bool(result.observations),
             "The learning search produced no on-policy actions.",
         )
         before = [parameter.detach().clone() for parameter in model.parameters()]
@@ -389,7 +494,7 @@ async def verify_learning_round(client: PantographClient) -> dict:
         )
         onpolicy_steps = int(metrics["onpolicy_optimizer_step"])
         critic_samples = extract_critic_samples(result.graph, visit_threshold=1)
-        imitation_samples = extract_minimal_hypertree(result.graph, result.edge_actions)
+        imitation_samples = extract_minimal_hypertree(result.graph, result.observations)
         htps_steps = 0
         if htps_enabled:
             htps = train_step_htps_style(
@@ -423,8 +528,9 @@ async def verify_learning_round(client: PantographClient) -> dict:
         )
         return {
             "solved": result.graph.is_solved(),
-            "edge_actions": len(result.edge_actions),
-            "failure_actions": len(result.failure_actions),
+            "accepted_edges": len(result.accepted_edge_ids()),
+            "observations": len(result.observations),
+            "draws": result.draws(),
             "imitation_samples": len(imitation_samples),
             "critic_samples": len(critic_samples),
             "onpolicy_optimizer_steps": onpolicy_steps,
@@ -519,6 +625,7 @@ async def verify_live_mcts(
     try:
         initial = (await client.stat()).n_goals
         checks = await verify_mcts_search(client, searches=searches)
+        checks += await verify_widening(client)
         learning = await verify_learning_round(client)
         final = (await client.stat()).n_goals
         if final != initial:

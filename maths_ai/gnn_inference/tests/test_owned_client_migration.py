@@ -172,6 +172,9 @@ def test_dependency_is_the_pinned_client_and_not_pypantograph():
 
 MANIFEST = Path(__file__).parent / "fixtures/pantograph/mcts_owned_client/source_manifest.json"
 PORT_MANIFEST = Path(__file__).parent / "fixtures/dataset_replay/mcts_port/source_manifest.json"
+WIDENING_MANIFEST = (
+    Path(__file__).parent / "fixtures/pantograph/mcts_widening_evaluation/source_manifest.json"
+)
 
 
 def test_port_sources_match_the_recorded_lineage_and_current_adaptations():
@@ -199,6 +202,13 @@ def test_port_sources_match_the_recorded_lineage_and_current_adaptations():
     assert port["target_base_commit"] == "61f6d384730fca3dd7a56918377af4efb2c912cc"
     assert port["application_source_commit"] == "54d7cefe04aed980734798f06528ed80c71b81ac"
     for entry in port["sources"]:
+        if entry["path"] in expected:
+            assert entry["target_base_sha256"] == expected[entry["path"]], entry["path"]
+        expected[entry["path"]] = entry["sha256"]
+    # The widening and evaluation work is the next link, on top of PR #61's merge.
+    widening = json.loads(WIDENING_MANIFEST.read_text())
+    assert widening["target_base_commit"] == "dd6eedc100321af5d8c39a97abfec4a7addf8fb7"
+    for entry in widening["sources"]:
         if entry["path"] in expected:
             assert entry["target_base_sha256"] == expected[entry["path"]], entry["path"]
         expected[entry["path"]] = entry["sha256"]

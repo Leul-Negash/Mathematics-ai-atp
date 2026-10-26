@@ -204,27 +204,48 @@ companion transition-validation contract, including sorry/unsafe rejection.
 Graph-based success is the implemented result. Separately replayed subgoal
 closures do not assemble and kernel-check a complete theorem proof term.
 
-### Action sampling and storage
+### Action proposal and storage
 
-Training proposal calls `model.act` with `greedy=False` under `model.eval()` and
-`torch.no_grad()`. Each call samples a tactic and then its arguments. The
-configured `top_k_tactics` is a count of independent draws in this path, not
+Every search takes a `ProposalSpec` (`hybrid_reasoner/proposal.py`): a mode,
+`sample` or `greedy`, and a seed. The reasoner seeds its own `torch.Generator`
+from it on the model's device, so a search never draws from the global Torch
+RNG. Training derives seeds from `cfg.seed`, the round and the input's replay
+fingerprint; evaluation from `eval_seed`, the repeat and the input. Neither
+depends on which worker ran the search. Draws repeat for a fixed seed, model,
+input and device; equality across devices is not promised.
+
+A proposal round calls `model.propose_actions` under `model.eval()` and
+`torch.no_grad()`: it encodes each state once and draws exactly the requested
+number of actions per state, in row-major order. Each action's arguments are
+chosen against its state's cached node embeddings, conditioned on its own
+tactic and earlier arguments. In `sample` mode it draws a tactic and then each
+argument; in `greedy` mode it takes the argmax of the tactic and then of each
+argument step, given the arguments before it.
+Greedy is step-wise, not a search for the most probable argument sequence. A
+multi-graph batch runs as many pointer steps as its largest arity, and each
+row keeps only the steps its own tactic owns (`ActionSample.arities`). The
+configured `top_k_tactics` is the number of draws in one proposal round, not
 deterministic top-k enumeration.
 
-Identical decoded actions are deduplicated for Lean execution. Their
-`EdgeAction.multiplicity` preserves how many draws produced the action. Stored
-records contain tactic IDs, argument indices, multiplicity, and a graph
-fingerprint; no search-time autograd graph is retained.
+Each decoded draw becomes a `ProposedAction`: the command, the raw action
+(tactic id and argument indices) and its log-prior, the tactic's log-prob plus
+the log-probs of exactly its own argument steps. A draw whose tactic needs
+more arguments than the model chooses, or whose argument step had no legal
+premise, is unrenderable. Identical raw draws are proposed once and keep a
+multiplicity.
 
-Pending records are keyed by the exact search-node ID. Accepted actions move
-to `edge_actions[edge.id]` when linked. At ordinary expansion completion,
-remaining actions and unrenderable samples become actor-only `FailureRecord`
-rows. Elaboration failures and external aborts discard pending records rather
-than falsely labeling untested actions as Lean rejections.
+A command runs in Lean at most once per node: the node caches its checked
+outcome (`ProofNode.command_outcomes`), and a later raw action that renders
+the same command reuses it. Each raw action at a node becomes one
+`PolicyObservation` with its multiplicity across all proposal rounds, its
+outcome (accepted with an edge id, rejected, or unrenderable) and its prior.
+Two raw actions rendering one command stay separate observations with their
+own pointer tuples. Elaboration failures and external aborts discard the
+round's draws rather than labeling untested actions as Lean rejections.
 
-The result is `RLSearchResult(graph, edge_actions, failure_actions)`. Each
-reasoner resets its storage between searches. Edge IDs are local to one result;
-the trainer offsets them before joining multiple results into a round batch.
+The result is `RLSearchResult(graph, observations)`. Each reasoner resets its
+storage between searches. Edge IDs are local to one result; the trainer
+offsets them before joining multiple results into a round batch.
 
 ### Best-first search
 
@@ -256,7 +277,7 @@ search statistics, not gradients or model parameters:
 | `N_v(e)` | Completed traversals with valid numeric backups; `visit_stats.N_v` |
 | `W(e)` | Sum of valid backup values; `visit_stats.W` |
 | `VL(e)` | In-flight selection holds; `visit_stats.virtual_loss` |
-| `P(e)` | Tactic-family probability stored once as `visit_stats.prior_prob` |
+| `P(e)` | Effective prior from `ProofHypergraph.puct_priors`: the edge's observed complete-action mass, normalized over the parent's non-dead edges |
 | `Q(e)` | Valid-value mean `W(e) / N_v(e)`, or 0.5 when `N_v(e)=0`; `visit_stats.Q` |
 | `total_visits` | Sum of `N + virtual_loss` over the parent's non-dead edges |
 | `c` | Configured PUCT exploration constant, `puct_c` |
@@ -267,10 +288,46 @@ The score implemented by `puct_score` is:
 score(e) = Q(e) + c * P(e) * sqrt(total_visits) / (1 + N(e) + VL(e))
 ```
 
-The prior is the tactic-family probability, not the full joint
-tactic-and-arguments probability. The current `Q` property does not subtract
+Each edge keeps the immutable log-priors of the distinct raw actions observed
+to render its command; its mass is their log-sum-exp, so a repeated draw adds
+no mass and a new alias adds its own once. `puct_priors` normalizes the masses
+in log space over the node's non-dead edges on every selection, so an added
+edge, a new alias or a dead edge renormalizes the priors without changing any
+`N`, `N_v`, `W` or raw log-prior. This is mass over the raw actions the search
+observed, not the exact probability of a command over every possible alias.
+The tactic-family probability stays on `TacticCandidate.probability` for
+best-first and PLN ranking only. The current `Q` property does not subtract
 virtual loss from its mean. Virtual loss affects the exploration term through
-the sibling total and edge denominator.
+the sibling total and edge denominator, never the prior.
+
+### Progressive widening
+
+A PUCT node's proposal source stays open across rounds. Under
+`WideningPolicy` (`selection_policy.py`) a node with `v` completed simulation
+visits may have attempted
+
+```text
+capacity(v) = min(widening_max_actions,
+                  max(widening_initial_actions,
+                      ceil(widening_coefficient * (1 + v) ** widening_exponent)))
+```
+
+distinct commands, accepted or rejected, and at most `widening_max_draws` raw
+draws in total. Defaults are 4, 2.0, 0.5, 32 and 128; best-first rejects
+explicit values. Selection stops at a node that may propose (capacity and
+draws left, and its next round is due) and requests one proposal round there, sized before drawing as the minimum of
+`top_k_tactics`, the remaining capacity and the remaining draws. Rounds at one
+node are spaced by completed visits, with a gap that grows by one visit per
+round, so a node keeps retrying while capacity and draws remain, including
+after its capacity has saturated, and the visits in between descend through
+its existing edges. Otherwise selection takes an edge by PUCT; with no
+selectable edge the node is deferred. Every node a simulation selected gets
+one visit when it backs up, so a rejected or deferred node's capacity can
+grow. The generic engine is asked for each node's own count of ranked
+candidates. A node is dead only when its source is
+closed (`widening_bound`, a finite provider's single round, or a path limit)
+and no edge survives; a closed node is never reopened. The generic engine and
+the greedy actor are finite sources and close after one round.
 
 Selection increments virtual loss immediately. Later selections in the batch
 therefore see an altered exploration score. This encourages, but does not
@@ -349,7 +406,8 @@ inserted into these critic labels.
 | Evidence | Training treatment |
 | --- | --- |
 | Graph-solved node backed by checked transitions | State target 1, `LEAN_STATUS` |
-| Recognized exhausted search | State/path failure 0, `SEARCH_FAILURE` |
+| Closed proposal source with every alternative dead | State/path failure 0, `SEARCH_FAILURE` (a failure of this search configuration, not unprovability) |
+| Open proposal source whose known alternatives all failed | Unknown; the node could still widen |
 | Depth or cycle closure | Incoming path can fail; that node is omitted as a standalone fresh-root critic target |
 | Elaboration or external failure | Unknown; no fabricated critic zero |
 | Clean root node/simulation/deadline budget exhaustion | Root-only episode target 0, `ROOT_EPISODE` |
@@ -512,7 +570,9 @@ at `max_dead_rounds` rather than silently reporting productive training.
 Checkpoints include the model manifest and weights, vocabularies, graph
 representation, both optimizer states, round/curriculum state, on-policy step
 count, search settings, Torch RNG state, and serialized replay queues.
-`rl_target_schema_version=3` is required for resume. Replay rows retain canonical
+`rl_target_schema_version=4` is required for resume, and the saved search
+settings (including the widening bounds, proposal seed derivation and prior
+contract) and evaluation contract must match the configuration. Replay rows retain canonical
 goals and graph fingerprints; critic rows also retain target provenance.
 Older incompatible optimizer/replay schemas are not silently resumed.
 The saved Torch RNG state alone is not a claim that every asynchronous worker
@@ -520,15 +580,23 @@ schedule and every random source can be reproduced exactly.
 
 ## 10. Evaluation and inference
 
-`evaluate_proof_rate` runs held-out goals with `greedy=True`, without an
-optimizer update. It retains the reasoner's configured search mode and budgets.
-Proof rate, rather than sampled training return, determines `best.pt`.
+`evaluate_proof_rate` runs the held-out goals `eval_repeats` times with
+`eval_proposal_mode` (`sample` by default, or `greedy`) and seeds derived from
+`eval_seed`, without an optimizer update or a draw from the global RNG. It
+retains the reasoner's configured search mode and budgets. Standalone
+`--eval-only` and periodic evaluation read the same settings, and
+`--eval-proposal-mode`, `--eval-seed` and `--eval-repeats` override them for
+both. The result lists every repeat and the aggregate over searched seeds;
+inadmissible seeds are reported separately. `--eval-report` writes a new
+report with the search, prior, widening and dataset settings used. Proof rate,
+rather than sampled training return, determines `best.pt`, and the checkpoint
+stores the evaluation contract next to it: a resume with different
+evaluation settings is refused rather than compared with an incomparable score.
 
-Greedy proposal repeatedly takes argmax for the tactic and arguments. Repeated
-draws are deduplicated, so each expanded state generally has only one unique
-proposed action. Selecting PUCT does not create diverse alternatives in this
-evaluation path. The reported metric is greedy-proposal search success, not
-proof rate for a diverse MCTS candidate set or a model-only forward.
+Sampled evaluation proposes different tactic families and arguments at a
+state. Greedy evaluation is deterministic for both and closes each node after
+one round, so it measures the policy's step-wise argmax, not a diverse MCTS
+candidate set or a model-only forward.
 
 Inference with the trained actor and critic uses `RLHybridReasoner` with loaded
 weights and the matching graph/vocabulary contract. Its name does not force a

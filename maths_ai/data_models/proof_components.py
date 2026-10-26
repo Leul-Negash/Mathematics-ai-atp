@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from dataclasses import dataclass
 from typing import List, Optional
 
 from pydantic import BaseModel, Field, model_validator
@@ -235,11 +237,61 @@ class STV(BaseModel):
 
 
 class TacticCandidate(BaseModel):
-    """A single ranked tactic prediction from the GNN engine."""
+    """A single ranked tactic prediction from the GNN engine.
+
+    ``probability`` is the tactic family's confidence, used for best-first and
+    PLN ranking. It is not the search prior of the complete action; that is
+    ``ProposedAction.log_prior``.
+    """
 
     tactic_name: str
     arguments: List[str] = Field(default_factory=list)
     probability: float
+
+    @property
+    def command(self) -> tuple[str, tuple[str, ...]]:
+        """Execution identity: the tactic and arguments the executor renders."""
+        return (self.tactic_name, tuple(self.arguments))
+
+
+# Probabilities are compared in log space; a log-prior above this is not a
+# probability, whatever its rounding.
+LOG_PRIOR_TOLERANCE = 1e-6
+
+
+@dataclass(frozen=True)
+class ProposedAction:
+    """One complete action a search provider proposed, with its prior.
+
+    ``candidate`` is what the executor runs and best-first ranks.
+    ``raw_action_id`` identifies the provider's concrete choice (for the actor,
+    the tactic id and argument indices); two raw actions can render the same
+    command. ``log_prior`` is the provider's unrounded log-probability of that
+    raw action: for the actor, the tactic's log-prob plus the log-probs of
+    exactly the argument steps it owns. ``provider`` names the law that
+    produced it. There is no default: a search insertion without a prior is an
+    error, never a tactic-only fallback.
+    """
+
+    candidate: TacticCandidate
+    raw_action_id: tuple
+    log_prior: float
+    provider: str
+
+    def __post_init__(self) -> None:
+        value = self.log_prior
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"A log-prior must be a number, got {value!r}.")
+        if math.isnan(value) or value == math.inf or value > LOG_PRIOR_TOLERANCE:
+            raise ValueError(f"Invalid action log-prior {value!r} for {self.candidate.command}.")
+        if value == -math.inf:
+            raise ValueError(f"Action {self.candidate.command} has probability zero.")
+        if not self.provider:
+            raise ValueError("A proposed action must name its provider.")
+
+    @property
+    def command(self) -> tuple[str, tuple[str, ...]]:
+        return self.candidate.command
 
 
 class RankedSubgoal(BaseModel):

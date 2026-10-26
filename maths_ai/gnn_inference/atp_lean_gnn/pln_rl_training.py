@@ -17,7 +17,8 @@ S-expression path used by live collection and both optimizer paths.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import Enum
 from typing import Callable
 
 import torch
@@ -165,16 +166,45 @@ class EdgeAction:
             raise ValueError("EdgeAction requires a graph fingerprint.")
 
 
-@dataclass(frozen=True)
-class FailureRecord:
-    """A sampled action the executor rejected (or that never produced an edge).
+class ObservationOutcome(str, Enum):
+    ACCEPTED = "accepted"          # Lean accepted the command: it has an edge
+    REJECTED = "rejected"          # Lean checked the command and rejected it
+    UNRENDERABLE = "unrenderable"  # the draw could not become a command
 
-    There is no hyperedge and no successor state, so it enters the loss actor-only:
-    ``return = terminal_failure − step_penalty`` and NO critic regression target — the
-    *state* may still be provable via another tactic; only this *action* failed.
+
+@dataclass(frozen=True)
+class PolicyObservation:
+    """Every draw of one raw action at one search node, with its checked outcome.
+
+    ``action`` holds the raw tactic id and argument indices, and its
+    ``multiplicity`` is how many settled draws produced them, across every
+    proposal round at the node. Two raw actions that render the same command
+    share its one execution outcome but stay separate observations, so each
+    keeps its own pointer tuple and gradient. An accepted observation names
+    its ``edge_id``; its return comes from that edge. A rejected or
+    unrenderable one enters the loss actor-only, with
+    ``return = terminal_failure − step_penalty`` and no critic target: the
+    state may still be provable; only this action failed. ``log_prior`` is the
+    proposal-time prior (None when no complete action existed); it is a record,
+    and the loss recomputes log-probabilities instead of using it.
     """
+    node_id: int
     goal: Goal
     action: EdgeAction
+    outcome: ObservationOutcome
+    first_round: int
+    edge_id: int | None = None
+    log_prior: float | None = None
+    provider: str = ""
+
+    def __post_init__(self) -> None:
+        if (self.outcome == ObservationOutcome.ACCEPTED) != (self.edge_id is not None):
+            raise ValueError("Only an accepted observation has an edge.")
+        if self.outcome == ObservationOutcome.UNRENDERABLE:
+            if self.log_prior is not None:
+                raise ValueError("An unrenderable draw has no complete-action prior.")
+        elif self.log_prior is None:
+            raise ValueError("An executable observation needs its action prior.")
 
 
 def make_featurizer(node_vocab: dict[str, int]) -> Callable[[Goal], Data]:
@@ -343,8 +373,7 @@ def compute_onpolicy_loss(
     model: ActorCriticWithArgsClassifier,
     transitions: list[ActorTransition],
     critic_samples: list[CriticSample],
-    edge_actions: dict[int, EdgeAction],
-    failures: list[FailureRecord],
+    observations: list[PolicyObservation],
     featurize: Callable[[Goal], Data],
     *,
     device: torch.device | None = None,
@@ -363,13 +392,14 @@ def compute_onpolicy_loss(
     ``Σ_k log π(u_k|s,τ)`` with gradient under the current parameters. Exactly on-policy only
     when no optimizer step ran between collect and this call.
 
-    Per valid successful edge whose ``edge_id`` is in ``edge_actions``:
+    Per accepted observation whose edge has a harvested transition:
       ``L_actor = −m · (log π(τ) + w_arg · Σ_k log π(u_k)) · Â.detach()``
     with ``Â = return − V_pred(s)`` (normalized jointly with the failure rows) and
-    ``m`` the sample multiplicity (refinement 1). The critic regresses the AND-OR
+    ``m`` the observation's multiplicity (refinement 1). Each edge's transition is
+    harvested once and shared by every raw action observed on it. The AND-OR
     critic targets are supplied separately through ``critic_samples``.
 
-    Per ``FailureRecord`` (executor-rejected sample, refinement 4): the same actor term with
+    Per rejected or unrenderable observation (refinement 4): the same actor term with
     ``return = terminal_failure − step_penalty`` and NO critic target.
     """
     device = device or torch.device("cpu")
@@ -382,29 +412,29 @@ def compute_onpolicy_loss(
     returns: list[float] = []
     is_success: list[bool] = []
 
-    for t in transitions:
-        action = edge_actions.get(t.edge_id)
-        if action is None:
-            continue
-        data = featurize(t.goal)
-        _require_graph_fingerprint(data, action.graph_fingerprint, "Accepted action")
+    by_edge = {t.edge_id: t for t in transitions}
+    failure_return = reward_cfg.terminal_failure - reward_cfg.step_penalty
+    failures = 0
+    for observation in observations:
+        action = observation.action
+        if observation.outcome == ObservationOutcome.ACCEPTED:
+            t = by_edge.get(observation.edge_id)
+            if t is None:
+                continue  # the edge's return is unknown: no actor row
+            goal, return_, success = t.goal, t.return_, True
+        else:
+            goal, return_, success = observation.goal, failure_return, False
+            failures += 1
+        data = featurize(goal)
+        _require_graph_fingerprint(
+            data, action.graph_fingerprint, f"{observation.outcome.value.capitalize()} action"
+        )
         actor_datas.append(data)
         tactic_ids.append(action.tactic_id)
         arg_rows.append(action.arg_indices)
         multiplicities.append(float(action.multiplicity))
-        returns.append(t.return_)
-        is_success.append(True)
-
-    failure_return = reward_cfg.terminal_failure - reward_cfg.step_penalty
-    for f in failures:
-        data = featurize(f.goal)
-        _require_graph_fingerprint(data, f.action.graph_fingerprint, "Rejected action")
-        actor_datas.append(data)
-        tactic_ids.append(f.action.tactic_id)
-        arg_rows.append(f.action.arg_indices)
-        multiplicities.append(float(f.action.multiplicity))
-        returns.append(failure_return)
-        is_success.append(False)
+        returns.append(return_)
+        is_success.append(success)
 
     critic_datas = []
     for sample in critic_samples:
@@ -491,7 +521,7 @@ def compute_onpolicy_loss(
         "mean_return": float(returns_t.mean().item()) if returns_t.numel() else 0.0,
         "mean_arg_logp": float(arg_logp.mean().item()) if arg_logp.numel() else 0.0,
         "num_transitions": float(int(success_t.sum().item())),
-        "num_failures": float(len(failures)),
+        "num_failures": float(failures),
         "num_critic_samples": float(len(critic_samples)),
         "update_nodes": float(node_count),
         "update_edges": float(edge_count),
@@ -599,8 +629,9 @@ def train_step_onpolicy(
     """One gradient step over a batch of ``RLSearchResult`` s (rl_reasoner.py).
 
     Per result: harvest only the edges the policy produced
-    (``extract_transitions(edge_ids=…)``), then join each transition to its ``EdgeAction``
-    via ``edge_id`` and fold in the failure records. Exactly ONE ``optimizer.step()`` per
+    (``extract_transitions(edge_ids=…)``), once each, and join every accepted
+    observation to its edge's transition; rejected and unrenderable observations
+    enter as failure rows. Exactly ONE ``optimizer.step()`` per
     collect round — the recomputed log-probs are on-policy only while the parameters match
     those that sampled the actions.
     """
@@ -609,34 +640,35 @@ def train_step_onpolicy(
 
     transitions: list[ActorTransition] = []
     critic_samples: list[CriticSample] = []
-    edge_actions: dict[int, EdgeAction] = {}
-    failures: list[FailureRecord] = []
+    observations: list[PolicyObservation] = []
+    accepted_edges = 0
     # edge_id is unique only within one graph (refinement 6): re-key each result's
-    # actions by a per-batch offset before merging.
+    # edges by a per-batch offset before merging.
     offset = 0
     for result in results:
-        ts = extract_transitions(
-            result.graph, reward_cfg, harvest_cfg,
-            edge_ids=list(result.edge_actions.keys()),
-        )
+        edge_ids = sorted(result.accepted_edge_ids())
+        accepted_edges += len(edge_ids)
+        ts = extract_transitions(result.graph, reward_cfg, harvest_cfg, edge_ids=edge_ids)
         for t in ts:
             t.edge_id += offset
         transitions.extend(ts)
         critic_samples.extend(
             extract_critic_samples(result.graph, harvest_cfg=harvest_cfg)
         )
-        edge_actions.update({eid + offset: a for eid, a in result.edge_actions.items()})
-        failures.extend(result.failure_actions)
-        if result.edge_actions:
-            offset += max(result.edge_actions.keys()) + 1
+        observations.extend(
+            replace(o, edge_id=o.edge_id + offset) if o.edge_id is not None else o
+            for o in result.observations
+        )
+        if edge_ids:
+            offset += edge_ids[-1] + 1
 
-    unknown_edges_skipped = sum(len(result.edge_actions) for result in results) - len(transitions)
+    unknown_edges_skipped = accepted_edges - len(transitions)
     unknown_nodes_skipped = sum(len(result.graph.nodes) for result in results) - len(critic_samples)
 
     model.train()
     optimizer.zero_grad(set_to_none=True)
     loss_result = compute_onpolicy_loss(
-        model, transitions, critic_samples, edge_actions, failures, featurize,
+        model, transitions, critic_samples, observations, featurize,
         device=device, critic_weight=critic_weight, entropy_weight=entropy_weight,
         arg_loss_weight=arg_loss_weight, bc_weight=bc_weight, reward_cfg=reward_cfg,
         max_update_nodes=max_update_nodes, max_update_edges=max_update_edges,

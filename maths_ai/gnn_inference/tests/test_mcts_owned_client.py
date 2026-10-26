@@ -37,6 +37,7 @@ from maths_ai.hybrid_reasoner.mcts_diagnostics import (
     verify_learning_round,
     verify_mcts_search,
     verify_shared_device_workers,
+    verify_widening,
 )
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
 from pantograph_async import (
@@ -46,6 +47,23 @@ from pantograph_async import (
     PantographTacticRejected,
     PantographTransportError,
 )
+from maths_ai.hybrid_reasoner.proposal import ProposalSpec
+
+SAMPLE = ProposalSpec(mode="sample", seed=0)
+GREEDY = ProposalSpec(mode="greedy", seed=0)
+
+
+def accepted(result):
+    """Each accepted edge's first raw action."""
+    actions = {}
+    for observation in result.observations:
+        if observation.edge_id is not None:
+            actions.setdefault(observation.edge_id, observation.action)
+    return actions
+
+
+def failed(result):
+    return [o for o in result.observations if o.edge_id is None]
 
 
 TACTIC_VOCAB = {"trivial": 0, "intro": 1, "exact": 2}
@@ -123,7 +141,9 @@ class _RecordingClient:
 
     def __init__(self, outcomes=None):
         root = structured_goal(ROOT, HYPS)
-        self.goals = {"∀ (p : Prop), p → p": root}
+        # The seed's replay, and the canonical root's own replay for a later
+        # widening round at the root.
+        self.goals = {"∀ (p : Prop), p → p": root, root.replay_spec().expression: root}
         self.outcomes = outcomes or {}
         self.unelaborated: set[str] = set()
         self.protocol_failures: set[str] = set()
@@ -155,16 +175,16 @@ class _RecordingClient:
 class _NodeTrackingReasoner(RLHybridReasoner):
     """Tell the fake which graph node an application belongs to."""
 
-    async def _execute_and_link(self, graph, node, candidates, *, materialized):
+    async def _execute_and_link(self, graph, node, candidates, *, materialized, draws=None):
         self.server.current_node = node.id
-        self.executed.append((node.id, len(candidates)))
+        self.executed.append((node.id, len({candidate.command for candidate in candidates})))
         return await super()._execute_and_link(
-            graph, node, candidates, materialized=materialized
+            graph, node, candidates, materialized=materialized, draws=draws
         )
 
-    def predict_next_tactics_for_nodes(self, nodes):
+    def predict_next_tactics_for_nodes(self, nodes, draws=None):
         self.proposal_batches.append([node.id for node in nodes])
-        return super().predict_next_tactics_for_nodes(nodes)
+        return super().predict_next_tactics_for_nodes(nodes, draws)
 
 
 def _reasoner(client, *, top_k=2, seed=0, **search):
@@ -180,15 +200,29 @@ def _reasoner(client, *, top_k=2, seed=0, **search):
         max_depth=3,
         max_nodes=20,
         use_pln=False,
-        **search,
+        **_one_round_capacity(search, top_k),
     )
     reasoner.executed = []
     reasoner.proposal_batches = []
     return reasoner
 
 
+def _one_round_capacity(search, top_k):
+    """Under PUCT, let a node's first round use its whole widening capacity."""
+    if search.get("selection_policy") == "puct":
+        return {"widening_initial_actions": top_k, **search}
+    return search
+
+
 def _puct(**overrides):
-    settings = dict(selection_policy="puct", num_simulations=6, sim_batch_size=2)
+    """PUCT whose widening stays at the first round's capacity for these short
+    searches, so they test state ownership rather than widening."""
+    settings = dict(
+        selection_policy="puct",
+        num_simulations=6,
+        sim_batch_size=2,
+        widening_coefficient=0.5,
+    )
     settings.update(overrides)
     return settings
 
@@ -231,7 +265,7 @@ class SearchModeOwnershipTests(unittest.TestCase):
     def test_best_first_uses_scoped_execution(self):
         client = _RecordingClient({0: ["A", "B"]})
         reasoner = _reasoner(client)
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         self.assertTrue(result.graph.is_solved())
         self._assert_owned_execution(client, reasoner, result)
         for edge in result.graph.edges.values():
@@ -240,7 +274,7 @@ class SearchModeOwnershipTests(unittest.TestCase):
     def test_puct_uses_scoped_execution(self):
         client = _RecordingClient({0: ["A", "B"]})
         reasoner = _reasoner(client, **_puct())
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         self.assertTrue(result.graph.is_solved())
         self._assert_owned_execution(client, reasoner, result)
         self.assertTrue(any(e.visit_stats.N for e in result.graph.edges.values()))
@@ -250,7 +284,7 @@ class SearchModeOwnershipTests(unittest.TestCase):
     def test_multi_leaf_batch_keeps_each_leaf_state_until_all_alternatives_finish(self):
         client = _RecordingClient({0: ["A", "B"], "A": "reject"})
         reasoner = _reasoner(client, top_k=3, **_puct())
-        asyncio.run(reasoner.prove(SEED))
+        asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
 
         # One policy forward proposed several leaves together.
         self.assertTrue(any(len(batch) > 1 for batch in reasoner.proposal_batches))
@@ -291,7 +325,7 @@ class SearchModeOwnershipTests(unittest.TestCase):
 
         client.outcome_for = outcome_for
         reasoner = _reasoner(client, top_k=3, **_puct(num_simulations=4))
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = result.graph
 
         executed = dict(reasoner.executed)
@@ -302,27 +336,28 @@ class SearchModeOwnershipTests(unittest.TestCase):
         solved, rejected = first_copy[0], [n for n in copies if n != first_copy[0]]
         self.assertEqual(graph.nodes[solved].status, NodeStatus.SOLVED)
         for node_id in rejected:
-            self.assertEqual(graph.nodes[node_id].status, NodeStatus.DEAD)
+            # Every known alternative was rejected, but a sampled source can
+            # still widen, so the copy is not a complete failure.
+            self.assertEqual(graph.nodes[node_id].status, NodeStatus.OPEN)
+            self.assertFalse(graph.nodes[node_id].exhausted)
 
         # Accepted actions belong to the solved copy's edges (or the root's),
         # and sampled-action multiplicity is kept per node.
         solved_edges = set(graph.nodes[solved].outgoing_edge_ids)
         root_edges = set(graph.nodes[0].outgoing_edge_ids)
-        self.assertLessEqual(set(result.edge_actions), solved_edges | root_edges)
+        self.assertLessEqual(result.accepted_edge_ids(), solved_edges | root_edges)
         self.assertEqual(
             sum(
-                action.multiplicity
-                for edge_id, action in result.edge_actions.items()
-                if edge_id in solved_edges
+                o.action.multiplicity for o in result.observations if o.edge_id in solved_edges
             ),
             reasoner.top_k_tactics,
         )
         self.assertEqual(
-            sum(record.action.multiplicity for record in result.failure_actions),
+            sum(record.action.multiplicity for record in failed(result)),
             reasoner.top_k_tactics * len(rejected),
         )
         fingerprint = str(reasoner.dag_featurize(graph.nodes[solved].goal)[1].graph_fingerprint)
-        for record in result.failure_actions:
+        for record in failed(result):
             self.assertEqual(record.action.graph_fingerprint, fingerprint)
         _assert_scoped_cleanly(self, client)
 
@@ -330,11 +365,13 @@ class SearchModeOwnershipTests(unittest.TestCase):
 class _SkippingReasoner(_NodeTrackingReasoner):
     """Propose nothing for goal ``B``; sample normally for every other node."""
 
-    def predict_next_tactics_for_nodes(self, nodes):
+    def predict_next_tactics_for_nodes(self, nodes, draws=None):
         self.leaf_batches.append([node.id for node in nodes])
+        kept = [index for index, node in enumerate(nodes) if node.goal.expression != "B"]
         sampled = iter(
             super().predict_next_tactics_for_nodes(
-                [node for node in nodes if node.goal.expression != "B"]
+                [nodes[index] for index in kept],
+                None if draws is None else [draws[index] for index in kept],
             )
         )
         return [[] if node.goal.expression == "B" else next(sampled) for node in nodes]
@@ -356,21 +393,25 @@ class BatchCompositionTests(unittest.TestCase):
             max_depth=3,
             max_nodes=20,
             use_pln=False,
-            **_puct(num_simulations=4),
+            **_puct(num_simulations=4, widening_initial_actions=1),
         )
         reasoner.executed, reasoner.proposal_batches, reasoner.leaf_batches = [], [], []
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = result.graph
 
         a, b, c = (graph.nodes[child] for child in graph.edges[0].child_ids)
         # A failed to materialize, so the batch proposal held B and C only.
         self.assertIn({b.id, c.id}, [set(batch) for batch in reasoner.leaf_batches])
         self.assertEqual(a.closure_reason, NodeClosureReason.ELABORATION_ERROR)
-        self.assertEqual(b.closure_reason, NodeClosureReason.NO_CANDIDATES)
+        # A sampled round that proposed nothing does not prove the source
+        # empty: B stays open for a later round, with no failure recorded.
+        self.assertEqual(b.closure_reason, NodeClosureReason.NONE)
+        self.assertEqual(b.status, NodeStatus.OPEN)
+        self.assertGreaterEqual(b.proposal_rounds, 1)
         self.assertEqual(c.status, NodeStatus.SOLVED)
         # Only executed alternatives settle as evidence: C's accepted edge.
-        self.assertEqual(result.failure_actions, [])
-        self.assertTrue(set(result.edge_actions) <= {0, *c.outgoing_edge_ids})
+        self.assertEqual(failed(result), [])
+        self.assertTrue(result.accepted_edge_ids() <= {0, *c.outgoing_edge_ids})
         # Every materialized input, including B's unused one, was released by
         # the search itself; nothing was left for scope exit.
         self.assertEqual(client.left_at_exit, [0])
@@ -380,7 +421,7 @@ class BatchCompositionTests(unittest.TestCase):
         client = _RecordingClient({0: ["A", "B"]})
         reasoner = _reasoner(client, **_puct(num_simulations=4))
         reasoner.max_depth = 1
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         leaves = [
             node for node in result.graph.nodes.values() if node.id != result.graph.root_id
         ]
@@ -395,7 +436,7 @@ class BatchCompositionTests(unittest.TestCase):
             2,
         )
         self.assertEqual([node_id for node_id, _ in reasoner.executed], [0])
-        self.assertTrue(all(record.goal.expression == ROOT for record in result.failure_actions))
+        self.assertTrue(all(record.goal.expression == ROOT for record in failed(result)))
         _assert_scoped_cleanly(self, client)
 
 
@@ -408,20 +449,20 @@ class OverlappingSearchTests(unittest.TestCase):
             client.gate = asyncio.Event()
             client.entered_apply = asyncio.Event()
             first = asyncio.create_task(
-                reasoner.prove(SEED, greedy=True)
+                reasoner.prove(SEED, proposal=ProposalSpec(mode="sample", seed=1))
             )
             await client.entered_apply.wait()
-            pending, result, greedy = reasoner._pending, reasoner._result, reasoner._greedy
-            pending_snapshot = {key: dict(value.actions) for key, value in pending.items()}
+            pending, result, proposal = reasoner._pending, reasoner._result, reasoner._proposal
+            pending_snapshot = {key: dict(value.draws) for key, value in pending.items()}
             with self.assertRaises(PantographStateError):
-                await reasoner.prove(SEED)
+                await reasoner.prove(SEED, proposal=SAMPLE)
             self.assertIs(reasoner._pending, pending)
             self.assertEqual(
-                {key: dict(value.actions) for key, value in pending.items()},
+                {key: dict(value.draws) for key, value in pending.items()},
                 pending_snapshot,
             )
             self.assertIs(reasoner._result, result)
-            self.assertIs(reasoner._greedy, greedy)
+            self.assertIs(reasoner._proposal, proposal)
             self.assertEqual(len(client.scopes), 1)
             client.gate.set()
             return await first
@@ -449,7 +490,7 @@ class FailureInjectionTests(unittest.TestCase):
         self.assertEqual(reasoner._pending, {})
         self.assertIsNone(reasoner._result)
         self.assertFalse(reasoner._proving)
-        self.assertFalse(reasoner._greedy)
+        self.assertIsNone(reasoner._proposal)
         _assert_scoped_cleanly(self, client)
 
     def test_cancellation_during_leaf_execution_releases_everything(self):
@@ -471,7 +512,7 @@ class FailureInjectionTests(unittest.TestCase):
                 await original(node_id)
 
             client.before_apply = block_on_leaf
-            task = asyncio.create_task(reasoner.prove(SEED))
+            task = asyncio.create_task(reasoner.prove(SEED, proposal=SAMPLE))
             await first_round.wait()
             graph = captured["graph"]
             self.assertEqual(
@@ -494,7 +535,7 @@ class FailureInjectionTests(unittest.TestCase):
         reasoner = _reasoner(client, **_puct())
         captured = self._capture_graph(reasoner)
         with self.assertRaises(PantographTransportError):
-            asyncio.run(reasoner.prove(SEED))
+            asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = captured["graph"]
         self.assertEqual(graph.end_reason, SearchEndReason.EXTERNAL_ABORT)
         self.assertEqual(graph.nodes[1].closure_reason, NodeClosureReason.EXTERNAL_ABORT)
@@ -509,28 +550,30 @@ class FailureInjectionTests(unittest.TestCase):
         reasoner = _reasoner(client, **_puct())
         captured = self._capture_graph(reasoner)
         with self.assertRaises(PantographProtocolError):
-            asyncio.run(reasoner.prove(SEED))
+            asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = captured["graph"]
         self.assertEqual(graph.nodes[1].closure_reason, NodeClosureReason.EXTERNAL_ABORT)
         self._assert_released(reasoner, client, graph)
 
     def test_elaboration_failure_rejection_and_unknown_backup_stay_distinct(self):
         # A cannot be re-elaborated; every tactic on B is rejected by Lean.
+        # One draw per node is its whole widening budget, so B's rejected round
+        # closes its source and its failure is genuine for this search.
         client = _RecordingClient({0: ["A", "B"], "B": "reject"})
         client.unelaborated.add(structured_goal("A", HYPS).replay_spec().expression)
-        reasoner = _reasoner(client, top_k=1, **_puct(num_simulations=4))
-        result = asyncio.run(reasoner.prove(SEED))
+        reasoner = _reasoner(client, top_k=1, **_puct(num_simulations=4, widening_max_draws=1))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = result.graph
 
         self.assertEqual(len(graph.nodes[0].outgoing_edge_ids), 1)
         root_edge = graph.edges[graph.nodes[0].outgoing_edge_ids[0]]
         elaboration, rejected = (graph.nodes[child] for child in root_edge.child_ids)
         self.assertEqual(elaboration.closure_reason, NodeClosureReason.ELABORATION_ERROR)
-        self.assertEqual(rejected.closure_reason, NodeClosureReason.CANDIDATES_EXHAUSTED)
+        self.assertEqual(rejected.closure_reason, NodeClosureReason.WIDENING_BOUND)
         # Ordinary rejection produces actor failure records for B only; the
         # unelaborated node never sampled or executed anything.
-        self.assertTrue(result.failure_actions)
-        for record in result.failure_actions:
+        self.assertTrue(failed(result))
+        for record in failed(result):
             self.assertEqual(record.goal.state_fingerprint(), rejected.goal.state_fingerprint())
         self.assertNotIn(elaboration.id, dict(reasoner.executed))
         # The AND-backup over (unknown, valid 0.0) is a valid 0.0: completed
@@ -549,12 +592,12 @@ class FailureInjectionTests(unittest.TestCase):
         client = _RecordingClient({0: ["A"]})
         client.unelaborated.add(structured_goal("A", HYPS).replay_spec().expression)
         reasoner = _reasoner(client, **_puct(num_simulations=2, sim_batch_size=1))
-        result = asyncio.run(reasoner.prove(SEED))
+        result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         root_edge = result.graph.edges[result.graph.nodes[0].outgoing_edge_ids[0]]
         self.assertEqual(root_edge.visit_stats.N, 1)
         self.assertEqual(root_edge.visit_stats.N_v, 0)
         self.assertEqual(root_edge.visit_stats.W, 0.0)
-        self.assertEqual(result.failure_actions, [])
+        self.assertEqual(failed(result), [])
         _assert_scoped_cleanly(self, client)
 
 
@@ -570,13 +613,13 @@ class CooperativeDeadlineTests(unittest.TestCase):
             return checks == 1
 
         reasoner._within_deadline = within_deadline
-        result = asyncio.run(reasoner.prove(SEED, deadline=0.0))
+        result = asyncio.run(reasoner.prove(SEED, deadline=0.0, proposal=SAMPLE))
         graph = result.graph
         self.assertEqual(graph.end_reason, SearchEndReason.DEADLINE)
         self.assertFalse(graph.is_solved())
         # The completed root expansion is kept as experience.
         self.assertTrue(graph.nodes[0].outgoing_edge_ids)
-        self.assertTrue(result.edge_actions or result.failure_actions)
+        self.assertTrue(result.observations)
         for edge in graph.edges.values():
             self.assertEqual(edge.visit_stats.virtual_loss, 0)
         _assert_scoped_cleanly(self, client)
@@ -602,6 +645,21 @@ def test_actual_puct_and_best_first_search_over_the_installed_client(live_env):
         "cooperative-deadline-scope-closure",
         "repeated-searches-20",
     } <= set(checks)
+
+
+@pytest.mark.pantograph_live
+def test_actual_widening_finds_a_later_action_after_a_checked_rejection(live_env):
+    async def run():
+        client = await create_model_sexpr_client(live_env)
+        async with client:
+            return await verify_widening(client)
+
+    assert asyncio.run(run()) == [
+        "widening-later-action-after-checked-rejection",
+        "widening-rejection-served-from-cache",
+        "widening-and-obligations-kept",
+        "widening-priors-normalized",
+    ]
 
 
 @pytest.mark.pantograph_live

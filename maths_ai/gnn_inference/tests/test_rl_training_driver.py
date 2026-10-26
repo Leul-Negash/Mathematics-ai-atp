@@ -27,19 +27,23 @@ from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab
 from maths_ai.gnn_inference.atp_lean_gnn.rl_reasoner import RLHybridReasoner
 from maths_ai.gnn_inference.atp_lean_gnn.dataset import DatasetRow
 from maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver import (
+    EvaluationSettings,
     RLTrainingConfig,
     TheoremItem,
     TheoremPool,
     _create_live_reasoner_pool,
+    apply_evaluation_overrides,
     bc_weight_at_round,
     build_theorem_pool,
     collect_round,
     evaluate_proof_rate,
     run_rl_training,
     save_checkpoint,
+    write_evaluation_report,
 )
 from maths_ai.gnn_inference.atp_lean_gnn.rl_live_collection import LiveReasonerPool
 from maths_ai.gnn_inference.atp_lean_gnn import rl_training_driver
+from maths_ai.hybrid_reasoner.proposal import ProposalSpec
 from maths_ai.gnn_inference.atp_lean_gnn.rl_resources import ResourcePlan
 from pantograph_async import (
     ExecutionGoal,
@@ -135,12 +139,12 @@ class _RaisingReasoner:
         self.model = inner.model
         self.dag_featurize_data = inner.dag_featurize_data
 
-    async def prove(self, seed, *, greedy=False, deadline=None):
+    async def prove(self, seed, *, proposal, deadline=None):
         idx = self._calls
         self._calls += 1
         if idx in self._raise_on:
             raise RuntimeError("simulated Lean transport failure")
-        return await self._inner.prove(seed, greedy=greedy, deadline=deadline)
+        return await self._inner.prove(seed, proposal=proposal, deadline=deadline)
 
 
 TACTIC_VOCAB = {"trivial": 0, "intro": 1, "exact": 2, "<UNK_TACTIC>": 3}
@@ -179,6 +183,13 @@ def _items(n: int) -> list[TheoremItem]:
         )
         for i in range(n)
     ]
+
+
+GREEDY_EVAL = EvaluationSettings(mode="greedy", seed=0)
+
+
+def _proposals(n: int) -> list[ProposalSpec]:
+    return [ProposalSpec(mode="sample", seed=i) for i in range(n)]
 
 
 def _write_config(tmp: Path, **overrides) -> RLTrainingConfig:
@@ -265,11 +276,11 @@ class _InadmissibleAfter:
         self.model = inner.model
         self.dag_featurize_data = inner.dag_featurize_data
 
-    async def prove(self, seed, *, greedy=False, deadline=None):
+    async def prove(self, seed, *, proposal, deadline=None):
         if self._searches <= 0:
             raise ReplayInputError(ReplayFailure.LEAN_REJECTED, "unknown identifier")
         self._searches -= 1
-        return await self._inner.prove(seed, greedy=greedy, deadline=deadline)
+        return await self._inner.prove(seed, proposal=proposal, deadline=deadline)
 
 
 class ConfigTests(unittest.TestCase):
@@ -314,6 +325,8 @@ class ConfigTests(unittest.TestCase):
                 max_depth=7,
                 max_nodes=33,
                 use_pln=False,
+                widening_max_actions=9,
+                widening_max_draws=40,
             )
             node_vocab = _build_node_vocab()
             model = _make_model(node_vocab)
@@ -372,6 +385,8 @@ class ConfigTests(unittest.TestCase):
                         "max_depth",
                         "max_nodes",
                         "use_pln",
+                        "widening_max_actions",
+                        "widening_max_draws",
                     )
                     self.assertEqual(
                         {key: replacement.reasoner.kwargs[key] for key in settings},
@@ -398,6 +413,8 @@ class ConfigTests(unittest.TestCase):
                         self.assertEqual(reasoner.kwargs["max_depth"], 7)
                         self.assertEqual(reasoner.kwargs["max_nodes"], 33)
                         self.assertFalse(reasoner.kwargs["use_pln"])
+                        self.assertEqual(reasoner.kwargs["widening_max_actions"], 9)
+                        self.assertEqual(reasoner.kwargs["widening_max_draws"], 40)
                 finally:
                     asyncio.run(live_pool.close())
 
@@ -857,7 +874,7 @@ class RoundLoopTests(unittest.TestCase):
         inner = _make_reasoner(model, node_vocab, _QEDExecutor(), top_k=2)
         reasoner = _RaisingReasoner(inner, raise_on={1})  # second theorem dies
         results, stats = asyncio.run(
-            collect_round(reasoner, _items(3), timeout_s=10.0)
+            collect_round(reasoner, _items(3), timeout_s=10.0, proposals=_proposals(3))
         )
         self.assertEqual(stats["attempted"], 3.0)
         self.assertEqual(stats["collected"], 2.0)
@@ -893,8 +910,8 @@ class EvalTests(unittest.TestCase):
         model = _make_model(node_vocab)
         reasoner = _make_reasoner(model, node_vocab, _QEDExecutor(), top_k=2)
         items = _items(4)
-        s1 = asyncio.run(evaluate_proof_rate(reasoner, items, timeout_s=10.0))
-        s2 = asyncio.run(evaluate_proof_rate(reasoner, items, timeout_s=10.0))
+        s1 = asyncio.run(evaluate_proof_rate(reasoner, items, settings=GREEDY_EVAL, timeout_s=10.0))
+        s2 = asyncio.run(evaluate_proof_rate(reasoner, items, settings=GREEDY_EVAL, timeout_s=10.0))
         self.assertEqual(s1, s2)
         self.assertEqual(s1["attempted"], 4.0)
 
@@ -1098,10 +1115,137 @@ class HTPSDriverTests(unittest.TestCase):
 
             cfg.num_rounds = 2
             torch.manual_seed(0)
-            with self.assertRaisesRegex(ValueError, "canonical model-S-expression"):
+            with self.assertRaisesRegex(ValueError, "cannot be resumed exactly"):
                 asyncio.run(run_rl_training(
                     cfg, resume_run_dir=run_dir, reasoner_factory=_qed_factory, pool=_pool()
                 ))
+
+
+class EvaluationSettingsTests(unittest.TestCase):
+    """One evaluation contract reaches --eval-only, periodic evaluation and resume."""
+
+    def test_settings_are_validated(self):
+        for bad in (
+            dict(mode="beam"),
+            dict(seed=-1),
+            dict(repeats=0),
+            dict(repeats=True),
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                EvaluationSettings(**bad)
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(ValueError):
+            _write_config(Path(tmp), eval_proposal_mode="argmax")
+
+    def test_command_line_overrides_change_the_config_for_every_entry_point(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _write_config(Path(tmp))
+            self.assertEqual(cfg.evaluation_settings(), EvaluationSettings(mode="sample", seed=42, repeats=1))
+            settings = apply_evaluation_overrides(cfg, mode="greedy", seed=5, repeats=3)
+            self.assertEqual(settings, EvaluationSettings(mode="greedy", seed=5, repeats=3))
+            self.assertEqual(cfg.evaluation_settings(), settings)
+            with self.assertRaises(ValueError):
+                apply_evaluation_overrides(cfg, repeats=0)
+
+    def test_repeats_are_reported_and_aggregated_over_searched_seeds(self):
+        node_vocab = _build_node_vocab()
+        torch.manual_seed(0)
+        model = _make_model(node_vocab)
+        reasoner = _make_reasoner(model, node_vocab, _QEDExecutor(), top_k=2)
+        settings = EvaluationSettings(mode="sample", seed=3, repeats=3)
+        weights = [p.detach().clone() for p in model.parameters()]
+        rng = torch.get_rng_state()
+        stats = asyncio.run(evaluate_proof_rate(reasoner, _items(4), settings=settings, timeout_s=10.0))
+        self.assertTrue(torch.equal(torch.get_rng_state(), rng))
+        for before, after in zip(weights, model.parameters()):
+            self.assertTrue(torch.equal(before, after))
+        self.assertEqual([row["repeat"] for row in stats["repeats"]], [0, 1, 2])
+        self.assertEqual(len({row["proposal_seeds_sha256"] for row in stats["repeats"]}), 3)
+        self.assertEqual(stats["attempted"], 12.0)
+        self.assertEqual(stats["searched"], 12.0)
+        self.assertEqual(stats["solved"], sum(row["solved"] for row in stats["repeats"]))
+        self.assertEqual(stats["proof_rate"], stats["solved"] / 12.0)
+        self.assertEqual(stats["evaluation"], settings.contract())
+        again = asyncio.run(evaluate_proof_rate(reasoner, _items(4), settings=settings, timeout_s=10.0))
+        self.assertEqual(again, stats)
+
+    def test_an_empty_subset_is_rejected(self):
+        node_vocab = _build_node_vocab()
+        reasoner = _make_reasoner(_make_model(node_vocab), node_vocab, _QEDExecutor())
+        with self.assertRaisesRegex(ValueError, "empty"):
+            asyncio.run(evaluate_proof_rate(reasoner, [], settings=EvaluationSettings()))
+
+    def test_periodic_evaluation_uses_the_configured_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            cfg = _write_config(
+                tmp, num_rounds=1, eval_every=1, eval_proposal_mode="greedy", eval_seed=9, eval_repeats=2
+            )
+            pool = TheoremPool(_items(20), eval_pool_size=2, curriculum_size=4, seed=0)
+            torch.manual_seed(0)
+            asyncio.run(run_rl_training(cfg, reasoner_factory=_qed_factory, pool=pool))
+            run_dir = next((tmp / "runs").iterdir())
+            rows = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+            (evaluation,) = [row["eval"] for row in rows if "eval" in row]
+            self.assertEqual(evaluation["evaluation"], cfg.evaluation_settings().contract())
+            self.assertEqual(len(evaluation["repeats"]), 2)
+            best = torch.load(run_dir / "best.pt", weights_only=False)
+            self.assertEqual(best["evaluation_contract"], cfg.evaluation_settings().contract())
+            self.assertEqual(best["rl_target_schema_version"], 4)
+
+    def test_resume_rejects_a_changed_evaluation_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            cfg = _write_config(tmp, num_rounds=1)
+            torch.manual_seed(0)
+            asyncio.run(run_rl_training(cfg, reasoner_factory=_qed_factory, pool=_pool()))
+            run_dir = next((tmp / "runs").iterdir())
+            cfg.num_rounds = 2
+            cfg.eval_proposal_mode = "greedy"
+            with self.assertRaisesRegex(ValueError, "best proof rate"):
+                asyncio.run(run_rl_training(
+                    cfg, resume_run_dir=run_dir, reasoner_factory=_qed_factory, pool=_pool()
+                ))
+
+    def test_resume_rejects_a_schema_3_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            cfg = _write_config(tmp, num_rounds=1)
+            torch.manual_seed(0)
+            asyncio.run(run_rl_training(cfg, reasoner_factory=_qed_factory, pool=_pool()))
+            run_dir = next((tmp / "runs").iterdir())
+            state = torch.load(run_dir / "last.pt", weights_only=False)
+            state["rl_target_schema_version"] = 3
+            state.pop("evaluation_contract")
+            torch.save(state, run_dir / "last.pt")
+            cfg.num_rounds = 2
+            with self.assertRaisesRegex(ValueError, "schema 3"):
+                asyncio.run(run_rl_training(
+                    cfg, resume_run_dir=run_dir, reasoner_factory=_qed_factory, pool=_pool()
+                ))
+
+    def test_an_evaluation_report_is_written_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "eval.json"
+            report = {"kind": "rl-evaluation-report"}
+            write_evaluation_report(report, path)
+            self.assertEqual(json.loads(path.read_text()), report)
+            with self.assertRaises(FileExistsError):
+                write_evaluation_report(report, path)
+
+
+class WideningConfigTests(unittest.TestCase):
+    def test_widening_settings_are_validated_and_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "widening"):
+                _write_config(tmp, widening_max_draws=10)  # best-first does not widen
+            with self.assertRaises(ValueError):
+                _write_config(tmp, selection_policy="puct", num_simulations=4, widening_exponent=1.5)
+            cfg = _write_config(tmp, selection_policy="puct", num_simulations=4, widening_max_actions=8)
+            saved = rl_training_driver.search_settings(cfg)
+            self.assertEqual(saved["widening"]["max_actions"], 8)
+            self.assertEqual(saved["widening"]["initial_actions"], 4)
+            self.assertIsNone(rl_training_driver.search_settings(_write_config(tmp))["widening"])
 
 
 class InadmissibleRootTests(unittest.TestCase):
@@ -1116,7 +1260,7 @@ class InadmissibleRootTests(unittest.TestCase):
     def test_an_inadmissible_root_is_not_a_failed_search(self):
         node_vocab = _build_node_vocab()
         reasoner = _make_reasoner(_make_model(node_vocab), node_vocab, _InadmissibleExecutor())
-        results, stats = asyncio.run(collect_round(reasoner, _items(2), timeout_s=10.0))
+        results, stats = asyncio.run(collect_round(reasoner, _items(2), timeout_s=10.0, proposals=_proposals(2)))
         self.assertEqual(results, [])
         self.assertEqual(stats["seeds_inadmissible"], 2.0)
         self.assertEqual(stats["searches_failed"], 0.0)
@@ -1128,7 +1272,9 @@ class InadmissibleRootTests(unittest.TestCase):
         model = _make_model(node_vocab)
         inner = _make_reasoner(model, node_vocab, _QEDExecutor())
         stats = asyncio.run(
-            evaluate_proof_rate(_InadmissibleAfter(inner, searches=1), _items(3), timeout_s=10.0)
+            evaluate_proof_rate(
+                _InadmissibleAfter(inner, searches=1), _items(3), settings=EvaluationSettings(), timeout_s=10.0
+            )
         )
         self.assertEqual((stats["solved"], stats["seeds_inadmissible"]), (1.0, 2.0))
         self.assertEqual(stats["proof_rate"], 1.0)
@@ -1232,13 +1378,13 @@ class _ErrorReasoner:
         self.server = inner.server
         self.calls = 0
 
-    async def prove(self, seed, *, greedy=False, deadline=None):
+    async def prove(self, seed, *, proposal, deadline=None):
         self.calls += 1
         if self.calls == 1:
             if self._retire_client:
                 await self.server.aclose()
             raise self._error
-        return await self._inner.prove(seed, greedy=greedy, deadline=deadline)
+        return await self._inner.prove(seed, proposal=proposal, deadline=deadline)
 
 
 class SingleReasonerFailureTests(unittest.TestCase):
@@ -1259,7 +1405,7 @@ class SingleReasonerFailureTests(unittest.TestCase):
         ):
             reasoner = self._reasoner(error)
             with self.assertRaises(type(error)):
-                asyncio.run(collect_round(reasoner, _items(2), timeout_s=10.0))
+                asyncio.run(collect_round(reasoner, _items(2), timeout_s=10.0, proposals=_proposals(2)))
             self.assertEqual(reasoner.calls, 1)
 
     def test_timeout_that_retired_the_only_client_ends_collection(self):
@@ -1267,7 +1413,7 @@ class SingleReasonerFailureTests(unittest.TestCase):
             PantographRequestTimeout("deadline exceeded"), retire_client=True
         )
         with self.assertRaises(PantographTransportError) as error:
-            asyncio.run(collect_round(reasoner, _items(2), timeout_s=10.0))
+            asyncio.run(collect_round(reasoner, _items(2), timeout_s=10.0, proposals=_proposals(2)))
         self.assertIn("reasoner pool", str(error.exception))
         self.assertEqual(reasoner.calls, 1)
 
@@ -1326,7 +1472,9 @@ class LivePoolDriverTests(unittest.TestCase):
                 collection_workers=2,
                 cpu_reserve=0,
                 resource_check="warn",
-                **overrides,
+                # Seed 0's sampled proposals solve a theorem in every round, so
+                # each round has replay to mine.
+                **{"seed": 0, **overrides},
             )
             torch.manual_seed(0)
             with (
@@ -1382,6 +1530,25 @@ class LivePoolDriverTests(unittest.TestCase):
             self.assertNotIn("tactic_imitation_loss", row)
         self.assertEqual(len(clients), 2)
         self.assertTrue(all(client.closed for client in clients))
+
+    def test_puct_rounds_widen_and_report_their_proposal_work(self):
+        for htps_steps in (0, 2):
+            with self.subTest(htps_steps=htps_steps):
+                events, rows, _clients = self._run(
+                    num_rounds=2,
+                    selection_policy="puct",
+                    num_simulations=6,
+                    sim_batch_size=2,
+                    htps_steps_per_round=htps_steps,
+                    htps_batch_size=4,
+                )
+                self._assert_round_order(events, rows, htps_steps=htps_steps)
+                for row in rows:
+                    self.assertLessEqual(row["onpolicy_optimizer_step"], 1.0)
+                    self.assertGreater(row["proposal_rounds"], 0.0)
+                    self.assertLessEqual(row["accepted_edges"], row["distinct_commands"])
+                    self.assertLessEqual(row["distinct_commands"], row["raw_draws"])
+                    self.assertLessEqual(row["settled_draws"], row["raw_draws"])
 
     def test_htps_enabled_round_order_generation_and_replica_sync(self):
         events, rows, clients = self._run(

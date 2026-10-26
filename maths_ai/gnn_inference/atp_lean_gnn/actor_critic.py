@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .architectures import EncoderOutput, StateGraphEncoder
-from .argument_selector import ArgumentSelector, resolve_premise_mask
+from .argument_selector import ArgumentSelector, choose_categorical, resolve_premise_mask
 from .graph_contract import GraphRepresentationSpec
 from .labels import get_tactic_arity
 from .reporting import console_print
@@ -16,20 +16,47 @@ from .reporting import console_print
 
 @dataclass
 class ActionSample:
-    """One sampled action ``a = (tactic, args)`` with the quantities the RL update needs.
+    """One proposed action ``a = (tactic, args)`` with the quantities the RL update needs.
 
     Every tensor is batched over ``B`` states. ``tactic_logp`` and ``arg_logp`` carry
     gradient (they are the policy-gradient terms); ``value`` carries gradient (the critic
-    output); ``tactic_action`` / ``arg_actions`` are the concrete sampled ids the environment
+    output); ``tactic_action`` / ``arg_actions`` are the concrete chosen ids the environment
     consumes.
+
+    A multi-graph batch runs as many pointer steps as its largest arity, so
+    ``arg_actions`` can be longer than a row's own action. ``arities[b]`` is the
+    number of steps row ``b`` owns (``action_arity``); ``arg_logp`` sums exactly
+    those steps, so a row's value does not change when a higher-arity row joins
+    the batch. ``arg_step_logp`` / ``arg_step_valid`` keep every step for audit:
+    a step with no legal premise is invalid and its zero log-prob is a
+    placeholder, not a probability-one choice. ``complete[b]`` is False when
+    the tactic needs more arguments than the model can choose.
     """
-    tactic_action: Tensor            # [B] sampled tactic ids
+    tactic_action: Tensor            # [B] chosen tactic ids
     tactic_logp: Tensor              # [B] log π(τ|s)
     tactic_entropy: Tensor           # [B] H(π(·|s))
-    arg_actions: list[Tensor]        # per step, each [B] sampled node ids (padded index)
-    arg_logp: Tensor                 # [B] Σ_k log π(u_k | s, τ, u_<k)
+    arg_actions: list[Tensor]        # per step, each [B] chosen node ids (padded index)
+    arg_logp: Tensor                 # [B] Σ_{k < arity} log π(u_k | s, τ, u_<k)
     value: Tensor                    # [B] V(s)
     tactic_logits: Tensor            # [B, num_tactics] (masked) — for entropy / BC downstream
+    arities: Tensor                  # [B] long, argument steps each row owns
+    complete: Tensor                 # [B] bool, the row's tactic fits ``max_args``
+    arg_step_logp: list[Tensor]      # per step, each [B] log-prob (0 where invalid)
+    arg_step_valid: list[Tensor]     # per step, each [B] bool, a legal premise existed
+
+
+def action_arity(tactic_name: str | None, max_args: int) -> tuple[int, bool]:
+    """``(steps, complete)`` for one action of ``tactic_name``.
+
+    ``steps`` is how many pointer steps belong to the action and ``complete``
+    whether that covers the tactic's full arity. A missing or special (``<…>``)
+    tactic is not playable and owns no argument steps. Shared by proposal and
+    decoding so both apply one mask.
+    """
+    if tactic_name is None or tactic_name.startswith("<"):
+        return 0, False
+    arity = get_tactic_arity(tactic_name)
+    return min(arity, max_args), arity <= max_args
 
 
 class ActorHead(nn.Module):
@@ -178,55 +205,134 @@ class ActorCriticWithArgsClassifier(nn.Module):
         tactic_mask: Tensor | None = None,
         id_to_tactic: dict[int, str] | None = None,
         greedy: bool = False,
+        generator: torch.Generator | None = None,
     ) -> ActionSample:
-        """Sample a full action ``(tactic, args)`` on-policy and return it with its
+        """Propose a full action ``(tactic, args)`` on-policy and return it with its
         log-probs, entropy, and value — the quantities the RL rollout/update consume (B2).
 
-        The tactic and every argument are SAMPLED from the policy (unless ``greedy``), the
-        arguments are fed back autoregressively using the SAMPLED node's embedding, and the
-        summed argument log-prob ``Σ_k log π(u_k)`` is returned so the pointer is trained by
-        the same advantage as the tactic (pointer-as-actor). ``id_to_tactic`` lets the number
-        of argument steps follow the sampled tactic's arity; without it, ``max_args`` steps run.
+        The tactic and every argument are drawn from the policy with ``generator``, or,
+        when ``greedy``, each is the argmax of its step: the tactic first, then each
+        argument given the tactic and the arguments before it. Greedy is step-wise,
+        not a search for the most probable argument sequence. Chosen arguments are fed
+        back autoregressively, and ``arg_logp`` is the pointer's log-prob of the row's
+        own arguments, so the pointer is trained by the same advantage as the tactic
+        (pointer-as-actor). ``id_to_tactic`` lets each row's argument steps follow its
+        tactic's arity; without it, every row owns ``max_args`` steps.
         """
         node_embeddings, state_emb, tactic_logits, values = self.encode(data, tactic_mask=tactic_mask)
+        return self._act_from_encoding(
+            data, node_embeddings, state_emb, tactic_logits, values,
+            rows=None, id_to_tactic=id_to_tactic, greedy=greedy, generator=generator,
+        )
 
-        tactic_dist = torch.distributions.Categorical(logits=tactic_logits)
-        if greedy:
-            tactic_action = tactic_logits.argmax(dim=1)
-        else:
-            tactic_action = tactic_dist.sample()
-        tactic_logp = tactic_dist.log_prob(tactic_action)
-        tactic_entropy = tactic_dist.entropy()
+    def propose_actions(
+        self,
+        data,
+        counts: list[int],
+        *,
+        tactic_mask: Tensor | None = None,
+        id_to_tactic: dict[int, str] | None = None,
+        greedy: bool = False,
+        generator: torch.Generator | None = None,
+    ) -> tuple[ActionSample, Tensor]:
+        """Encode ``data`` once and propose ``counts[b]`` actions for state ``b``.
+
+        Return the actions as one ``ActionSample`` over action instances, in
+        row-major order, and ``rows[i]``, the state instance ``i`` belongs to.
+        Tactics are drawn with replacement from the state's cached logits; each
+        instance's arguments are chosen against that state's cached node
+        embeddings, conditioned on the instance's own tactic and earlier
+        arguments. No instance is drawn for a state beyond its count.
+        """
+        if len(counts) != int(data.num_graphs) or any(count < 0 for count in counts):
+            raise ValueError("counts must give a non-negative action count per state")
+        node_embeddings, state_emb, tactic_logits, values = self.encode(data, tactic_mask=tactic_mask)
+        rows = torch.repeat_interleave(
+            torch.arange(len(counts), device=tactic_logits.device),
+            torch.tensor(counts, dtype=torch.long, device=tactic_logits.device),
+        )
+        sample = self._act_from_encoding(
+            data, node_embeddings, state_emb, tactic_logits, values,
+            rows=rows, id_to_tactic=id_to_tactic, greedy=greedy, generator=generator,
+        )
+        return sample, rows
+
+    def _act_from_encoding(
+        self,
+        data,
+        node_embeddings: Tensor,
+        state_emb: Tensor,
+        tactic_logits: Tensor,
+        values: Tensor,
+        *,
+        rows: Tensor | None,
+        id_to_tactic: dict[int, str] | None,
+        greedy: bool,
+        generator: torch.Generator | None,
+    ) -> ActionSample:
+        """Choose one action per instance from an existing encoding.
+
+        ``rows`` maps instances to encoded states (None: one instance per
+        state). Instances of one state share its encoding but have their own
+        node copies in the pointer batch, so each instance's argument scores
+        follow its own tactic and argument history.
+        """
+        premise_mask = resolve_premise_mask(data, node_embeddings.device)
+        batch_index = data.batch.to(device=node_embeddings.device)
+        if rows is not None:
+            graph_nodes = [
+                torch.nonzero(batch_index == b, as_tuple=False).squeeze(-1)
+                for b in range(state_emb.size(0))
+            ]
+            picked = [graph_nodes[row] for row in rows.tolist()]
+            node_index = (
+                torch.cat(picked) if picked else torch.empty(0, dtype=torch.long, device=batch_index.device)
+            )
+            node_embeddings = node_embeddings[node_index]
+            premise_mask = premise_mask[node_index]
+            batch_index = torch.cat(
+                [torch.full_like(nodes, instance) for instance, nodes in enumerate(picked)]
+            ) if picked else node_index
+            state_emb, tactic_logits, values = state_emb[rows], tactic_logits[rows], values[rows]
+
+        tactic_action, tactic_logp = choose_categorical(
+            tactic_logits, greedy=greedy, generator=generator
+        )
+        tactic_entropy = torch.distributions.Categorical(logits=tactic_logits).entropy()
 
         batch_size = tactic_action.size(0)
         device = tactic_action.device
+        if id_to_tactic is not None:
+            resolved = [
+                action_arity(id_to_tactic.get(int(a)), self.max_args)
+                for a in tactic_action.tolist()
+            ]
+        else:
+            resolved = [(self.max_args, True)] * batch_size
+        arities = torch.tensor([steps for steps, _ in resolved], dtype=torch.long, device=device)
+        complete = torch.tensor([full for _, full in resolved], dtype=torch.bool, device=device)
+        n_steps = int(arities.max().item()) if batch_size else 0
+
         arg_logp = torch.zeros(batch_size, device=device)
         arg_actions: list[Tensor] = []
-
-        # Number of argument steps: follow the sampled tactic's arity if we can decode names.
-        if id_to_tactic is not None:
-            names = [id_to_tactic.get(int(a), "") for a in tactic_action.tolist()]
-            n_steps = min(max((get_tactic_arity(n) for n in names), default=0), self.max_args)
-        else:
-            n_steps = self.max_args
-
+        arg_step_logp: list[Tensor] = []
+        arg_step_valid: list[Tensor] = []
         if n_steps > 0:
             tactic_emb = self.tactic_embedding(tactic_action)  # [B, H]
-            premise_mask = resolve_premise_mask(data, node_embeddings.device)
-            batch_index = data.batch.to(device=node_embeddings.device)
 
             prev_arg_emb: Tensor | None = None
-            for _ in range(n_steps):
-                scores, selected_idx, step_logp, selected_emb = self.argument_selector.sample_step(
-                    state_emb, tactic_emb, node_embeddings, premise_mask, batch_index,
-                    prev_arg_emb=prev_arg_emb,
+            for step in range(n_steps):
+                _scores, selected_idx, step_logp, selected_emb, valid = (
+                    self.argument_selector.choose_step(
+                        state_emb, tactic_emb, node_embeddings, premise_mask, batch_index,
+                        prev_arg_emb=prev_arg_emb, greedy=greedy, generator=generator,
+                    )
                 )
-                # Rows with no valid premise (all -inf) yield NaN log-prob; zero them so a
-                # degenerate state contributes no argument gradient/credit.
-                valid = torch.isfinite(scores).any(dim=1)
-                step_logp = torch.where(valid, step_logp, torch.zeros_like(step_logp))
-                arg_logp = arg_logp + step_logp
+                owned = arities > step
+                arg_logp = arg_logp + torch.where(owned, step_logp, torch.zeros_like(step_logp))
                 arg_actions.append(selected_idx)
+                arg_step_logp.append(step_logp)
+                arg_step_valid.append(valid)
                 prev_arg_emb = selected_emb
 
         return ActionSample(
@@ -237,6 +343,10 @@ class ActorCriticWithArgsClassifier(nn.Module):
             arg_logp=arg_logp,
             value=values.squeeze(-1),
             tactic_logits=tactic_logits,
+            arities=arities,
+            complete=complete,
+            arg_step_logp=arg_step_logp,
+            arg_step_valid=arg_step_valid,
         )
 
     def evaluate_actions(

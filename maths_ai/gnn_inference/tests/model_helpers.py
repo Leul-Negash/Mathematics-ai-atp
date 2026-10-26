@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import math
 
-from maths_ai.data_models.proof_components import Goal, GoalLocal
+from maths_ai.data_models.proof_components import Goal, GoalLocal, ProposedAction, TacticCandidate
 from pantograph_async import (
     ExecutionGoal,
     ExecutionLocal,
@@ -158,3 +159,17 @@ class ScopedFakeClient:
 
     async def aclose(self):
         self.is_usable = False
+
+
+def scored(candidate: TacticCandidate, log_prior: float | None = None) -> ProposedAction:
+    """A scripted proposal for ``candidate`` with an explicit action prior.
+
+    The prior defaults to ``log(candidate.probability)``: in these fixtures the
+    scripted probability is the complete action's.
+    """
+    return ProposedAction(
+        candidate=candidate,
+        raw_action_id=("scripted", candidate.tactic_name, tuple(candidate.arguments)),
+        log_prior=math.log(candidate.probability) if log_prior is None else log_prior,
+        provider="scripted-test",
+    )

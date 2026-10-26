@@ -17,6 +17,10 @@ from maths_ai.lean_replay import (
     render_replay,
     seed_from_text,
 )
+from maths_ai.hybrid_reasoner.proposal import ProposalSpec
+
+SAMPLE = ProposalSpec(mode="sample", seed=0)
+
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures/dataset_replay/rows.json").read_text(encoding="utf-8")
@@ -389,6 +393,7 @@ def _prepared_features(row, node_vocab):
 @pytest.mark.pantograph_live
 def test_live_search_nodes_see_the_source_identity(mathlib_env):
     from maths_ai.data_models.proof_components import TacticCandidate
+    from maths_ai.gnn_inference.tests.model_helpers import scored
     from maths_ai.hybrid_reasoner.joint_inference import HybridReasoner, PantographExecutor
     from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
 
@@ -398,9 +403,9 @@ def test_live_search_nodes_see_the_source_identity(mathlib_env):
 
         def predict_next_tactic(self, goal):
             return [
-                TacticCandidate(
+                scored(TacticCandidate(
                     tactic_name="have hnew : True := trivial", arguments=[], probability=1.0
-                )
+                ))
             ]
 
     seed = dataset_row(5).structured_seed()

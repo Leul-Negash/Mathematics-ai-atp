@@ -6,7 +6,7 @@ import asyncio
 import copy
 import time
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Awaitable, Callable, Literal, Sequence
 
 import torch
 
@@ -34,7 +34,8 @@ CollectionOutcome = Literal[
 ]
 ServerFactory = Callable[[int], Awaitable[Any]]
 ReasonerFactory = Callable[[int, torch.device, torch.nn.Module, Any], Any]
-SearchFactory = Callable[[Any, Any, bool, float], Awaitable[Any]]
+# (reasoner, theorem, proposal, deadline): the proposal is the item's own, never the worker's.
+SearchFactory = Callable[[Any, Any, Any, float], Awaitable[Any]]
 SolvedPredicate = Callable[[Any], bool]
 CooperativeDeadlinePredicate = Callable[[Any], bool]
 LogFunction = Callable[[str], None]
@@ -410,13 +411,20 @@ class LiveReasonerPool:
         *,
         timeout_s: float,
         model_generation: int,
-        greedy: bool = False,
+        proposals: Sequence[Any],
     ) -> CollectionRound:
         """Collect one bounded round and return records in input order.
 
-        The round runs as one task that shutdown can cancel and join, and the
-        pool rejects an overlapping round or a weight update while it runs.
+        ``proposals[i]`` goes with ``batch[i]`` to whichever worker searches it,
+        including a replacement worker, so an item's draws do not depend on
+        scheduling. The round runs as one task that shutdown can cancel and
+        join, and the pool rejects an overlapping round or a weight update
+        while it runs.
         """
+        if len(proposals) != len(batch):
+            raise ValueError(
+                f"Expected one proposal per item: {len(proposals)} for {len(batch)} items."
+            )
         if self._collecting:
             raise PantographStateError("A pool supports one active collection round.")
         self._collecting = True
@@ -425,7 +433,7 @@ class LiveReasonerPool:
                 batch,
                 timeout_s=timeout_s,
                 model_generation=model_generation,
-                greedy=greedy,
+                proposals=proposals,
             ),
             name="pantograph-pool-collection",
         )
@@ -441,7 +449,7 @@ class LiveReasonerPool:
         *,
         timeout_s: float,
         model_generation: int,
-        greedy: bool = False,
+        proposals: Sequence[Any],
     ) -> CollectionRound:
 
         if self._closed:
@@ -483,7 +491,7 @@ class LiveReasonerPool:
                         result = await self.search_factory(
                             worker.reasoner,
                             theorem,
-                            greedy,
+                            proposals[index],
                             cooperative_deadline,
                         )
                     if self.is_cooperative_deadline(result):

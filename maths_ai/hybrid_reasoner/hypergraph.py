@@ -25,10 +25,17 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+import math
 from math import isfinite
 from typing import Deque, Dict, List, Optional, Protocol, Set, Tuple
 
-from maths_ai.data_models.proof_components import STV, Goal, TacticCandidate
+from maths_ai.data_models.proof_components import (
+    LOG_PRIOR_TOLERANCE,
+    STV,
+    Goal,
+    ProposedAction,
+    TacticCandidate,
+)
 from maths_ai.data_models.proof_components import GoalState as GoalStateModel
 from pantograph_async import PantographStateScope, TacticState
 
@@ -48,6 +55,7 @@ class EdgeStatus:
 class NodeClosureReason(str, Enum):
     NONE = "none"
     CANDIDATES_EXHAUSTED = "candidates_exhausted"
+    WIDENING_BOUND = "widening_bound"
     NO_CANDIDATES = "no_candidates"
     DEPTH_LIMIT = "depth_limit"
     CYCLE = "cycle"
@@ -121,7 +129,20 @@ class ProofNode:
     incoming_edge_id: Optional[int] = None
     outgoing_edge_ids: List[int] = field(default_factory=list)
     combined_rank: float = 0.0
-    exhausted: bool = False
+    # The node's proposal source: rounds and raw draws spent so far. The source
+    # stays open across rounds until a bound or a path limit closes it
+    # (``closure_reason``); finishing one round does not close it.
+    proposal_rounds: int = 0
+    proposal_draws: int = 0
+    # Completed visits before the next widening round may be scheduled.
+    next_round_visit: int = 0
+    # Completed simulations whose selection included this node, whether or not
+    # they chose one of its edges; progressive widening grows with it.
+    visits: int = 0
+    # Checked execution outcome of each command tried at this node: the edge
+    # it created, or None for a Lean rejection. Infrastructure failures are
+    # never recorded. A later draw of the same command reuses the outcome.
+    command_outcomes: Dict[tuple, Optional[int]] = field(default_factory=dict)
     note: Optional[str] = None
     closure_reason: NodeClosureReason = NodeClosureReason.NONE
     """Free-text annotation for terminal states the graph can't infer on its
@@ -130,6 +151,16 @@ class ProofNode:
 
     def __post_init__(self) -> None:
         self.combined_rank = self.local_score
+
+    @property
+    def exhausted(self) -> bool:
+        """The proposal source is closed: no further actions will be proposed."""
+        return self.closure_reason != NodeClosureReason.NONE
+
+    @property
+    def attempted_commands(self) -> int:
+        """Distinct commands with a checked outcome at this node."""
+        return len(self.command_outcomes)
 
     @property
     def local_score(self) -> float:
@@ -170,18 +201,15 @@ class EdgeVisitStats:
     in-flight simulations that selected this edge but have not backed up
     yet — each one is treated as a pending loss (contributes 0 to ``W``
     while inflating the visit count), which steers concurrent simulations
-    in the same batch toward different branches. ``prior_prob`` is the
-    policy prior P(g,t) stamped once at edge creation by
-    ``ProofHypergraph.add_edge`` (the tactic-head probability
-    ``tactic.probability``) and read — never recomputed — by
-    ``puct_score`` on every later selection.
+    in the same batch toward different branches. The policy prior is not
+    stored here: ``ProofHypergraph.puct_priors`` derives it from the edges'
+    raw action log-priors whenever the node's selectable support changes.
     """
 
     N: int = 0
     N_v: int = 0
     W: float = 0.0
     virtual_loss: int = 0
-    prior_prob: float = 0.0
 
     @property
     def Q(self) -> float:
@@ -197,14 +225,40 @@ class EdgeVisitStats:
         return self.W / self.N_v
 
 
+# Prior contract, recorded in saved search settings and reports.
+PRIOR_SEMANTICS = "joint-action-v1"
+PRIOR_NORMALIZATION = "viable-observed-support-v1"
+PRIOR_ALIAS_POLICY = "unique-raw-action-sum-v1"
+
+
+def logsumexp(values: List[float]) -> float:
+    top = max(values)
+    return top + math.log(sum(math.exp(value - top) for value in values))
+
+
 @dataclass
 class ProofHyperedge:
+    """One executed command and every raw action observed to render it.
+
+    ``raw_log_priors`` maps each distinct raw action id to its immutable
+    log-prior. The edge's mass is their log-sum-exp: each distinct raw action
+    counts once, however often it was drawn. This is mass over the raw actions
+    this search observed, not the command's exact probability over every
+    possible alias.
+    """
+
     id: int
     source_id: int
     tactic: TacticCandidate
     child_ids: List[int] = field(default_factory=list)
     status: str = EdgeStatus.PENDING
     visit_stats: EdgeVisitStats = field(default_factory=EdgeVisitStats)
+    raw_log_priors: Dict[tuple, float] = field(default_factory=dict)
+    provider: str = ""
+
+    @property
+    def log_mass(self) -> float:
+        return logsumexp(list(self.raw_log_priors.values()))
 
     def summary(self) -> dict:
         return {
@@ -212,16 +266,21 @@ class ProofHyperedge:
             "source_id": self.source_id,
             "tactic": self.tactic.tactic_name,
             "arguments": list(self.tactic.arguments),
-            "probability": self.tactic.probability,
+            "tactic_confidence": self.tactic.probability,
             "child_ids": list(self.child_ids),
             "status": self.status,
+            "prior": {
+                "provider": self.provider,
+                "raw_actions": len(self.raw_log_priors),
+                "raw_log_priors": sorted(self.raw_log_priors.values(), reverse=True),
+                "log_mass": self.log_mass,
+            },
             "visits": {
                 "N": self.visit_stats.N,
                 "N_v": self.visit_stats.N_v,
                 "W": self.visit_stats.W,
                 "Q": self.visit_stats.Q,
                 "virtual_loss": self.visit_stats.virtual_loss,
-                "prior_prob": self.visit_stats.prior_prob,
             },
         }
 
@@ -298,6 +357,13 @@ class ProofHypergraph:
         self._next_edge_id = 0
         self.nodes: Dict[int, ProofNode] = {}
         self.edges: Dict[int, ProofHyperedge] = {}
+        # Simulation selections that reached an open node with nothing to
+        # propose or select yet (its widening capacity had not grown).
+        self.deferred_selections = 0
+        # Completed simulations, and proposed commands answered from a node's
+        # execution cache instead of Lean.
+        self.completed_simulations = 0
+        self.cache_hits = 0
         self.end_reason = SearchEndReason.RUNNING
 
         self.root_id = self._new_node(goal=root_goal, depth=0, gnn_probability=1.0, stv=None)
@@ -328,10 +394,10 @@ class ProofHypergraph:
     def add_edge(
         self,
         source_id: int,
-        tactic: TacticCandidate,
+        action: ProposedAction,
         ranked_subgoals: List[Tuple[Goal, Optional[STV]]],
     ) -> ProofHyperedge:
-        """Record a tactic application from ``source_id`` producing the given
+        """Record the application of ``action`` from ``source_id`` producing the given
         ``(subgoal, stv)`` children (already scored by PLN and capped to the
         chosen top-k — see ``HybridReasoner.rank_subgoals``).
 
@@ -349,7 +415,16 @@ class ProofHypergraph:
         ``source_id``'s own ancestors is created but force-marked DEAD with
         ``note="cycle"`` rather than re-explored, so the search can't loop
         forever rediscovering the same state.
+
+        The edge starts with ``action``'s raw log-prior; ``observe_alias`` adds
+        further raw actions that render the same command.
         """
+        if not isinstance(action, ProposedAction):
+            raise TypeError(f"add_edge needs a ProposedAction, got {type(action).__name__}.")
+        tactic = action.candidate
+        for eid in self.nodes[source_id].outgoing_edge_ids:
+            if self.edges[eid].tactic.command == tactic.command:
+                raise ValueError(f"Node {source_id} already has an edge for {tactic.command}.")
         edge_id = self._next_edge_id
         self._next_edge_id += 1
         depth = self.nodes[source_id].depth + 1
@@ -367,7 +442,6 @@ class ProofHypergraph:
             if _state_key(goal) in ancestry:
                 child = self.nodes[child_id]
                 child.status = NodeStatus.DEAD
-                child.exhausted = True
                 child.note = "cycle: identical to an ancestor goal"
                 child.closure_reason = NodeClosureReason.CYCLE
             child_ids.append(child_id)
@@ -377,7 +451,8 @@ class ProofHypergraph:
             source_id=source_id,
             tactic=tactic,
             child_ids=child_ids,
-            visit_stats=EdgeVisitStats(prior_prob=tactic.probability),
+            raw_log_priors={action.raw_action_id: float(action.log_prior)},
+            provider=action.provider,
         )
         edge.status = self._derive_edge_status(edge)
         self.edges[edge_id] = edge
@@ -385,6 +460,53 @@ class ProofHypergraph:
 
         self._propagate(source_id)
         return edge
+
+    def observe_alias(self, edge_id: int, action: ProposedAction) -> bool:
+        """Record another raw action that renders ``edge_id``'s command.
+
+        Return True when it is new, which adds its probability to the edge's
+        mass once. A raw action seen again must carry the same log-prior; a
+        different value means the model, graph or provider changed under the
+        search and is an error, not new mass.
+        """
+        edge = self.edges[edge_id]
+        if action.command != edge.tactic.command:
+            raise ValueError(f"{action.command} is not an alias of edge {edge_id}.")
+        if action.provider != edge.provider:
+            raise ValueError(
+                f"Edge {edge_id} has priors from {edge.provider!r}, not {action.provider!r}."
+            )
+        known = edge.raw_log_priors.get(action.raw_action_id)
+        if known is not None:
+            if abs(known - action.log_prior) > 1e-4:
+                raise ValueError(
+                    f"Raw action {action.raw_action_id} changed its log-prior from "
+                    f"{known} to {action.log_prior}."
+                )
+            return False
+        edge.raw_log_priors[action.raw_action_id] = float(action.log_prior)
+        return True
+
+    def puct_priors(self, node_id: int) -> Dict[int, float]:
+        """Effective PUCT priors of ``node_id``'s selectable (non-dead) edges.
+
+        Each edge's mass is normalized in log space over the node's current
+        non-dead edges, so the priors sum to one. They are derived on every
+        call, so adding an edge, a new alias or a dead edge renormalizes them
+        without touching any visit statistics or raw log-priors.
+        """
+        viable = [
+            self.edges[eid]
+            for eid in self.nodes[node_id].outgoing_edge_ids
+            if self.edges[eid].status != EdgeStatus.DEAD
+        ]
+        if not viable:
+            return {}
+        masses = [edge.log_mass for edge in viable]
+        normalizer = logsumexp(masses)
+        if not isfinite(normalizer):
+            raise ValueError(f"Node {node_id} has no finite prior mass to normalize.")
+        return {edge.id: math.exp(mass - normalizer) for edge, mass in zip(viable, masses)}
 
     def mark_edge_dead(self, edge_id: int, *, note: Optional[str] = None) -> None:
         """The tactic failed to apply (Lean rejected it / executor error)."""
@@ -401,18 +523,51 @@ class ProofHypergraph:
         reason: NodeClosureReason,
         note: Optional[str] = None,
     ) -> None:
-        """No more tactic candidates remain for ``node_id`` (top-k exhausted,
-        depth limit reached, or the GNN returned no viable prediction).
-        Lets ``_recompute_node`` decide DEAD vs. staying EXPANDED/SOLVED.
+        """Close ``node_id``'s proposal source (its candidates or widening
+        bounds are spent, the depth limit is reached, the provider proposed
+        nothing, or replay failed). Lets ``_recompute_node`` decide DEAD vs.
+        staying EXPANDED/SOLVED. A node is never reopened.
         """
         node = self.nodes[node_id]
-        node.exhausted = True
+        if reason == NodeClosureReason.NONE:
+            raise ValueError("Closing a proposal source needs a reason.")
         node.closure_reason = reason
         if note:
             node.note = note
         self._propagate(node_id)
 
      
+    def settle_proposal_round(self, node_id: int) -> None:
+        """One proposal round at ``node_id`` finished and its source stays open.
+
+        The node keeps its status (OPEN without edges, EXPANDED otherwise) even
+        when every known edge failed: it can still be widened, so its known
+        alternatives are not a complete failure.
+        """
+        self._propagate(node_id)
+
+    def search_counters(self) -> dict[str, float]:
+        """Proposal and widening work over the whole graph, for reports."""
+        nodes = list(self.nodes.values())
+        closures: Dict[str, int] = {}
+        for node in nodes:
+            if node.closure_reason != NodeClosureReason.NONE:
+                closures[node.closure_reason.value] = closures.get(node.closure_reason.value, 0) + 1
+        return {
+            "proposal_rounds": float(sum(node.proposal_rounds for node in nodes)),
+            "widening_rounds": float(sum(max(node.proposal_rounds - 1, 0) for node in nodes)),
+            "raw_draws": float(sum(node.proposal_draws for node in nodes)),
+            "distinct_commands": float(sum(node.attempted_commands for node in nodes)),
+            "accepted_edges": float(len(self.edges)),
+            "rejected_commands": float(
+                sum(outcome is None for node in nodes for outcome in node.command_outcomes.values())
+            ),
+            "cache_hits": float(self.cache_hits),
+            "completed_simulations": float(self.completed_simulations),
+            "deferred_selections": float(self.deferred_selections),
+            **{f"closed_{reason}": float(count) for reason, count in sorted(closures.items())},
+        }
+
     # Queries
      
     @property
