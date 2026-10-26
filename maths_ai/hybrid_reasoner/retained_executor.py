@@ -22,7 +22,12 @@ from .execution_registry import Lease, LeaseKind, SnapshotRegistry
 from .execution_types import DIRECT, EXTRA, ChildObligation, ExecutionOccurrence
 from .pantograph_adapter import execution_goal_to_goal
 
-__all__ = ["ExecutionReferenceError", "RetainedOutcome", "RetainedTacticExecutor"]
+__all__ = [
+    "ExecutionReferenceError",
+    "NullTacticExecutor",
+    "RetainedOutcome",
+    "RetainedTacticExecutor",
+]
 
 
 class ExecutionReferenceError(RuntimeError):
@@ -142,4 +147,26 @@ class RetainedTacticExecutor:
             closed=transition.closed,
             changed=transition.changed,
             selected_complete=complete,
+        )
+
+
+class NullTacticExecutor(RetainedTacticExecutor):
+    """Stand-in executor for tests and tooling without a Lean backend.
+
+    Every application is reported as failed rather than as a vacuous success:
+    a success without children would look like a closed goal and fabricate
+    proofs. Surfacing the failure keeps the missing backend visible.
+    """
+
+    def __init__(self, server=None):
+        self.server = server
+
+    async def apply(self, registry, occurrence, command, *, holder="operation"):
+        return RetainedOutcome(
+            success=False,
+            command=command,
+            error=(
+                f"no TacticExecutor configured — cannot apply {command!r} to "
+                f"{occurrence.goal.expression!r}; requires a Lean/Pantograph backend"
+            ),
         )

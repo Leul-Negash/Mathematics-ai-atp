@@ -218,3 +218,74 @@ def test_an_exported_artifact_reverifies_in_a_fresh_session(live_env):
                 await reverify(scope, broken)
 
         scoped(live_env, check)
+
+
+def _search(env, statement, proposals, **kwargs):
+    from maths_ai.data_models.proof_components import TacticCandidate
+    from maths_ai.hybrid_reasoner.joint_inference import HybridReasoner, PantographExecutor
+    from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
+
+    class Deterministic(HybridReasoner):
+        def _build_gnn_engine(self, **_kwargs):
+            return None
+
+        def predict_next_tactic(self, goal):
+            return [
+                TacticCandidate(tactic_name=name, arguments=list(arguments), probability=0.9)
+                for name, *arguments in proposals.get(goal.expression, [])
+            ]
+
+    async def run():
+        async with await create_model_sexpr_client(env) as client:
+            reasoner = Deterministic(
+                config_path=None, tactic_model_path=None, argument_model_path=None,
+                executor=PantographExecutor(client), use_pln=False, **kwargs,
+            )
+            graph = await reasoner.prove(seed_from_text(goal=statement))
+            assert (await client.stat()).n_goals == 0
+            return graph
+
+    return asyncio.run(run())
+
+
+@pytest.mark.pantograph_live
+def test_the_search_certifies_through_retained_snapshots(live_env):
+    graph = _search(
+        live_env,
+        "∀ (p q : Prop), p → q → p ∧ q",
+        {
+            "∀ (p q : Prop), p → q → p ∧ q": [("intro p q hp hq",)],
+            "p ∧ q": [("constructor",)],
+            "p": [("exact", "hp")],
+            "q": [("exact", "hq")],
+        },
+    )
+    assert graph.is_solved()
+    assert graph.execution["root_admissions"] == 1
+    assert graph.execution["intermediate_reconstructions"] == 0
+    assert graph.execution["replay_tactic_calls"] == 4
+    assert graph.certificate.receipt.lean.startswith("4.10.0-rc1")
+    artifact = ReplayArtifact.from_dict(graph.artifact.as_dict())
+
+    async def again(scope):
+        return await reverify(scope, artifact)
+
+    assert scoped(live_env, again).receipt.proof == graph.certificate.receipt.proof
+
+
+@pytest.mark.pantograph_live
+def test_the_search_never_reports_conflicting_witnesses_as_a_proof(live_env):
+    graph = _search(
+        live_env,
+        "∃ n : Nat, n = 0 ∧ n = 1",
+        {
+            "∃ n, n = 0 ∧ n = 1": [("refine ⟨?_, ?_, ?_⟩",)],
+            "ℕ": [("exact 0",), ("exact 1",)],
+            "?refine_1 = 0": [("exact (rfl : 0 = 0)",)],
+            "?refine_1 = 1": [("exact (rfl : 1 = 1)",)],
+        },
+        max_nodes=30,
+    )
+    assert not graph.is_solved()
+    assert graph.execution["replay_attempts"] >= 1
+    assert graph.execution["replay_conflicts"] >= 1

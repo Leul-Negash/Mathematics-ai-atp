@@ -5,10 +5,15 @@
   * ``predict_next_tactic`` — instead of the deterministic GNN-engine top-k, draw ``k``
     i.i.d. actions from the actor-critic policy (``model.act``), decode each into a
     ``TacticCandidate`` the Pantograph executor can apply, and stash the integer action
-    record (``EdgeAction``) keyed by a candidate fingerprint.
+    record (``EdgeAction``) keyed by the command it renders to. A stash belongs to the
+    one occurrence being expanded and is settled when that expansion ends.
   * ``_link`` — when the executor accepts a candidate and the base ``_expand`` links it
-    into the hypergraph, migrate the stash entry from fingerprint to ``edge.id`` so the
+    into the hypergraph, migrate the stash entry from its command to ``edge.id`` so the
     train phase can join each harvested transition to the action that produced it.
+
+Replaying a recipe to combine branches samples nothing: it runs recorded attempts,
+so it adds no policy samples and changes no multiplicity. A replay continuation is
+searched like any node, so its proposals are fresh samples of its actual observation.
 
 Stash entries still pending after a node's expansion belong to executor-REJECTED samples;
 they are flushed to ``failure_actions`` and train the actor with
@@ -32,6 +37,7 @@ from torch_geometric.data import Batch
 from maths_ai.data_models.proof_components import ArgumentRef, Goal, TacticCandidate
 from maths_ai.hybrid_reasoner.hypergraph import ProofHypergraph, ProofNode
 from maths_ai.hybrid_reasoner.joint_inference import ExpansionResult, HybridReasoner
+from maths_ai.hybrid_reasoner.tactic_rendering import render_tactic_command
 from maths_ai.lean_replay import LeanGoalSeed
 from pantograph_async import PantographStateError
 
@@ -57,9 +63,18 @@ class RLSearchResult:
     edge_actions: Dict[int, EdgeAction] = field(default_factory=dict)
     failure_actions: List[FailureRecord] = field(default_factory=list)
 
+    @property
+    def certified(self) -> bool:
+        return self.graph.is_solved()
 
-def _fingerprint(goal: Goal, tactic_name: str, arguments: tuple[str, ...]) -> tuple:
-    return (goal.state_fingerprint(), tactic_name, arguments)
+
+def _action_key(candidate: TacticCandidate) -> tuple:
+    """Identity of a proposal within one occurrence's expansion: the command Lean
+    runs, or the raw tactic and arguments when it does not render."""
+    command = render_tactic_command(candidate)
+    if command is not None:
+        return ("command", command)
+    return ("unrendered", candidate.tactic_name, tuple(candidate.arguments))
 
 
 class RLHybridReasoner(HybridReasoner):
@@ -151,9 +166,7 @@ class RLHybridReasoner(HybridReasoner):
                 if candidate is None:
                     self._unplayable_actions.append(action)
                     continue
-                key = _fingerprint(
-                    sub_goal, candidate.tactic_name, tuple(candidate.arguments)
-                )
+                key = _action_key(candidate)
                 existing = self._pending.get(key)
                 if existing is not None:
                     self._pending[key] = EdgeAction(
@@ -235,15 +248,10 @@ class RLHybridReasoner(HybridReasoner):
         node: ProofNode,
         tactic: TacticCandidate,
         ranked_subgoals: list,
+        outcome=None,
     ):
-        edge = super()._link(graph, node, tactic, ranked_subgoals)
-        key = _fingerprint(node.goal, tactic.tactic_name, tuple(tactic.arguments))
-        action = self._pending.pop(key, None)
-        if action is None and self._pending_goal is not None:
-            key = _fingerprint(
-                self._pending_goal, tactic.tactic_name, tuple(tactic.arguments)
-            )
-            action = self._pending.pop(key, None)
+        edge = super()._link(graph, node, tactic, ranked_subgoals, outcome)
+        action = self._pending.pop(_action_key(tactic), None)
         if action is not None and edge is not None and self._result is not None:
             self._result.edge_actions[edge.id] = action
         return edge
