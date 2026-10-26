@@ -35,6 +35,7 @@ from maths_ai.hybrid_reasoner.joint_inference import ExpansionResult, HybridReas
 from maths_ai.lean_replay import LeanGoalSeed
 from pantograph_async import PantographStateError
 
+from .policy_actions import fingerprint, with_type_signals
 from .actor_critic import ActorCriticWithArgsClassifier
 from .inference import _resolve_local_node_name, local_declarations
 from .pln_rl_training import EdgeAction, FailureRecord, make_dag_featurizer
@@ -53,8 +54,10 @@ class RLSearchResult:
     failure_actions: List[FailureRecord] = field(default_factory=list)
 
 
-def _fingerprint(goal: Goal, tactic_name: str, arguments: tuple[str, ...]) -> tuple:
-    return (goal.state_fingerprint(), tactic_name, arguments)
+def _fingerprint(
+    goal: Goal, tactic_name: str, arguments: tuple[str, ...], action_key: str
+) -> tuple:
+    return (goal.state_fingerprint(), tactic_name, arguments, action_key)
 
 
 class RLHybridReasoner(HybridReasoner):
@@ -67,12 +70,16 @@ class RLHybridReasoner(HybridReasoner):
         tactic_vocab: dict[str, int],
         *,
         executor,
+        candidate_provider,
         device: torch.device | None = None,
         **reasoner_kwargs,
     ) -> None:
         # The base __init__ calls self._build_gnn_engine (overridden below to return
         # None), so these must exist before super().__init__ runs — Python sets them
         # first because the override reads only instance attributes set here.
+        self.candidate_provider = candidate_provider
+        self._candidate_pool = None
+        self._excluded_declarations = ()
         self.model = model
         self.device = device or torch.device("cpu")
         self.node_vocab = node_vocab
@@ -85,7 +92,7 @@ class RLHybridReasoner(HybridReasoner):
         super().__init__(
             config_path=None,
             tactic_model_path=None,
-            argument_model_path=None,
+            retrieval_config_path=None,
             executor=executor,
             **reasoner_kwargs,
         )
@@ -105,6 +112,20 @@ class RLHybridReasoner(HybridReasoner):
     # ------------------------------------------------------------------
     # Proposal: sample k i.i.d. actions and decode them
     # ------------------------------------------------------------------
+
+    async def prepare_goal(self, goal):
+        dag, data = self.dag_featurize(goal)
+        local_ids = tuple(data.premise_mask.nonzero().flatten().tolist())
+        self._candidate_pool = await self.candidate_provider.retrieve(
+            goal,
+            local_ids,
+            str(data.graph_fingerprint),
+            excluded=self._excluded_declarations,
+        )
+        if self.model.decoder.local_type_bonus_strength:
+            self._candidate_pool = with_type_signals(
+                self._candidate_pool, goal, dag, self.tactic_vocab
+            )
 
     def predict_next_tactic(self, sub_goal: Goal) -> List[TacticCandidate]:
         """Draw ``top_k_tactics`` i.i.d. actions from π(·|s) and decode each.
@@ -133,7 +154,7 @@ class RLHybridReasoner(HybridReasoner):
         with torch.no_grad():
             for _ in range(self.top_k_tactics):
                 sample = self.model.act(
-                    batch, id_to_tactic=self.id_to_tactic, greedy=self._greedy
+                    batch, candidate_pools=(self._candidate_pool,), greedy=self._greedy
                 )
                 candidate, action = self._decode(
                     sample, dag, declarations, graph_fingerprint
@@ -142,13 +163,17 @@ class RLHybridReasoner(HybridReasoner):
                     self._unplayable_actions.append(action)
                     continue
                 key = _fingerprint(
-                    sub_goal, candidate.tactic_name, tuple(candidate.arguments)
+                    sub_goal,
+                    candidate.tactic_name,
+                    tuple(candidate.arguments),
+                    candidate.policy_action_key,
                 )
                 existing = self._pending.get(key)
                 if existing is not None:
                     self._pending[key] = EdgeAction(
                         tactic_id=existing.tactic_id,
-                        arg_indices=existing.arg_indices,
+                        arguments=existing.arguments,
+                        candidate_pool=existing.candidate_pool,
                         multiplicity=existing.multiplicity + 1,
                         graph_fingerprint=existing.graph_fingerprint,
                     )
@@ -174,10 +199,11 @@ class RLHybridReasoner(HybridReasoner):
         integer action and graph fingerprint as rejected-action training records.
         """
         tactic_id = int(sample.tactic_action[0])
-        arg_indices = tuple(int(a[0]) for a in sample.arg_actions)
+        arguments = sample.arguments[0]
         action = EdgeAction(
             tactic_id=tactic_id,
-            arg_indices=arg_indices,
+            arguments=arguments,
+            candidate_pool=self._candidate_pool,
             multiplicity=1,
             graph_fingerprint=graph_fingerprint,
         )
@@ -186,7 +212,11 @@ class RLHybridReasoner(HybridReasoner):
             return None, action
 
         arguments: List[str] = []
-        for idx in arg_indices:
+        for reference in sample.arguments[0]:
+            if reference.source == "library":
+                arguments.append(self._candidate_pool.library.name(reference.identity))
+                continue
+            idx = reference.identity
             if not 0 <= idx < len(dag.nodes):
                 return None, action
             try:
@@ -196,9 +226,18 @@ class RLHybridReasoner(HybridReasoner):
             except ValueError:
                 return None, action
 
-        probability = float(math.exp(float(sample.tactic_logp[0])))
+        probability = float(math.exp(float(sample.logp[0])))
         candidate = TacticCandidate(
-            tactic_name=tactic_name, arguments=arguments, probability=probability
+            tactic_name=tactic_name,
+            arguments=arguments,
+            probability=probability,
+            policy_action_key=fingerprint(
+                (
+                    tactic_id,
+                    [(a.source, a.identity) for a in sample.arguments[0]],
+                    self._candidate_pool.fingerprint,
+                )
+            ),
         )
         return candidate, action
 
@@ -214,11 +253,19 @@ class RLHybridReasoner(HybridReasoner):
         ranked_subgoals: list,
     ):
         edge = super()._link(graph, node, tactic, ranked_subgoals)
-        key = _fingerprint(node.goal, tactic.tactic_name, tuple(tactic.arguments))
+        key = _fingerprint(
+            node.goal,
+            tactic.tactic_name,
+            tuple(tactic.arguments),
+            tactic.policy_action_key,
+        )
         action = self._pending.pop(key, None)
         if action is None and self._pending_goal is not None:
             key = _fingerprint(
-                self._pending_goal, tactic.tactic_name, tuple(tactic.arguments)
+                self._pending_goal,
+                tactic.tactic_name,
+                tuple(tactic.arguments),
+                tactic.policy_action_key,
             )
             action = self._pending.pop(key, None)
         if action is not None and edge is not None and self._result is not None:
@@ -268,6 +315,11 @@ class RLHybridReasoner(HybridReasoner):
         """
         if self._proving:
             raise PantographStateError("A reasoner supports only one active search.")
+        self._excluded_declarations = tuple(
+            str(value)
+            for key, value in seed.source
+            if key in {"theorem", "theorem_name"}
+        )
         self._pending = {}
         self._unplayable_actions = []
         self._pending_goal = None

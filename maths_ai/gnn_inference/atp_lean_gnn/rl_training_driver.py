@@ -43,6 +43,8 @@ from .reporting import console_print
 from .rl_live_collection import LiveReasonerPool
 from .rl_resources import ResourcePlan, plan_resources
 from .rl_reasoner import RLHybridReasoner, RLSearchResult
+from .retrieval_artifacts import RetrievalConfig, LiveLemmaProvider
+from dataclasses import asdict
 from .seed_admission import (
     AdmissionReport,
     TheoremItem,
@@ -129,7 +131,9 @@ class RLTrainingConfig:
     grad_clip: float = 1.0
     critic_weight: float = 0.5
     entropy_weight: float = 0.01
-    arg_loss_weight: float = 0.5
+    retrieval: RetrievalConfig | None = None
+    max_update_candidates: int = 100000
+    max_update_candidate_bytes: int = 268435456
     max_update_nodes: int = 0
     max_update_edges: int = 0
 
@@ -171,12 +175,20 @@ class RLTrainingConfig:
         "pantograph_repl",
     )
 
+    def __post_init__(self):
+        for name in ("max_update_candidates", "max_update_candidate_bytes"):
+            if type(getattr(self, name)) is not int or getattr(self, name) < 1:
+                raise ValueError(f"{name} must be a positive integer.")
+
     @classmethod
     def from_json(cls, path: str | Path) -> "RLTrainingConfig":
         with open(path) as f:
             payload = json.load(f)
         kwargs: dict[str, Any] = {}
         for key, value in payload.items():
+            if key == "retrieval":
+                kwargs[key] = RetrievalConfig(**value) if value is not None else None
+                continue
             if key == "graph_representation":
                 continue
             if key in cls._PATH_FIELDS and value is not None:
@@ -190,7 +202,14 @@ class RLTrainingConfig:
         for key, value in self.__dict__.items():
             if key.startswith("_"):
                 continue
-            out[key] = str(value) if isinstance(value, Path) else value
+            out[key] = (
+                {
+                    k: str(v) if isinstance(v, Path) else v
+                    for k, v in asdict(value).items()
+                }
+                if isinstance(value, RetrievalConfig)
+                else (str(value) if isinstance(value, Path) else value)
+            )
         return out
 
     def resource_plan(self) -> ResourcePlan:
@@ -570,6 +589,21 @@ async def _create_live_reasoner_pool(
     """Create the shared live-worker lifecycle from the complete search config."""
     from maths_ai.hybrid_reasoner.joint_inference import PantographExecutor
 
+    if cfg.retrieval is None:
+        raise ValueError(
+            "Live source-aware RL requires retrieval artifacts. Migrate the RL config first."
+        )
+    if cfg.retrieval.faiss_threads > plan.usable_cpu_count:
+        raise ValueError("Retrieval thread budget exceeds the available CPU quota.")
+    provider = LiveLemmaProvider(cfg.retrieval)
+    try:
+        provider.verify_environment(env)
+        if model.model_spec.retrieval_binding != provider.library.fingerprint:
+            raise ValueError("Checkpoint and live retrieval artifacts differ.")
+    except BaseException:
+        await provider.aclose()
+        raise
+
     async def server_factory(_worker_id: int):
         return await create_model_sexpr_client(env)
 
@@ -577,6 +611,7 @@ async def _create_live_reasoner_pool(
         del worker_id
         return RLHybridReasoner(
             model=replica,
+            candidate_provider=provider,
             node_vocab=node_vocab,
             tactic_vocab=tactic_vocab,
             executor=PantographExecutor(server),
@@ -590,20 +625,26 @@ async def _create_live_reasoner_pool(
     async def search_factory(reasoner, theorem, greedy):
         return await reasoner.prove(theorem.seed, greedy=greedy)
 
-    return await LiveReasonerPool.create(
-        model=model,
-        plan=plan,
-        server_factory=server_factory,
-        reasoner_factory=reasoner_factory,
-        search_factory=search_factory,
-        is_solved=lambda result: result.graph.is_solved(),
-        startup_timeout_s=cfg.server_start_timeout_s,
-        shutdown_timeout_s=cfg.worker_shutdown_timeout_s,
-        queue_size=cfg.worker_queue_size,
-        environment_description=env.describe(),
-        model_generation=model_generation,
-        log=console_print,
-    )
+    try:
+        result = await LiveReasonerPool.create(
+            model=model,
+            plan=plan,
+            server_factory=server_factory,
+            reasoner_factory=reasoner_factory,
+            search_factory=search_factory,
+            is_solved=lambda result: result.graph.is_solved(),
+            startup_timeout_s=cfg.server_start_timeout_s,
+            shutdown_timeout_s=cfg.worker_shutdown_timeout_s,
+            queue_size=cfg.worker_queue_size,
+            environment_description=env.describe(),
+            model_generation=model_generation,
+            log=console_print,
+        )
+    except BaseException:
+        await provider.aclose()
+        raise
+    result.close_callbacks.append(provider.aclose)
+    return result
 
 
 async def run_rl_training(
@@ -642,7 +683,7 @@ async def _run_rl_training_impl(
     resource_plan = cfg.resource_plan()
     device = resource_plan.update_device
     console_print(f"RL resources: {resource_plan.describe()}")
-    metadata = load_prepared_metadata(cfg.prepared_root)
+    metadata = load_prepared_metadata(cfg.prepared_root, splits=())
     require_graph_representation(metadata.graph_representation)
     node_vocab, tactic_vocab = metadata.node_vocab, metadata.tactic_vocab
 
@@ -792,7 +833,8 @@ async def _run_rl_training_impl(
                 device=device,
                 critic_weight=cfg.critic_weight,
                 entropy_weight=cfg.entropy_weight,
-                arg_loss_weight=cfg.arg_loss_weight,
+                max_update_candidates=cfg.max_update_candidates,
+                max_update_candidate_bytes=cfg.max_update_candidate_bytes,
                 bc_weight=bc_weight,
                 max_update_nodes=cfg.max_update_nodes,
                 max_update_edges=cfg.max_update_edges,
@@ -838,7 +880,9 @@ async def _run_rl_training_impl(
 
         # Curriculum: grow when the recent training-window solve rate crosses
         # threshold. Seeds that failed to replay were never searched.
-        searched = collect_stats["attempted"] - collect_stats.get("seeds_inadmissible", 0.0)
+        searched = collect_stats["attempted"] - collect_stats.get(
+            "seeds_inadmissible", 0.0
+        )
         solve_rate = collect_stats["solved"] / (searched or 1.0)
         recent_solve_rates.append(solve_rate)
         if len(recent_solve_rates) > cfg.curriculum_window_rounds:
@@ -1050,7 +1094,7 @@ def driver_main(argv: list[str] | None = None) -> int:
             resource_plan = cfg.resource_plan()
             device = resource_plan.update_device
             console_print(f"RL resources: {resource_plan.describe()}")
-            metadata = load_prepared_metadata(cfg.prepared_root)
+            metadata = load_prepared_metadata(cfg.prepared_root, splits=())
             require_graph_representation(metadata.graph_representation)
             node_vocab, tactic_vocab = metadata.node_vocab, metadata.tactic_vocab
             checkpoint = torch.load(

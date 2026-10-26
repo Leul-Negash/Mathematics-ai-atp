@@ -71,6 +71,11 @@ def artifacts(tmp):
         ).encode()
     ).hexdigest()
     source_manifest = {
+        "model_type": "pretrained_text_dual_encoder_index_v1",
+        "model_name": str(model_root),
+        "state_text_policy": "goal_first_v1",
+        "max_length": 32,
+        "normalize": True,
         "lemma_encoder_sha256": state_dict_sha256(lemma.state_dict()),
         "corpus_sha256": file_hash(corpus),
         "tokenizer_sha256": token_hash,
@@ -80,6 +85,7 @@ def artifacts(tmp):
     torch.save(
         dict(
             model_type="pretrained_text_dual_encoder",
+            corpus_sha256=file_hash(corpus),
             phase="complete",
             state_text_policy="goal_first_v1",
             model_name=str(model_root),
@@ -225,3 +231,13 @@ def test_empty_allowed_inventory_is_not_an_artifact_failure(tmp_path):
         await provider.aclose()
 
     asyncio.run(run())
+
+
+def test_changed_query_binding_is_rejected_even_with_matching_index_files(tmp_path):
+    cfg, _, _ = artifacts(tmp_path)
+    path = cfg.query_artifact / "query_manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["source_checkpoint_sha256"] = "different-text-checkpoint"
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(RetrievalError, match="deployment binding"):
+        LiveLemmaProvider(cfg)

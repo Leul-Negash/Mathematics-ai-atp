@@ -1,4 +1,5 @@
 """Source-aware actor-critic with a shared graph encoder and complete action policy."""
+
 from __future__ import annotations
 from dataclasses import dataclass
 import torch
@@ -10,6 +11,7 @@ from .policy_actions import ArgumentReference, CandidatePoolSnapshot
 from .actor_critic_types import ActionSample
 from .policy_model import GraphActionPolicy
 
+
 class ActorHead(nn.Module):
     """Policy head: ``actor(h) = base(h) + residual(h)``.
 
@@ -20,6 +22,7 @@ class ActorHead(nn.Module):
     RL then grows the correction from zero, giving an exact behavioral warm-start
     while retaining the extra nonlinear capacity.
     """
+
     def __init__(self, hidden_dim: int, num_tactics: int, dropout: float = 0.2):
         super().__init__()
         self.base = nn.Linear(hidden_dim, num_tactics)
@@ -44,13 +47,14 @@ class ActorHead(nn.Module):
 
 class CriticHead(nn.Module):
     """Value head: state embedding → scalar V(s)."""
+
     def __init__(self, hidden_dim: int, dropout: float = 0.2):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1)
+            nn.Linear(hidden_dim, 1),
         )
 
     def forward(self, state_emb: Tensor) -> Tensor:
@@ -58,16 +62,27 @@ class CriticHead(nn.Module):
         return self.net(state_emb)
 
 
-
 class ActorCriticWithArgsClassifier(GraphActionPolicy):
-    def __init__(self, *, encoder: StateGraphEncoder, num_tactics: int, dropout=0.2,
-                 max_args=3, text_dim=384, local_type_bonus_strength=0.0):
+    def __init__(
+        self,
+        *,
+        encoder: StateGraphEncoder,
+        num_tactics: int,
+        dropout=0.2,
+        max_args=3,
+        text_dim=384,
+        local_type_bonus_strength=0.0,
+        retrieval_binding="",
+    ):
         super().__init__()
+        self.retrieval_binding = retrieval_binding
         self.encoder = encoder
         self.hidden_dim, self.max_args = encoder.output_dim, max_args
         self.actor = ActorHead(self.hidden_dim, num_tactics, dropout)
         self.critic = CriticHead(self.hidden_dim, dropout)
-        self.decoder = SourceAwareDecoder(self.hidden_dim, num_tactics, max_args, text_dim, local_type_bonus_strength)
+        self.decoder = SourceAwareDecoder(
+            self.hidden_dim, num_tactics, max_args, text_dim, local_type_bonus_strength
+        )
 
     def encode_graph(self, data):
         self.eval()
@@ -78,9 +93,12 @@ class ActorCriticWithArgsClassifier(GraphActionPolicy):
 
     def encode(self, data, *, tactic_mask=None):
         encoded = self.encode_graph(data)
-        return (encoded.node_embeddings, encoded.state_embeddings,
-                self.predict_tactics(encoded, tactic_mask=tactic_mask), self.critic(encoded.state_embeddings))
-
+        return (
+            encoded.node_embeddings,
+            encoded.state_embeddings,
+            self.predict_tactics(encoded, tactic_mask=tactic_mask),
+            self.critic(encoded.state_embeddings),
+        )
 
 
 def init_actor_from_supervised(model, tactic_classifier):
@@ -89,11 +107,19 @@ def init_actor_from_supervised(model, tactic_classifier):
     nn.init.zeros_(model.actor.residual[3].bias)
 
 
-def load_from_pointer_checkpoint(model, checkpoint_path, device, *, node_vocab, tactic_vocab, graph_representation):
+def load_from_pointer_checkpoint(
+    model, checkpoint_path, device, *, node_vocab, tactic_vocab, graph_representation
+):
     from .checkpointing import build_model_from_checkpoint
+
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    pointer, _, spec = build_model_from_checkpoint(checkpoint, node_vocab=node_vocab,
-        tactic_vocab=tactic_vocab, graph_representation=graph_representation, expected_model_kind="tactic_with_args")
+    pointer, _, spec = build_model_from_checkpoint(
+        checkpoint,
+        node_vocab=node_vocab,
+        tactic_vocab=tactic_vocab,
+        graph_representation=graph_representation,
+        expected_model_kind="tactic_with_args",
+    )
     if spec != model.model_spec:
         raise ValueError("Pointer and actor-critic specifications differ.")
     model.encoder.load_state_dict(pointer.encoder.state_dict(), strict=True)

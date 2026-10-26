@@ -38,16 +38,24 @@ def export(checkpoint_path, index_root, corpus, inventory_path, output):
         if key.startswith("lemma_encoder.")
     }
     source = json.loads((index_root / "manifest.json").read_text())
-    if (
-        source["lemma_encoder_sha256"] != state_dict_sha256(lemma)
-        or source["corpus_sha256"] != file_hash(corpus)
-        or source["tokenizer_sha256"] != saved["tokenizer_sha256"]
-    ):
+    expected = dict(
+        model_type="pretrained_text_dual_encoder_index_v1",
+        model_name=saved["model_name"],
+        tokenizer_sha256=saved["tokenizer_sha256"],
+        state_text_policy="goal_first_v1",
+        corpus_sha256=file_hash(corpus),
+        lemma_encoder_sha256=state_dict_sha256(lemma),
+        max_length=saved["max_length"],
+        normalize=True,
+    )
+    if source != expected or saved["corpus_sha256"] != file_hash(corpus):
         raise ValueError("Dual encoder, tokenizer, corpus, and index are not paired.")
     inventory = json.loads(Path(inventory_path).read_text())
     deployment = dict(
         schema="lemma_serving_v1",
         source_manifest=source,
+        text_checkpoint_sha256=file_hash(checkpoint_path),
+        query_encoder_sha256=state_dict_sha256(state),
         corpus_sha256=file_hash(corpus),
         environment_identity=inventory["environment_identity"],
         files={

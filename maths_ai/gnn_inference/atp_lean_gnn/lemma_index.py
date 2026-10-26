@@ -1,11 +1,13 @@
 from __future__ import annotations
 import hashlib
-from typing import Any
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 import numpy as np
 
@@ -46,7 +48,9 @@ class LemmaIndex:
             raise ValueError("lemma_ids length must match lemma_vectors rows.")
         if self.lemma_names and len(self.lemma_names) != len(self.lemma_ids):
             raise ValueError("lemma_names length must match lemma_ids length.")
-        if hasattr(self.index, "d") and int(self.index.d) != int(self.lemma_vectors.shape[1]):
+        if hasattr(self.index, "d") and int(self.index.d) != int(
+            self.lemma_vectors.shape[1]
+        ):
             raise ValueError("FAISS index dimension does not match lemma_vectors.")
 
     @classmethod
@@ -82,7 +86,9 @@ class LemmaIndex:
         if not names_path.exists():
             raise FileNotFoundError(f"Lemma name map not found at '{names_path}'.")
         if not manifest_path.exists():
-            raise FileNotFoundError(f"Lemma index manifest not found at '{manifest_path}'.")
+            raise FileNotFoundError(
+                f"Lemma index manifest not found at '{manifest_path}'."
+            )
 
         lemma_vectors = np.load(vectors_path)
         lemma_ids = json.loads(ids_path.read_text(encoding="utf-8"))
@@ -124,25 +130,28 @@ class LemmaIndex:
             query = _normalize_rows(query)
 
         scores, indices = self.index.search(query, k)
-        
+
         num_lemmas = len(self.lemma_ids)
         lemma_ids = [
-            [self.lemma_ids[int(idx)] if 0 <= int(idx) < num_lemmas else -1 for idx in row]
+            [
+                self.lemma_ids[int(idx)] if 0 <= int(idx) < num_lemmas else -1
+                for idx in row
+            ]
             for row in indices
         ]
-        
+
         valid_mask = (indices >= 0) & (indices < num_lemmas)
         safe_indices = np.where(valid_mask, indices, 0)
-        
+
         if num_lemmas > 0:
             lemma_vecs = self.lemma_vectors[safe_indices]
             lemma_vecs[~valid_mask] = 0.0
         else:
             lemma_vecs = np.zeros(
                 (indices.shape[0], indices.shape[1], self.lemma_vectors.shape[1]),
-                dtype=self.lemma_vectors.dtype
+                dtype=self.lemma_vectors.dtype,
             )
-            
+
         return lemma_ids, lemma_vecs, scores
 
     @staticmethod
@@ -174,7 +183,11 @@ def _tensor_bytes(tensor: Any) -> bytes:
     try:
         return t.numpy().tobytes()
     except (TypeError, RuntimeError):
-        return t.view(torch.int16).numpy().tobytes() if t.element_size() == 2 else t.view(torch.uint8).numpy().tobytes()
+        return (
+            t.view(torch.int16).numpy().tobytes()
+            if t.element_size() == 2
+            else t.view(torch.uint8).numpy().tobytes()
+        )
 
 
 def state_dict_sha256(state_dict: Any) -> str:

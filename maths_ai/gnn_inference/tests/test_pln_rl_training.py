@@ -1,4 +1,8 @@
 from __future__ import annotations
+from types import SimpleNamespace
+from torch_geometric.data import Batch
+from maths_ai.gnn_inference.atp_lean_gnn.policy_actions import local_pools
+from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import EdgeAction
 
 import json
 from pathlib import Path
@@ -31,6 +35,20 @@ from maths_ai.gnn_inference.atp_lean_gnn.search_harvest import (
 
 def _tac(name: str = "apply", p: float = 1.0) -> TacticCandidate:
     return TacticCandidate(tactic_name=name, arguments=[], probability=p)
+
+
+def recorded_actions(transitions, featurize, tactic_to_id):
+    from dataclasses import replace
+    from maths_ai.gnn_inference.atp_lean_gnn.policy_actions import fingerprint
+    from maths_ai.gnn_inference.atp_lean_gnn.retrieval_artifacts import goal_query
+    actions={}
+    for t in transitions:
+        if t.tactic.tactic_name not in tactic_to_id:
+            continue
+        data=featurize(t.goal)
+        pool=replace(local_pools(Batch.from_data_list([data]))[0],graph_fingerprint=data.graph_fingerprint,query_fingerprint=fingerprint(goal_query(t.goal)))
+        actions[t.edge_id]=EdgeAction(tactic_id=tactic_to_id[t.tactic.tactic_name],candidate_pool=pool,graph_fingerprint=data.graph_fingerprint)
+    return actions
 
 
 class PLNRLTrainingTests(unittest.TestCase):
@@ -72,7 +90,7 @@ class PLNRLTrainingTests(unittest.TestCase):
         critic_samples = extract_critic_samples(g)
         self.assertEqual(len(transitions), 3)
         result = compute_transition_loss(
-            model, transitions, critic_samples, featurize, tactic_to_id
+            model, transitions, critic_samples, featurize, edge_actions=recorded_actions(transitions,featurize,tactic_to_id)
         )
         self.assertIsNotNone(result)
         loss, metrics = result
@@ -86,7 +104,7 @@ class PLNRLTrainingTests(unittest.TestCase):
         optimizer = AdamW(model.parameters(), lr=0.01)
         before = [p.detach().clone() for p in model.parameters()]
         metrics = train_step(
-            model, optimizer, [g], featurize, tactic_to_id,
+            model, optimizer, [SimpleNamespace(graph=g,edge_actions=recorded_actions(extract_actor_transitions(g),featurize,tactic_to_id),failure_actions=[])], featurize,
             reward_cfg=RewardConfig(step_penalty=0.0), bc_weight=0.1,
         )
         self.assertEqual(metrics["num_transitions"], 3.0)
@@ -98,7 +116,7 @@ class PLNRLTrainingTests(unittest.TestCase):
         g, featurize, model, tactic_to_id = self._setup()
         transitions = extract_actor_transitions(g, RewardConfig(step_penalty=0.0))
         critic_samples = extract_critic_samples(g)
-        result = compute_transition_loss(model, transitions, critic_samples, featurize, {})
+        result = compute_transition_loss(model, transitions, critic_samples, featurize, edge_actions={})
         self.assertIsNotNone(result)
         loss, metrics = result
         self.assertTrue(torch.isfinite(loss))
@@ -109,7 +127,7 @@ class PLNRLTrainingTests(unittest.TestCase):
     def test_actor_only_batch_has_zero_critic_loss(self):
         g, featurize, model, tactic_to_id = self._setup()
         transitions = extract_actor_transitions(g, RewardConfig(step_penalty=0.0))
-        result = compute_transition_loss(model, transitions, [], featurize, tactic_to_id)
+        result = compute_transition_loss(model, transitions, [], featurize, edge_actions=recorded_actions(transitions,featurize,tactic_to_id))
         self.assertIsNotNone(result)
         loss, metrics = result
         self.assertTrue(torch.isfinite(loss))
@@ -120,7 +138,7 @@ class PLNRLTrainingTests(unittest.TestCase):
     def test_critic_only_batch_has_zero_actor_loss(self):
         g, featurize, model, tactic_to_id = self._setup()
         critic_samples = extract_critic_samples(g)
-        result = compute_transition_loss(model, [], critic_samples, featurize, tactic_to_id)
+        result = compute_transition_loss(model, [], critic_samples, featurize, edge_actions={})
         self.assertIsNotNone(result)
         loss, metrics = result
         self.assertTrue(torch.isfinite(loss))
@@ -141,7 +159,7 @@ class PLNRLTrainingTests(unittest.TestCase):
                 transitions,
                 critic_samples,
                 featurize,
-                tactic_to_id,
+                edge_actions=recorded_actions(transitions,featurize,tactic_to_id),
                 max_update_nodes=1,
             )
 

@@ -229,6 +229,15 @@ class LiveLemmaProvider:
             self.manifest
         ):
             raise RetrievalError("Query tower and lemma index are not paired.")
+        if (
+            self.query.manifest["source_checkpoint_sha256"]
+            != self.manifest["text_checkpoint_sha256"]
+            or self.query.manifest["query_encoder_sha256"]
+            != self.manifest["query_encoder_sha256"]
+        ):
+            raise RetrievalError(
+                "Query encoder differs from the index deployment binding."
+            )
         inventory = json.loads(config.declaration_inventory.read_text())
         if (
             inventory["version"] != 1
@@ -239,6 +248,16 @@ class LiveLemmaProvider:
                 "Declaration inventory uses a different Lean environment."
             )
         self.inventory_identity = fingerprint(inventory)
+        self.policy_identity = fingerprint(
+            dict(
+                schema="exact-live-goal-first-v1",
+                query=self.query.manifest,
+                inventory=inventory,
+                top_k=config.top_k,
+                tie_policy="score-desc-id-asc",
+                exclusion_policy="source-theorem-and-inventory",
+            )
+        )
         allowed = set(inventory["declarations"]) - set(inventory["excluded"])
         ids = json.loads((root / "lemma_ids.json").read_text())
         names = json.loads((root / "lemma_names.json").read_text())
@@ -396,7 +415,7 @@ class LiveLemmaProvider:
             graph_fingerprint,
             fingerprint(query),
             self.library.fingerprint,
-            self.inventory_identity,
+            self.policy_identity,
             self.library,
         )
 
