@@ -261,6 +261,39 @@ class DeclarationResolutionTests(unittest.TestCase):
             self.assertEqual(decode(hyp), [live])
             self.assertEqual(decode(fv), [live])
 
+    def test_decoded_arguments_keep_the_chosen_declaration_id(self):
+        from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
+        from maths_ai.gnn_inference.atp_lean_gnn.inference import (
+            local_declaration_ids,
+            local_declarations,
+        )
+        from maths_ai.gnn_inference.tests.test_model_identity import (
+            after_intro_x,
+            outer_aliased,
+        )
+
+        reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
+        child = after_intro_x(outer_aliased())
+        dag = model_goal_to_dag(child)
+        ids = local_declaration_ids(child)
+        for label in ("FV5", "FV6"):
+            fv = next(i for i, n in enumerate(dag.nodes) if n.label == label)
+            sample = ActionSample(
+                tactic_action=torch.tensor([2]),
+                tactic_logp=torch.tensor([-0.5]),
+                tactic_entropy=torch.tensor([1.0]),
+                arg_actions=[torch.tensor([fv])],
+                arg_logp=torch.tensor([-0.3]),
+                value=torch.tensor([0.0]),
+                tactic_logits=torch.zeros(1, 3),
+            )
+            candidate, _ = reasoner._decode(
+                sample, dag, local_declarations(child), "fp", declaration_ids=ids
+            )
+            (ref,) = candidate.argument_refs
+            self.assertEqual((ref.kind, ref.internal_name), ("local", ids[label]))
+            self.assertEqual(ref.text, candidate.arguments[0])
+
 
 class RolloutTests(unittest.TestCase):
     def _prove(self, reasoner):

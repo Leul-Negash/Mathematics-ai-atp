@@ -29,14 +29,19 @@ from typing import Dict, List, Optional
 import torch
 from torch_geometric.data import Batch
 
-from maths_ai.data_models.proof_components import Goal, TacticCandidate
+from maths_ai.data_models.proof_components import ArgumentRef, Goal, TacticCandidate
 from maths_ai.hybrid_reasoner.hypergraph import ProofHypergraph, ProofNode
 from maths_ai.hybrid_reasoner.joint_inference import ExpansionResult, HybridReasoner
 from maths_ai.lean_replay import LeanGoalSeed
 from pantograph_async import PantographStateError
 
 from .actor_critic import ActorCriticWithArgsClassifier
-from .inference import _resolve_local_node_name, local_declarations
+from .inference import (
+    _resolve_local_node_name,
+    local_declaration_ids,
+    local_declarations,
+    local_node_label,
+)
 from .pln_rl_training import EdgeAction, FailureRecord, make_dag_featurizer
 
 
@@ -125,6 +130,7 @@ class RLHybridReasoner(HybridReasoner):
 
         dag, data = self.dag_featurize(sub_goal)
         declarations = local_declarations(sub_goal)
+        declaration_ids = local_declaration_ids(sub_goal)
         graph_fingerprint = str(data.graph_fingerprint)
         batch = Batch.from_data_list([data]).to(self.device)
 
@@ -136,7 +142,11 @@ class RLHybridReasoner(HybridReasoner):
                     batch, id_to_tactic=self.id_to_tactic, greedy=self._greedy
                 )
                 candidate, action = self._decode(
-                    sample, dag, declarations, graph_fingerprint
+                    sample,
+                    dag,
+                    declarations,
+                    graph_fingerprint,
+                    declaration_ids=declaration_ids,
                 )
                 if candidate is None:
                     self._unplayable_actions.append(action)
@@ -163,6 +173,8 @@ class RLHybridReasoner(HybridReasoner):
         dag,
         declarations: dict[str, str],
         graph_fingerprint: str,
+        *,
+        declaration_ids: Optional[dict[str, str]] = None,
     ) -> tuple[Optional[TacticCandidate], EdgeAction]:
         """Turn one batch-size-1 ``ActionSample`` into ``(TacticCandidate, EdgeAction)``.
 
@@ -170,8 +182,10 @@ class RLHybridReasoner(HybridReasoner):
         vocab (or the ``<UNK>`` family) is unplayable. Arguments: each
         sampled index is a padded per-graph position; at batch size 1 that equals the
         node's offset in ``dag.nodes`` (``dag_to_pyg`` preserves node order), so render
-        it with ``_resolve_local_node_name``. Unplayable draws retain their complete
-        integer action and graph fingerprint as rejected-action training records.
+        it with ``_resolve_local_node_name``. With ``declaration_ids`` each argument
+        also records the live ID of the declaration the pointer chose. Unplayable
+        draws retain their complete integer action and graph fingerprint as
+        rejected-action training records.
         """
         tactic_id = int(sample.tactic_action[0])
         arg_indices = tuple(int(a[0]) for a in sample.arg_actions)
@@ -186,19 +200,28 @@ class RLHybridReasoner(HybridReasoner):
             return None, action
 
         arguments: List[str] = []
+        refs: Optional[List[ArgumentRef]] = [] if declaration_ids is not None else None
         for idx in arg_indices:
             if not 0 <= idx < len(dag.nodes):
                 return None, action
             try:
-                arguments.append(
-                    _resolve_local_node_name(dag.nodes[idx], dag, declarations)
-                )
+                name = _resolve_local_node_name(dag.nodes[idx], dag, declarations)
             except ValueError:
                 return None, action
+            arguments.append(name)
+            # The pointer chose a declaration; keep its live ID, not just its name.
+            internal = (declaration_ids or {}).get(local_node_label(dag.nodes[idx], dag) or "")
+            if refs is not None and internal is not None:
+                refs.append(ArgumentRef(kind="local", text=name, internal_name=internal))
+            else:
+                refs = None
 
         probability = float(math.exp(float(sample.tactic_logp[0])))
         candidate = TacticCandidate(
-            tactic_name=tactic_name, arguments=arguments, probability=probability
+            tactic_name=tactic_name,
+            arguments=arguments,
+            probability=probability,
+            argument_refs=refs,
         )
         return candidate, action
 
