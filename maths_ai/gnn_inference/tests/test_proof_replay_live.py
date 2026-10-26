@@ -212,7 +212,8 @@ def test_an_exported_artifact_reverifies_in_a_fresh_session(live_env):
         swapped[index],
         arguments=(ArtifactArgument(argument.kind, argument.text, DeclarationKey(0, 0, 3)),),
     )
-    for broken in (altered, replace(artifact, steps=tuple(swapped))):
+    foreign = replace(artifact, receipt={**artifact.receipt, "environment": "0" * 16})
+    for broken in (altered, replace(artifact, steps=tuple(swapped)), foreign):
         async def check(scope, broken=broken):
             with pytest.raises(ArtifactMismatch):
                 await reverify(scope, broken)
@@ -289,3 +290,93 @@ def test_the_search_never_reports_conflicting_witnesses_as_a_proof(live_env):
     assert not graph.is_solved()
     assert graph.execution["replay_attempts"] >= 1
     assert graph.execution["replay_conflicts"] >= 1
+
+
+@pytest.mark.pantograph_live
+def test_local_definitions_and_instances_certify_through_their_context(live_env):
+    graph = _search(
+        live_env,
+        "∀ (α : Type) [inst : Inhabited α], let x : α := default; x = x",
+        {
+            "∀ (α : Type) [inst : Inhabited α],\n  let x := default;\n  x = x": [("intro α inst x",)],
+            "x = x": [("rfl",)],
+        },
+    )
+    assert graph.is_solved(), [(n.goal.expression, n.status) for n in graph.nodes.values()]
+
+
+@pytest.mark.pantograph_live
+def test_universe_parameters_reach_the_certificate(live_env):
+    async def body(scope):
+        explorer = await Explorer.start(scope, "∀ (α : Sort u_1) (a : α), a = a")
+        (inner,) = await explorer.expand(0, "intro α a")
+        await explorer.expand(inner, "rfl")
+        result = await combine(explorer)
+        await explorer.registry.close()
+        return result
+
+    result = scoped(live_env, body)
+    assert result.is_certified
+    assert result.certificate.receipt.levels == ("u_1",)
+
+
+@pytest.mark.pantograph_live
+def test_a_shadowed_local_binds_to_its_own_declaration(live_env):
+    async def body(scope):
+        explorer = await Explorer.start(scope, "∀ (h : 1 = 1) (h : 2 = 2), 2 = 2")
+        (inner,) = await explorer.expand(0, "intro h h")
+        locals_ = explorer.observation(inner).locals
+        assert [local.execution_or_live_name for local in locals_][-1] == "h"
+        await explorer.expand(inner, "exact", "h")
+        result = await combine(explorer)
+        assert result.is_certified
+        assert result.witness[-1].step.arguments[0].declaration == DeclarationKey(0, 0, 1)
+        await explorer.registry.close()
+
+    scoped(live_env, body)
+
+
+@pytest.mark.pantograph_live
+def test_a_cancelled_search_retires_its_session_and_a_new_one_starts_clean(live_env):
+    from maths_ai.data_models.proof_components import TacticCandidate
+    from maths_ai.hybrid_reasoner.joint_inference import HybridReasoner, PantographExecutor
+    from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
+
+    proposed = asyncio.Event()
+
+    class Slow(HybridReasoner):
+        def _build_gnn_engine(self, **_kwargs):
+            return None
+
+        def predict_next_tactic(self, goal):
+            proposed.set()
+            return [TacticCandidate(tactic_name="constructor", arguments=[], probability=0.9)]
+
+    async def run():
+        async with await create_model_sexpr_client(live_env) as client:
+            reasoner = Slow(
+                config_path=None, tactic_model_path=None, argument_model_path=None,
+                executor=PantographExecutor(client), use_pln=False, max_nodes=10_000, max_depth=10_000,
+            )
+            task = asyncio.create_task(reasoner.prove(seed_from_text(goal="True ∧ (True ∧ (True ∧ True))")))
+            await proposed.wait()
+            # The search is now inside its first tactic request.
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            usable = client.is_usable
+            if usable:
+                assert (await client.stat()).n_goals == 0
+        async with await create_model_sexpr_client(live_env) as fresh:
+            reasoner = Slow(
+                config_path=None, tactic_model_path=None, argument_model_path=None,
+                executor=PantographExecutor(fresh), use_pln=False,
+            )
+            reasoner.predict_next_tactic = lambda goal: [
+                TacticCandidate(tactic_name="trivial", arguments=[], probability=0.9)
+            ]
+            graph = await reasoner.prove(seed_from_text(goal="True"))
+            assert graph.is_solved()
+            assert (await fresh.stat()).n_goals == 0
+
+    asyncio.run(run())
