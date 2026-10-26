@@ -16,7 +16,9 @@ from maths_ai.hybrid_reasoner.hypergraph import ProofHypergraph, NodeStatus
 
 from maths_ai.gnn_inference.atp_lean_gnn.graph import model_goal_to_dag
 from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab, build_vocab_from_labels
-from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import ActorCriticWithArgsClassifier
+from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import (
+    ActorCriticWithArgsClassifier,
+)
 from maths_ai.gnn_inference.tests.model_helpers import actor_critic, structured_goal
 from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import (
     _is_structural_label,
@@ -41,13 +43,22 @@ def recorded_actions(transitions, featurize, tactic_to_id):
     from dataclasses import replace
     from maths_ai.gnn_inference.atp_lean_gnn.policy_actions import fingerprint
     from maths_ai.gnn_inference.atp_lean_gnn.retrieval_artifacts import goal_query
-    actions={}
+
+    actions = {}
     for t in transitions:
         if t.tactic.tactic_name not in tactic_to_id:
             continue
-        data=featurize(t.goal)
-        pool=replace(local_pools(Batch.from_data_list([data]))[0],graph_fingerprint=data.graph_fingerprint,query_fingerprint=fingerprint(goal_query(t.goal)))
-        actions[t.edge_id]=EdgeAction(tactic_id=tactic_to_id[t.tactic.tactic_name],candidate_pool=pool,graph_fingerprint=data.graph_fingerprint)
+        data = featurize(t.goal)
+        pool = replace(
+            local_pools(Batch.from_data_list([data]))[0],
+            graph_fingerprint=data.graph_fingerprint,
+            query_fingerprint=fingerprint(goal_query(t.goal)),
+        )
+        actions[t.edge_id] = EdgeAction(
+            tactic_id=tactic_to_id[t.tactic.tactic_name],
+            candidate_pool=pool,
+            graph_fingerprint=data.graph_fingerprint,
+        )
     return actions
 
 
@@ -77,7 +88,10 @@ class PLNRLTrainingTests(unittest.TestCase):
 
     def _setup(self):
         g = self._solved_and_graph()
-        dags = [model_goal_to_dag(structured_goal(s)) for s in (self.ROOT, self.SUB_A, self.SUB_B)]
+        dags = [
+            model_goal_to_dag(structured_goal(s))
+            for s in (self.ROOT, self.SUB_A, self.SUB_B)
+        ]
         vocab = build_vocab(dags)
         featurize = make_featurizer(vocab)
         model = actor_critic(len(vocab), 3)
@@ -90,7 +104,11 @@ class PLNRLTrainingTests(unittest.TestCase):
         critic_samples = extract_critic_samples(g)
         self.assertEqual(len(transitions), 3)
         result = compute_transition_loss(
-            model, transitions, critic_samples, featurize, edge_actions=recorded_actions(transitions,featurize,tactic_to_id)
+            model,
+            transitions,
+            critic_samples,
+            featurize,
+            edge_actions=recorded_actions(transitions, featurize, tactic_to_id),
         )
         self.assertIsNotNone(result)
         loss, metrics = result
@@ -104,30 +122,47 @@ class PLNRLTrainingTests(unittest.TestCase):
         optimizer = AdamW(model.parameters(), lr=0.01)
         before = [p.detach().clone() for p in model.parameters()]
         metrics = train_step(
-            model, optimizer, [SimpleNamespace(graph=g,edge_actions=recorded_actions(extract_actor_transitions(g),featurize,tactic_to_id),failure_actions=[])], featurize,
-            reward_cfg=RewardConfig(step_penalty=0.0), bc_weight=0.1,
+            model,
+            optimizer,
+            [
+                SimpleNamespace(
+                    graph=g,
+                    edge_actions=recorded_actions(
+                        extract_actor_transitions(g), featurize, tactic_to_id
+                    ),
+                    failure_actions=[],
+                )
+            ],
+            featurize,
+            reward_cfg=RewardConfig(step_penalty=0.0),
+            bc_weight=0.1,
         )
         self.assertEqual(metrics["num_transitions"], 3.0)
         after = list(model.parameters())
         changed = any(not torch.equal(b, a) for b, a in zip(before, after))
         self.assertTrue(changed, "training step did not update any parameters")
 
-    def test_unknown_tactic_drops_actor_row_but_keeps_critic_rows(self):
+    def test_missing_collection_action_cannot_silently_drop_actor_rows(self):
         g, featurize, model, tactic_to_id = self._setup()
         transitions = extract_actor_transitions(g, RewardConfig(step_penalty=0.0))
         critic_samples = extract_critic_samples(g)
-        result = compute_transition_loss(model, transitions, critic_samples, featurize, edge_actions={})
-        self.assertIsNotNone(result)
-        loss, metrics = result
-        self.assertTrue(torch.isfinite(loss))
-        self.assertEqual(metrics["num_transitions"], 0.0)
-        self.assertEqual(metrics["num_critic_samples"], 3.0)
-        self.assertEqual(metrics["actor_loss"], 0.0)
+        with self.assertRaisesRegex(
+            ValueError, "missing its complete collection action"
+        ):
+            compute_transition_loss(
+                model, transitions, critic_samples, featurize, edge_actions={}
+            )
 
     def test_actor_only_batch_has_zero_critic_loss(self):
         g, featurize, model, tactic_to_id = self._setup()
         transitions = extract_actor_transitions(g, RewardConfig(step_penalty=0.0))
-        result = compute_transition_loss(model, transitions, [], featurize, edge_actions=recorded_actions(transitions,featurize,tactic_to_id))
+        result = compute_transition_loss(
+            model,
+            transitions,
+            [],
+            featurize,
+            edge_actions=recorded_actions(transitions, featurize, tactic_to_id),
+        )
         self.assertIsNotNone(result)
         loss, metrics = result
         self.assertTrue(torch.isfinite(loss))
@@ -138,7 +173,9 @@ class PLNRLTrainingTests(unittest.TestCase):
     def test_critic_only_batch_has_zero_actor_loss(self):
         g, featurize, model, tactic_to_id = self._setup()
         critic_samples = extract_critic_samples(g)
-        result = compute_transition_loss(model, [], critic_samples, featurize, edge_actions={})
+        result = compute_transition_loss(
+            model, [], critic_samples, featurize, edge_actions={}
+        )
         self.assertIsNotNone(result)
         loss, metrics = result
         self.assertTrue(torch.isfinite(loss))
@@ -159,7 +196,7 @@ class PLNRLTrainingTests(unittest.TestCase):
                 transitions,
                 critic_samples,
                 featurize,
-                edge_actions=recorded_actions(transitions,featurize,tactic_to_id),
+                edge_actions=recorded_actions(transitions, featurize, tactic_to_id),
                 max_update_nodes=1,
             )
 
@@ -222,7 +259,9 @@ class StructuralVocabularyTests(unittest.TestCase):
         self.assertNotIn("FV3", labels)
         self.assertIn("ArgPosition:1", labels)
         self.assertNotIn("ArgPosition:2", labels)
-        goldens = json.loads((FIXTURES / "canonical_graph_expectations.json").read_text())
+        goldens = json.loads(
+            (FIXTURES / "canonical_graph_expectations.json").read_text()
+        )
         observed = {
             node["label"]
             for goals in goldens["goals"].values()
@@ -236,4 +275,3 @@ class StructuralVocabularyTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             supported_structural_labels(max_locals=-1, max_arity=0)
-

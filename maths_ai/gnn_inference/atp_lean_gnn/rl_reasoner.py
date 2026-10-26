@@ -193,10 +193,11 @@ class RLHybridReasoner(HybridReasoner):
 
         Tactic: ``tactic_id → name`` via the inverted tactic vocab; an id outside the
         vocab (or the ``<UNK>`` family) is unplayable. Arguments: each
-        sampled index is a padded per-graph position; at batch size 1 that equals the
-        node's offset in ``dag.nodes`` (``dag_to_pyg`` preserves node order), so render
-        it with ``_resolve_local_node_name``. Unplayable draws retain their complete
-        integer action and graph fingerprint as rejected-action training records.
+        reference carries either a per-graph local node identity or a stable
+        library ID. Resolve locals through their declaration identity with
+        ``_resolve_local_node_name`` and library IDs through the bound name table.
+        Unplayable draws retain the complete typed action and collection pool as
+        rejected-action training records.
         """
         tactic_id = int(sample.tactic_action[0])
         arguments = sample.arguments[0]

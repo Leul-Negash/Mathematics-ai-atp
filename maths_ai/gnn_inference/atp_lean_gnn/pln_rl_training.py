@@ -301,12 +301,11 @@ def compute_onpolicy_loss(
     for t in actor_transitions:
         action = edge_actions.get(t.edge_id)
         if action is None:
-            continue
+            raise ValueError(
+                "Accepted transition is missing its complete collection action."
+            )
         data = featurize(t.goal)
-        if (
-            action.graph_fingerprint
-            and data.graph_fingerprint != action.graph_fingerprint
-        ):
+        if data.graph_fingerprint != action.graph_fingerprint:
             raise ValueError(
                 "Accepted action graph changed between collection and training."
             )
@@ -325,10 +324,7 @@ def compute_onpolicy_loss(
     failure_return = reward_cfg.terminal_failure - reward_cfg.step_penalty
     for f in failures:
         data = featurize(f.goal)
-        if (
-            f.action.graph_fingerprint
-            and data.graph_fingerprint != f.action.graph_fingerprint
-        ):
+        if data.graph_fingerprint != f.action.graph_fingerprint:
             raise ValueError(
                 "Rejected action graph changed between collection and training."
             )
@@ -368,10 +364,7 @@ def compute_onpolicy_loss(
                 "Collected actions require their immutable candidate pools."
             )
         for data, pool in zip(actor_datas, candidate_pools):
-            if (
-                pool.graph_fingerprint
-                and pool.graph_fingerprint != data.graph_fingerprint
-            ):
+            if pool.graph_fingerprint != data.graph_fingerprint:
                 raise ValueError("Collection candidate pool graph changed.")
         candidate_count = sum(
             len(p.local_ids) + len(p.lemma_ids) for p in candidate_pools
