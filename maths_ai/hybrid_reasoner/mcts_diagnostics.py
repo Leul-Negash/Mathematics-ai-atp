@@ -185,7 +185,9 @@ class _CountingExecutor:
         self.commands: list[str] = []
 
     async def apply(self, scope, state, tactic):
-        self.commands.append(" ".join([tactic.tactic_name, *tactic.arguments]))
+        command = tactic.command
+        if command is not None:
+            self.commands.append(command)
         return await self.inner.apply(scope, state, tactic)
 
 
@@ -201,8 +203,8 @@ async def verify_widening(client: PantographClient) -> list[str]:
     root = graph.root
     require(root.proposal_rounds >= 2, "The root was not widened.")
     require(
-        root.command_outcomes.get(("exact False.elim", ())) is None
-        and ("exact False.elim", ()) in root.command_outcomes,
+        root.command_outcomes.get("exact False.elim") is None
+        and "exact False.elim" in root.command_outcomes,
         "The rejected command has no checked rejection on the root.",
     )
     require(

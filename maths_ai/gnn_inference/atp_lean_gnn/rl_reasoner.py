@@ -99,7 +99,7 @@ class _NodeLedger:
     graph_fingerprint: str
     rounds: int = 0
     # raw action id -> the command it rendered, to catch a changed rendering.
-    commands: Dict[tuple, tuple] = field(default_factory=dict)
+    commands: Dict[tuple, str] = field(default_factory=dict)
 
 
 class RLHybridReasoner(HybridReasoner):
@@ -344,6 +344,8 @@ class RLHybridReasoner(HybridReasoner):
         candidate = TacticCandidate(
             tactic_name=tactic_name, arguments=arguments, probability=math.exp(tactic_logp)
         )
+        if candidate.command is None:
+            return None, action
         proposal = ProposedAction(
             candidate=candidate,
             raw_action_id=(tactic_id, arg_indices),
@@ -411,7 +413,7 @@ class RLHybridReasoner(HybridReasoner):
     def _on_command_settled(
         self,
         node: ProofNode,
-        command: tuple,
+        command: str,
         actions: List[ProposedAction],
         edge_id: Optional[int],
         *,
@@ -437,6 +439,11 @@ class RLHybridReasoner(HybridReasoner):
                     f"{rendered} before and {command} now."
                 )
             self._observe(node, pending.goal, draw.action, outcome, edge_id=edge_id, proposal=proposal)
+
+    def _on_unrenderable_action(self, node: ProofNode, proposal: ProposedAction) -> None:
+        pending = self._pending[node.id]
+        draw = pending.draws.pop(proposal.raw_action_id)
+        pending.unrenderable[proposal.raw_action_id] = draw.action
 
     def _on_expansion_complete(
         self,

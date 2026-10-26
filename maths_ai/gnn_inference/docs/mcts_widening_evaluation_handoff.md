@@ -18,7 +18,8 @@ how to run it and what was verified.
 Every changed file is listed with its base and current hash in
 [source_manifest.json](../tests/fixtures/pantograph/mcts_widening_evaluation/source_manifest.json).
 `test_owned_client_migration.py` checks it as the next link after the
-earlier manifests, which are unchanged.
+earlier manifests, which are unchanged. The subsequent rendered-command repair
+has its own [source manifest](../tests/fixtures/pantograph/command_identity/source_manifest.json).
 
 ## What changed
 
@@ -102,3 +103,99 @@ measurement.
   pass.
 - Tuning `puct_c` for normalized priors and the widening defaults. The
   values are bounded starting points.
+
+## Rendered-command identity repair (2026-10-26)
+
+The follow-up starts from PR #63's merge `ab3f91f04df857403db7c9c435f7acae09a70c08`.
+The earlier Results table records the PR author's original validation, rather
+than a rerun on this repair.
+
+`data_models/tactic_commands.py` now owns Lean command rendering. Candidate
+identity, executor input, checked-outcome cache keys, graph edge uniqueness,
+alias validation and the RL command-consistency ledger all use the final command
+string. Distinct raw policy actions rendering that string retain separate
+observations. Their probabilities enter the shared edge once per raw action;
+repeated samples only increase observation multiplicity.
+
+Unrenderable candidates are settled without an executor call, graph edge or
+checked cache entry. Their raw RL observations remain `UNRENDERABLE`, rather
+than being classified as checked Lean rejections. The saved search contract adds
+`command_identity: rendered-lean-command-v1`; checkpoints without that contract
+cannot resume exactly, but remain eligible as model warm starts.
+
+Regression coverage includes generic and RL paths under best-first and PUCT,
+accepted/rejected aliases across rounds, distinct commands, unrenderable proposals,
+raw-action mass and multiplicity, and matching/missing/changed sampling schedules
+on exact resume.
+
+Final offline verification:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider \
+  maths_ai/gnn_inference/tests -m 'not pantograph_live' \
+  -k 'not test_factory_cancellation_awaits_probe_and_process_cleanup' \
+  -o faulthandler_timeout=45
+```
+
+Result: **540 passed, 1 skipped, 13 deselected**, with 27 subtests passing,
+in 31.21 seconds. Twelve deselections are live gates. The remaining cancellation
+test passed separately (**1 passed in 0.33 seconds**). It was isolated after a
+broad run stalled around the factory tests; its synchronization waits for probe
+entry without checking whether the startup task has already failed. Two worker
+timing/startup tests that failed during the first run passed on a focused rerun
+and on the final broad run. No production timeout or test fixture was relaxed.
+
+The source-lineage check was refreshed after this documentation update.
+
+The real-REPL validation used:
+
+- REPL: `/home/nolawi/pantograph_fork/.lake/build/bin/repl`.
+- Source root: `/home/nolawi/new-maths/maths_ai/sexpr_environment/sexpr_environment/mathlib4`.
+- GNU `stdbuf`, Lean `v4.10.0-rc1`, CPU execution and Mathlib imports.
+- A validation-only 300-second startup deadline; application defaults are unchanged.
+
+It failed waiting for startup readiness with
+`PantographStartupError: Model-session startup deadline expired`. Widening and
+bounded learning did not execute, so this run provides no live acceptance pass.
+
+### Follow-up startup diagnosis and successful live rerun
+
+Sequential probes of the same binary and source root subsequently produced:
+
+| Probe | Result |
+| --- | --- |
+| Raw piped REPL, `Init`, GNU `stdbuf -oL` | Ready in 0.34 seconds |
+| First observed raw Mathlib probe | Still importing after 25 seconds; about 3.47 GiB RSS |
+| Repeated raw Mathlib probes, GNU `stdbuf -oL`, pipes | Ready in 4.89 and 3.83 seconds |
+| Standalone client, Mathlib, same executable | READY and successful `stat` in 5.38 seconds |
+| Application live widening and bounded learning tests, run sequentially | **2 passed in 41.72 seconds**, normal 120-second startup setting |
+
+The successful application command was:
+
+```bash
+env PATH=/home/nolawi/.elan/toolchains/leanprover--lean4---v4.10.0-rc1/bin:/usr/bin:/bin \
+  PANTOGRAPH_TEST_SOURCE_ROOT=/home/nolawi/new-maths/maths_ai/sexpr_environment/sexpr_environment/mathlib4 \
+  PANTOGRAPH_TEST_REPL=/home/nolawi/pantograph_fork/.lake/build/bin/repl \
+  PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -s -p no:cacheprovider \
+  maths_ai/gnn_inference/tests/test_mcts_owned_client.py::test_actual_widening_finds_a_later_action_after_a_checked_rejection \
+  maths_ai/gnn_inference/tests/test_mcts_owned_client.py::test_actual_bounded_updates_with_htps_disabled_and_enabled \
+  --run-pantograph-live
+```
+
+No REPL, client, or application timeout changes were needed. In the fork's
+`Main.lean`, `createCoreState` imports the requested modules before `ready.` is
+printed. The observations support resource-sensitive Mathlib loading as the
+likely explanation for the earlier failures. Earlier validation overlapped with
+other Python checks on a machine with about 7.6 GiB RAM. Historical per-process
+memory and I/O telemetry was not recorded, so the exact contribution of memory
+pressure versus file-cache effects is not established. Persistent buffering or
+protocol incompatibility is not reproduced by these successful pipe launches.
+
+The passing live learning check uses a fresh small model. It does not replace the
+real-checkpoint driver checks deferred below.
+
+Real-checkpoint driver evaluation and training are deferred at the user's request.
+`runs/best-v3.pt` and the packaged vocabularies have matching vocabulary
+fingerprints, but the packaged prepared-data copy lacks
+`metadata/graph_representation.json` and prepared PyG directories. No replacement
+metadata or dataset was fabricated for these checks.

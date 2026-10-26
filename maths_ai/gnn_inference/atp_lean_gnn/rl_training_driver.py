@@ -356,6 +356,7 @@ def search_settings(cfg: RLTrainingConfig) -> dict[str, object]:
             "provider": ACTOR_PRIOR,
         },
         "observations": "per-node-raw-action-ledger-v1",
+        "command_identity": "rendered-lean-command-v1",
     }
 
 

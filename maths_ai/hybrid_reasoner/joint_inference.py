@@ -64,36 +64,6 @@ from maths_ai.gnn_inference.atp_lean_gnn.reporting import console_print
 
 
 
-def _is_lean_identifier(value: str) -> bool:
-    parts = value.split(".")
-    return bool(parts) and all(
-        bool(core := part.rstrip("'!?")) and core.isidentifier()
-        for part in parts
-    )
-_BRACKET_REQUIRED_TACTICS = frozenset({
-    "rw", "rwa", "rewrite", "simp_rw", "simp only", "erw",
-})
-_BRACKET_OPTIONAL_TACTICS = frozenset({
-    "simp", "simpa", "field_simp", "norm_num", "linarith", "nlinarith", "aesop",
-})
-
-
-def render_tactic_command(tactic: TacticCandidate) -> Optional[str]:
-    name = tactic.tactic_name.strip()
-    arguments = [arg.rstrip(":").strip() for arg in tactic.arguments]
-    arguments = [arg for arg in arguments if arg]
-    if name in _BRACKET_REQUIRED_TACTICS or name in _BRACKET_OPTIONAL_TACTICS:
-        rules = [arg for arg in arguments if _is_lean_identifier(arg)]
-        if rules:
-            return f"{name} [{', '.join(rules)}]"
-        if name in _BRACKET_REQUIRED_TACTICS:
-            return None
-        return name
-    if not arguments:
-        return name
-    return " ".join([name, *arguments])
-
-
 @dataclass
 class _Simulation:
     """One selected partial hypertree.
@@ -195,7 +165,7 @@ class PantographExecutor(TacticExecutor):
             ``TacticOutcome(success=False, error=...)``. Session failures
             propagate; they say nothing about the tactic.
         """
-        tactic_cmd = render_tactic_command(tactic)
+        tactic_cmd = tactic.command
         if tactic_cmd is None:
             return TacticOutcome(
                 success=False,
@@ -1135,9 +1105,13 @@ class HybridReasoner:
         state = materialized.state
         any_applied = False
 
-        groups: Dict[tuple, List[ProposedAction]] = {}
+        groups: Dict[str, List[ProposedAction]] = {}
         for action in proposals:
-            groups.setdefault(action.command, []).append(action)
+            command = action.command
+            if command is None:
+                self._on_unrenderable_action(node, action)
+                continue
+            groups.setdefault(command, []).append(action)
 
         for command, actions in groups.items():
             tactic = actions[0].candidate
@@ -1207,19 +1181,29 @@ class HybridReasoner:
                 graph.observe_alias(edge.id, action)
             self._on_command_settled(node, command, actions, edge.id, executed=True)
 
+        note = None
+        if not any_applied:
+            note = ("executor rejected every renderable candidate tactic" if groups
+                    else "no renderable candidate tactic")
         self._settle_round(
             graph,
             node,
             len(proposals) if draws is None else draws,
-            closure=NodeClosureReason.CANDIDATES_EXHAUSTED,
-            note=None if any_applied else "executor rejected every candidate tactic",
+            closure=(NodeClosureReason.CANDIDATES_EXHAUSTED if groups
+                     else NodeClosureReason.NO_CANDIDATES),
+            note=note,
         )
-        self._on_expansion_complete(node, ExpansionResult.TACTICS_EXECUTED)
+        self._on_expansion_complete(
+            node, ExpansionResult.TACTICS_EXECUTED if groups else ExpansionResult.NO_CANDIDATES
+        )
+
+    def _on_unrenderable_action(self, node: ProofNode, proposal: ProposedAction) -> None:
+        """Hook: a raw proposal cannot render a Lean command and was not executed."""
 
     def _on_command_settled(
         self,
         node: ProofNode,
-        command: tuple,
+        command: str,
         actions: List[ProposedAction],
         edge_id: Optional[int],
         *,

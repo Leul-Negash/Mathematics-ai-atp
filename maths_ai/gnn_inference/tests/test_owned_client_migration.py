@@ -212,5 +212,15 @@ def test_port_sources_match_the_recorded_lineage_and_current_adaptations():
         if entry["path"] in expected:
             assert entry["target_base_sha256"] == expected[entry["path"]], entry["path"]
         expected[entry["path"]] = entry["sha256"]
+    # The rendered-command identity repair follows PR #63 without rewriting
+    # the earlier implementation's source evidence.
+    identity = json.loads(
+        (WIDENING_MANIFEST.parent.parent / "command_identity/source_manifest.json").read_text()
+    )
+    assert identity["target_base_commit"] == "ab3f91f04df857403db7c9c435f7acae09a70c08"
+    for entry in identity["sources"]:
+        if entry["path"] in expected:
+            assert entry["target_base_sha256"] == expected[entry["path"]], entry["path"]
+        expected[entry["path"]] = entry["sha256"]
     for path, digest in expected.items():
         assert hashlib.sha256((root / path).read_bytes()).hexdigest() == digest, path

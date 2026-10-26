@@ -142,7 +142,7 @@ class ProofNode:
     # Checked execution outcome of each command tried at this node: the edge
     # it created, or None for a Lean rejection. Infrastructure failures are
     # never recorded. A later draw of the same command reuses the outcome.
-    command_outcomes: Dict[tuple, Optional[int]] = field(default_factory=dict)
+    command_outcomes: Dict[str, Optional[int]] = field(default_factory=dict)
     note: Optional[str] = None
     closure_reason: NodeClosureReason = NodeClosureReason.NONE
     """Free-text annotation for terminal states the graph can't infer on its
@@ -422,6 +422,8 @@ class ProofHypergraph:
         if not isinstance(action, ProposedAction):
             raise TypeError(f"add_edge needs a ProposedAction, got {type(action).__name__}.")
         tactic = action.candidate
+        if action.command is None:
+            raise ValueError("An unrenderable action cannot create a graph edge.")
         for eid in self.nodes[source_id].outgoing_edge_ids:
             if self.edges[eid].tactic.command == tactic.command:
                 raise ValueError(f"Node {source_id} already has an edge for {tactic.command}.")
@@ -470,7 +472,7 @@ class ProofHypergraph:
         search and is an error, not new mass.
         """
         edge = self.edges[edge_id]
-        if action.command != edge.tactic.command:
+        if action.command is None or action.command != edge.tactic.command:
             raise ValueError(f"{action.command} is not an alias of edge {edge_id}.")
         if action.provider != edge.provider:
             raise ValueError(

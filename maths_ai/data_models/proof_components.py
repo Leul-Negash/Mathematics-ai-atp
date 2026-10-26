@@ -8,6 +8,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from .tactic_commands import render_tactic_command
+
 from maths_ai.lean_replay import (
     GoalReplaySpec,
     LeanGoalSeed,
@@ -249,9 +251,9 @@ class TacticCandidate(BaseModel):
     probability: float
 
     @property
-    def command(self) -> tuple[str, tuple[str, ...]]:
-        """Execution identity: the tactic and arguments the executor renders."""
-        return (self.tactic_name, tuple(self.arguments))
+    def command(self) -> str | None:
+        """Execution identity: the exact rendered Lean command, if renderable."""
+        return render_tactic_command(self)
 
 
 # Probabilities are compared in log space; a log-prior above this is not a
@@ -290,7 +292,7 @@ class ProposedAction:
             raise ValueError("A proposed action must name its provider.")
 
     @property
-    def command(self) -> tuple[str, tuple[str, ...]]:
+    def command(self) -> str | None:
         return self.candidate.command
 
 

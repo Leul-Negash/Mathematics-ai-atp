@@ -29,8 +29,8 @@ from maths_ai.data_models.proof_components import (
 from maths_ai.hybrid_reasoner.joint_inference import (
     HybridReasoner,
     PantographExecutor,
-    render_tactic_command,
 )
+from maths_ai.data_models.tactic_commands import render_tactic_command
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import materialize_replay
 from maths_ai.lean_replay import ReplayInputError, render_replay, seed_from_text
 

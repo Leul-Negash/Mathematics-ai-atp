@@ -236,7 +236,11 @@ multiplicity.
 
 A command runs in Lean at most once per node: the node caches its checked
 outcome (`ProofNode.command_outcomes`), and a later raw action that renders
-the same command reuses it. Each raw action at a node becomes one
+the same command reuses it. The cache key is the final Lean command string
+from the shared renderer in `data_models/tactic_commands.py`, including its
+argument formatting and normalization. Graph edge uniqueness and alias
+validation use that same identity. An unrenderable proposal never enters the
+checked-outcome cache or creates a graph edge. Each raw action at a node becomes one
 `PolicyObservation` with its multiplicity across all proposal rounds, its
 outcome (accepted with an edge id, rejected, or unrenderable) and its prior.
 Two raw actions rendering one command stay separate observations with their

@@ -883,7 +883,7 @@ class PLNDisabledTests(unittest.TestCase):
         self.assertEqual(len(pln_edges), 0)
         root = result.graph.nodes[result.graph.root_id]
         self.assertTrue(root.exhausted)
-        self.assertEqual(root.note, "executor rejected every candidate tactic")
+        self.assertEqual(root.note, "executor rejected every renderable candidate tactic")
 
     def test_reward_is_terminal_only(self):
         # With stv=None on every subgoal node, potential() returns 0.0 for each

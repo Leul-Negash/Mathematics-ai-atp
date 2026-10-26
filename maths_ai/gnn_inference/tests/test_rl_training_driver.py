@@ -1206,6 +1206,35 @@ class EvaluationSettingsTests(unittest.TestCase):
                     cfg, resume_run_dir=run_dir, reasoner_factory=_qed_factory, pool=_pool()
                 ))
 
+    def test_resume_requires_the_same_sampling_schedule(self):
+        for schedule in ("encode-once-row-major-v1", "different-schedule", None):
+            with self.subTest(schedule=schedule), tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                cfg = _write_config(tmp, num_rounds=1)
+                asyncio.run(run_rl_training(cfg, reasoner_factory=_qed_factory, pool=_pool()))
+                run_dir = next((tmp / "runs").iterdir())
+                state = torch.load(run_dir / "last.pt", weights_only=False)
+                proposal = state["search_settings"]["proposal"]
+                self.assertEqual(state["search_settings"]["command_identity"], "rendered-lean-command-v1")
+                self.assertEqual(proposal["sampling_schedule"], "encode-once-row-major-v1")
+                if schedule is None:
+                    proposal.pop("sampling_schedule")
+                else:
+                    proposal["sampling_schedule"] = schedule
+                torch.save(state, run_dir / "last.pt")
+                cfg.num_rounds = 2
+                if schedule == "encode-once-row-major-v1":
+                    asyncio.run(run_rl_training(
+                        cfg, resume_run_dir=run_dir, reasoner_factory=_qed_factory, pool=_pool()
+                    ))
+                    resumed = torch.load(run_dir / "last.pt", weights_only=False)
+                    self.assertEqual(resumed["round"], 1)
+                else:
+                    with self.assertRaisesRegex(ValueError, "saved search semantics"):
+                        asyncio.run(run_rl_training(
+                            cfg, resume_run_dir=run_dir, reasoner_factory=_qed_factory, pool=_pool()
+                        ))
+
     def test_resume_rejects_a_schema_3_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
