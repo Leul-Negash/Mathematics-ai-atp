@@ -69,7 +69,9 @@ def render_tactic_command(tactic: TacticCandidate) -> Optional[str]:
         # A rewrite rule must be a name Lean can look up. The policy samples nodes
         # from the goal's own graph, so a draw can land on a term like `↑13`, which
         # is a valid expression but not a rule.
-        rules = [arg for arg in arguments if _is_lean_identifier(arg)]
+        if any(not _is_lean_identifier(arg) for arg in arguments):
+            return None
+        rules = arguments
         if rules:
             return f"{name} [{', '.join(rules)}]"
         if name in _BRACKET_REQUIRED_TACTICS:

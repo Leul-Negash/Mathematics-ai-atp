@@ -150,11 +150,9 @@ class HybridReasoner:
         self,
         config_path: Path,
         tactic_model_path: Path,
-        argument_model_path: Path,
+        retrieval_config_path: Path,
         *,
         executor: PantographExecutor,
-        index_path: Optional[Path] = None,
-        corpus_path: Optional[Path] = None,
         top_k_tactics: int = 3,
         max_depth: int = 10,
         max_nodes: int = 500,
@@ -181,9 +179,7 @@ class HybridReasoner:
         self.gnn_engine = self._build_gnn_engine(
             config_path=config_path,
             tactic_model_path=tactic_model_path,
-            argument_model_path=argument_model_path,
-            index_path=index_path,
-            corpus_path=corpus_path,
+            retrieval_config_path=retrieval_config_path,
         )
         self.atomic_tactics = {}
 
@@ -237,9 +233,7 @@ class HybridReasoner:
         *,
         config_path: Path,
         tactic_model_path: Path,
-        argument_model_path: Path,
-        index_path: Optional[Path],
-        corpus_path: Optional[Path],
+        retrieval_config_path: Path,
     ) -> Optional[GNNModelEngine]:
         """Construct the tactic-prediction engine.
 
@@ -252,9 +246,7 @@ class HybridReasoner:
         return GNNModelEngine(
             config_path=config_path,
             tactic_predictor_model_path=tactic_model_path,
-            argument_predictor_model_path=argument_model_path,
-            index_path=index_path,
-            corpus_path=corpus_path,
+            retrieval_config_path=retrieval_config_path,
         )
 
     def predict_next_tactic(self, sub_goal: Goal) -> List[TacticCandidate]:
@@ -762,11 +754,17 @@ class HybridReasoner:
                     "Pinned snapshots fill the retention bound and nothing is left to prune."
                 )
 
+    async def prepare_goal(self, goal):
+        """Prepare state-dependent proposal inputs before synchronous model scoring."""
+        if self.gnn_engine is not None:
+            await self.gnn_engine.prepare_goal(goal)
+
     async def _expand_occurrence(
         self, graph: ProofHypergraph, node: ProofNode, occurrence: ExecutionOccurrence
     ) -> None:
         print(f"  [GNN Input] goal={node.goal.expression}  hyps={node.goal.hypotheses}")
         try:
+            await self.prepare_goal(node.goal)
             candidates = self.predict_next_tactic(node.goal)
         except UnsupportedObservation as exc:
             # The model cannot read this goal; it stays unsearched, not failed.
@@ -926,10 +924,8 @@ class HybridReasoner:
 async def main(
     config_path: Path,
     tactic_model_path: Path,
-    argument_model_path: Path,
+    retrieval_config_path: Path,
     *,
-    index_path: Optional[Path] = None,
-    corpus_path: Optional[Path] = None,
     goal_statement: str,
     hypotheses: Optional[List[str]] = None,
     depth_limit: int = 10,
@@ -972,9 +968,7 @@ async def main(
         hybrid_reasoner = HybridReasoner(
             config_path=config_path,
             tactic_model_path=tactic_model_path,
-            argument_model_path=argument_model_path,
-            index_path=index_path,
-            corpus_path=corpus_path,
+            retrieval_config_path=retrieval_config_path,
             executor=PantographExecutor(server=server),
             top_k_tactics=top_k_tactics,
             max_depth=depth_limit,
@@ -990,6 +984,8 @@ async def main(
         for h in hypotheses or []:
             print(repr(h))
         try:
+            if hybrid_reasoner.gnn_engine is not None:
+                hybrid_reasoner.gnn_engine.provider.verify_environment(env)
             proof_graph = await hybrid_reasoner.prove(
                 seed_from_text(goal=goal_statement, hypotheses=hypotheses or [])
             )
@@ -1020,6 +1016,8 @@ async def main(
             if dts_state_output and hybrid_reasoner.dts_sampler is not None:
                 dts_state_output.parent.mkdir(parents=True, exist_ok=True)
                 hybrid_reasoner.dts_sampler.save_to(str(dts_state_output))
+            if hybrid_reasoner.gnn_engine is not None:
+                await hybrid_reasoner.gnn_engine.aclose()
             await server.aclose()
 
 
@@ -1075,13 +1073,7 @@ if __name__ == "__main__":
         main(
             config_path=_argument_selection_run / "config.json",
             tactic_model_path=_argument_selection_run / "best.pt",
-            argument_model_path=_premise_selection_run / "best.pt",
-            index_path=settings.root_dir / "gnn_inference" / "runs" / "lemma_index_v1",
-            corpus_path=settings.root_dir
-            / "gnn_inference"
-            / "runs"
-            / "lemma_corpus_v1"
-            / "lemmas.jsonl",
+            retrieval_config_path=settings.root_dir / "gnn_inference" / "configs" / "retrieval.example.json",
             goal_statement=args.goal_statement,
             hypotheses=args.hypotheses.split(",") if args.hypotheses else None,
             depth_limit=_depth_limit,

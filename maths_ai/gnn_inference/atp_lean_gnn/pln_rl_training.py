@@ -24,6 +24,8 @@ import torch
 from torch_geometric.data import Batch, Data
 
 from .actor_critic import ActorCriticWithArgsClassifier
+from .policy_actions import ArgumentReference, CandidatePoolSnapshot, fingerprint
+from .retrieval_artifacts import goal_query
 from .actor_critic_loss import (
     compute_bc_anchor_loss,
     compute_critic_loss,
@@ -136,9 +138,10 @@ class EdgeAction:
     """
 
     tactic_id: int
-    arg_indices: tuple[int, ...] = ()
+    candidate_pool: CandidatePoolSnapshot
+    graph_fingerprint: str
+    arguments: tuple[ArgumentReference, ...] = ()
     multiplicity: int = 1
-    graph_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,113 +234,39 @@ def make_dag_featurizer(node_vocab: dict[str, int]):
 
 
 def compute_transition_loss(
-    model: ActorCriticWithArgsClassifier,
-    actor_transitions: list[ActorTransition],
-    critic_samples: list[CriticSample],
-    featurize: Callable[[Goal], Data],
-    tactic_to_id: dict[str, int],
+    model,
+    actor_transitions,
+    critic_samples,
+    featurize,
     *,
-    device: torch.device | None = None,
-    critic_weight: float = 0.5,
-    entropy_weight: float = 0.01,
-    bc_weight: float = 0.0,
-    max_update_nodes: int = 0,
-    max_update_edges: int = 0,
-) -> tuple[torch.Tensor, dict[str, float]] | None:
-    """Offline tactic-level actor loss plus a separate unique-state critic loss."""
-    device = device or torch.device("cpu")
-    actor_datas: list[Data] = []
-    action_ids: list[int] = []
-    returns: list[float] = []
-    for t in actor_transitions:
-        tid = tactic_to_id.get(t.tactic.tactic_name)
-        if tid is None:
-            continue
-        actor_datas.append(featurize(t.goal))
-        action_ids.append(tid)
-        returns.append(t.return_)
-    critic_datas = [featurize(sample.goal) for sample in critic_samples]
-    if not actor_datas and not critic_datas:
-        return None
-    node_count, edge_count = _validate_update_size(
-        actor_datas + critic_datas,
+    edge_actions,
+    device=None,
+    critic_weight=0.5,
+    entropy_weight=0.01,
+    bc_weight=0.0,
+    max_update_nodes=0,
+    max_update_edges=0,
+):
+    """Evaluate harvested targets only with the complete recorded actions."""
+    result = compute_onpolicy_loss(
+        model,
+        actor_transitions,
+        critic_samples,
+        edge_actions,
+        [],
+        featurize,
+        device=device,
+        critic_weight=critic_weight,
+        entropy_weight=entropy_weight,
+        bc_weight=bc_weight,
         max_update_nodes=max_update_nodes,
         max_update_edges=max_update_edges,
     )
-    zero = next(model.parameters()).sum() * 0.0
-    actor_loss = zero
-    entropy = zero
-    bc_loss = zero
-    mean_return = 0.0
-    if actor_datas:
-        batch = Batch.from_data_list(actor_datas).to(device)
-        _node_emb, _state_emb, tactic_logits, values = model.encode(batch)
-        actions = torch.tensor(action_ids, dtype=torch.long, device=device)
-        returns_t = torch.tensor(returns, dtype=torch.float32, device=device)
-        raw_adv = returns_t - values.squeeze(-1).detach()
-        advantages = (raw_adv - raw_adv.mean()) / (raw_adv.std(unbiased=False) + 1e-8)
-        selected_logp = (
-            torch.log_softmax(tactic_logits, dim=-1)
-            .gather(1, actions.unsqueeze(1))
-            .squeeze(1)
+    if result is not None:
+        result[1]["mean_value_target"] = sum(x.target for x in critic_samples) / max(
+            len(critic_samples), 1
         )
-        actor_loss = -(selected_logp * advantages).mean()
-        entropy = compute_entropy_bonus(tactic_logits)
-        if bc_weight != 0.0:
-            bc_loss = compute_bc_anchor_loss(tactic_logits, actions)
-        mean_return = float(returns_t.mean().item())
-
-    critic_loss = zero
-    mean_value_target = 0.0
-    if critic_datas:
-        critic_batch = Batch.from_data_list(critic_datas).to(device)
-        _nodes, _states, _logits, critic_values = model.encode(critic_batch)
-        targets = torch.tensor(
-            [sample.target for sample in critic_samples],
-            dtype=torch.float32,
-            device=device,
-        )
-        critic_loss = compute_critic_loss(critic_values, targets)
-        mean_value_target = float(targets.mean().item())
-    total = actor_loss + critic_weight * critic_loss - entropy_weight * entropy
-    if actor_datas and bc_weight != 0.0:
-        total = total + bc_weight * bc_loss
-        bc_val = float(bc_loss.item())
-    else:
-        bc_val = 0.0
-
-    metrics = {
-        "actor_loss": float(actor_loss.item()),
-        "critic_loss": float(critic_loss.item()),
-        "entropy": float(entropy.item()),
-        "bc_loss": bc_val,
-        "total_loss": float(total.item()),
-        "mean_return": mean_return,
-        "mean_value_target": mean_value_target,
-        "num_transitions": float(len(actor_datas)),
-        "num_critic_samples": float(len(critic_datas)),
-        "update_node_count": float(node_count),
-        "update_edge_count": float(edge_count),
-        "unknown_label_count": float(
-            sum(int(data.unknown_label_count) for data in actor_datas + critic_datas)
-        ),
-        "structural_unknown_label_count": float(
-            sum(
-                int(data.structural_unknown_label_count)
-                for data in actor_datas + critic_datas
-            )
-        ),
-        "semantic_unknown_label_count": float(
-            sum(
-                int(data.semantic_unknown_label_count)
-                for data in actor_datas + critic_datas
-            )
-        ),
-        "total_label_count": float(
-            sum(int(data.total_label_count) for data in actor_datas + critic_datas)
-        ),
-    }
-    return total, metrics
+    return result
 
 
 def compute_onpolicy_loss(
@@ -351,11 +280,12 @@ def compute_onpolicy_loss(
     device: torch.device | None = None,
     critic_weight: float = 0.5,
     entropy_weight: float = 0.01,
-    arg_loss_weight: float = 0.5,
     bc_weight: float = 0.0,
     reward_cfg: RewardConfig | None = None,
     max_update_nodes: int = 0,
     max_update_edges: int = 0,
+    max_update_candidates: int = 100000,
+    max_update_candidate_bytes: int = 268435456,
 ) -> tuple[torch.Tensor, dict[str, float]] | None:
     """Build separate actor and critic forwards, then one combined backward loss."""
     device = device or torch.device("cpu")
@@ -363,7 +293,8 @@ def compute_onpolicy_loss(
 
     actor_datas: list[Data] = []
     tactic_ids: list[int] = []
-    arg_rows: list[tuple[int, ...]] = []
+    argument_rows = []
+    candidate_pools = []
     multiplicities: list[float] = []
     returns: list[float] = []
     is_accepted: list[bool] = []
@@ -371,18 +302,22 @@ def compute_onpolicy_loss(
     for t in actor_transitions:
         action = edge_actions.get(t.edge_id)
         if action is None:
-            continue
+            raise ValueError(
+                "Accepted transition is missing its complete collection action."
+            )
         data = featurize(t.goal)
-        if (
-            action.graph_fingerprint
-            and data.graph_fingerprint != action.graph_fingerprint
-        ):
+        if data.graph_fingerprint != action.graph_fingerprint:
             raise ValueError(
                 "Accepted action graph changed between collection and training."
             )
+        if action.candidate_pool.query_fingerprint != fingerprint(goal_query(t.goal)):
+            raise ValueError(
+                "Collection query text changed between collection and update."
+            )
         actor_datas.append(data)
         tactic_ids.append(action.tactic_id)
-        arg_rows.append(action.arg_indices)
+        argument_rows.append(action.arguments)
+        candidate_pools.append(action.candidate_pool)
         multiplicities.append(float(action.multiplicity))
         returns.append(t.return_)
         is_accepted.append(True)
@@ -390,16 +325,18 @@ def compute_onpolicy_loss(
     failure_return = reward_cfg.terminal_failure - reward_cfg.step_penalty
     for f in failures:
         data = featurize(f.goal)
-        if (
-            f.action.graph_fingerprint
-            and data.graph_fingerprint != f.action.graph_fingerprint
-        ):
+        if data.graph_fingerprint != f.action.graph_fingerprint:
             raise ValueError(
                 "Rejected action graph changed between collection and training."
             )
+        if f.action.candidate_pool.query_fingerprint != fingerprint(goal_query(f.goal)):
+            raise ValueError(
+                "Rejected action query text changed between collection and update."
+            )
         actor_datas.append(data)
         tactic_ids.append(f.action.tactic_id)
-        arg_rows.append(f.action.arg_indices)
+        argument_rows.append(f.action.arguments)
+        candidate_pools.append(f.action.candidate_pool)
         multiplicities.append(float(f.action.multiplicity))
         returns.append(failure_return)
         is_accepted.append(False)
@@ -419,29 +356,51 @@ def compute_onpolicy_loss(
     bc_loss = zero
     mean_return = 0.0
     mean_arg_logp = 0.0
+    sampled_entropy = 0.0
+    policy_diagnostics = {}
     if actor_datas:
         batch = Batch.from_data_list(actor_datas).to(device)
-        max_args = max((len(row) for row in arg_rows), default=0)
-        arg_indices = None
-        if max_args > 0:
-            arg_indices = torch.full(
-                (len(arg_rows), max_args), -1, dtype=torch.long, device=device
+        if any(pool is None for pool in candidate_pools):
+            raise ValueError(
+                "Collected actions require their immutable candidate pools."
             )
-            for i, row in enumerate(arg_rows):
-                for j, idx in enumerate(row):
-                    arg_indices[i, j] = idx
-        tactic_ids_t = torch.tensor(tactic_ids, dtype=torch.long, device=device)
-        tactic_logp, arg_logp, entropy, values, tactic_logits = model.evaluate_actions(
-            batch, tactic_ids_t, arg_indices
+        for data, pool in zip(actor_datas, candidate_pools):
+            if pool.graph_fingerprint != data.graph_fingerprint:
+                raise ValueError("Collection candidate pool graph changed.")
+        candidate_count = sum(
+            len(p.local_ids) + len(p.lemma_ids) for p in candidate_pools
         )
+        candidate_bytes = sum(
+            (
+                len(p.local_ids) * model.hidden_dim
+                + len(p.lemma_ids) * model.decoder.text_dim
+            )
+            * 4
+            for p in candidate_pools
+        )
+        if (
+            candidate_count > max_update_candidates
+            or candidate_bytes > max_update_candidate_bytes
+        ):
+            raise ValueError("Collected update exceeds its candidate tensor budget.")
+        tactic_ids_t = torch.tensor(tactic_ids, dtype=torch.long, device=device)
+        evaluated = model.evaluate_actions(
+            batch, tactic_ids_t, argument_rows, candidate_pools=candidate_pools
+        )
+        tactic_logp, arg_logp = evaluated.tactic_logp, evaluated.arg_logp
+        values, tactic_logits = evaluated.value, evaluated.tactic_logits
         returns_t = torch.tensor(returns, dtype=torch.float32, device=device)
         mult_t = torch.tensor(multiplicities, dtype=torch.float32, device=device)
         accepted_t = torch.tensor(is_accepted, dtype=torch.bool, device=device)
         raw_adv = returns_t - values.detach()
-        advantages = (raw_adv - raw_adv.mean()) / (raw_adv.std(unbiased=False) + 1e-8)
-        joint_logp = tactic_logp + arg_loss_weight * arg_logp
+        mean_adv = (raw_adv * mult_t).sum() / mult_t.sum()
+        variance = ((raw_adv - mean_adv).square() * mult_t).sum() / mult_t.sum()
+        advantages = (raw_adv - mean_adv) / (variance.sqrt() + 1e-8)
+        joint_logp = evaluated.logp
         actor_loss = (-(mult_t * joint_logp * advantages)).sum() / mult_t.sum()
-        entropy_bonus = entropy.mean()
+        entropy_bonus = (
+            -((joint_logp.detach() + 1) * joint_logp * mult_t).sum() / mult_t.sum()
+        )
         if bc_weight != 0.0:
             labels = torch.where(
                 accepted_t, tactic_ids_t, torch.full_like(tactic_ids_t, -1)
@@ -449,6 +408,16 @@ def compute_onpolicy_loss(
             bc_loss = compute_bc_anchor_loss(tactic_logits, labels)
         mean_return = float(returns_t.mean().item())
         mean_arg_logp = float(arg_logp.mean().item())
+        sampled_entropy = float(
+            (-(joint_logp.detach() * mult_t).sum() / mult_t.sum()).item()
+        )
+        policy_diagnostics = {
+            "mean_count_logp": float(evaluated.count_logp.detach().mean()),
+            "mean_source_logp": float(evaluated.source_logp.detach().mean()),
+            "mean_identity_logp": float(evaluated.identity_logp.detach().mean()),
+            "update_candidate_count": float(candidate_count),
+            "update_candidate_bytes": float(candidate_bytes),
+        }
 
     critic_loss = zero
     if critic_datas:
@@ -470,7 +439,9 @@ def compute_onpolicy_loss(
     metrics = {
         "actor_loss": float(actor_loss.item()),
         "critic_loss": float(critic_loss.item()),
-        "entropy": float(entropy_bonus.item()),
+        "entropy": sampled_entropy,
+        "entropy_gradient_surrogate": float(-entropy_bonus.detach()),
+        **policy_diagnostics,
         "bc_loss": bc_val,
         "total_loss": float(total.item()),
         "mean_return": mean_return,
@@ -484,64 +455,9 @@ def compute_onpolicy_loss(
     return total, metrics
 
 
-def train_step(
-    model: ActorCriticWithArgsClassifier,
-    optimizer: torch.optim.Optimizer,
-    graphs: list,
-    featurize: Callable[[Goal], Data],
-    tactic_to_id: dict[str, int],
-    *,
-    reward_cfg: RewardConfig | None = None,
-    harvest_cfg: HarvestConfig | None = None,
-    grad_clip: float = 1.0,
-    device: torch.device | None = None,
-    critic_weight: float = 0.5,
-    entropy_weight: float = 0.01,
-    bc_weight: float = 0.0,
-) -> dict[str, float]:
-    """Harvest transitions from a batch of search graphs and take one gradient step."""
-    reward_cfg = reward_cfg or RewardConfig()
-    harvest_cfg = harvest_cfg or HarvestConfig()
-    actor_transitions: list[ActorTransition] = []
-    critic_samples: list[CriticSample] = []
-    for graph in graphs:
-        actor_transitions.extend(
-            extract_actor_transitions(graph, reward_cfg, harvest_cfg)
-        )
-        critic_samples.extend(extract_critic_samples(graph, harvest_cfg))
-
-    if not actor_transitions and not critic_samples:
-        return {
-            "num_transitions": 0.0,
-            "num_critic_samples": 0.0,
-            "optimizer_step": 0.0,
-        }
-
-    model.train()
-    optimizer.zero_grad(set_to_none=True)
-    result = compute_transition_loss(
-        model,
-        actor_transitions,
-        critic_samples,
-        featurize,
-        tactic_to_id,
-        device=device,
-        critic_weight=critic_weight,
-        entropy_weight=entropy_weight,
-        bc_weight=bc_weight,
-    )
-    if result is None:
-        return {
-            "num_transitions": 0.0,
-            "num_critic_samples": 0.0,
-            "optimizer_step": 0.0,
-        }
-    loss, metrics = result
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    optimizer.step()
-    metrics["optimizer_step"] = 1.0
-    return metrics
+def train_step(model, optimizer, results, featurize, **kwargs):
+    """Train from complete result/action records rather than bare proof graphs."""
+    return train_step_onpolicy(model, optimizer, results, featurize, **kwargs)
 
 
 async def collect_batch(reasoner, theorems: list[LeanGoalSeed]) -> list:
@@ -554,23 +470,9 @@ async def collect_batch(reasoner, theorems: list[LeanGoalSeed]) -> list:
     return [await reasoner.prove(seed) for seed in theorems]
 
 
-async def collect_and_train(
-    reasoner,
-    model: ActorCriticWithArgsClassifier,
-    optimizer: torch.optim.Optimizer,
-    theorems: list[LeanGoalSeed],
-    featurize: Callable[[Goal], Data],
-    tactic_to_id: dict[str, int],
-    **train_kwargs,
-) -> dict[str, float]:
-    """Await collection on the owning loop, then perform one synchronous update."""
-    graphs = await collect_batch(reasoner, theorems)
-    return train_step(model, optimizer, graphs, featurize, tactic_to_id, **train_kwargs)
-
-
-# ---------------------------------------------------------------------------
-# On-policy path (training-mode expand): RLHybridReasoner results → gradient step
-# ---------------------------------------------------------------------------
+async def collect_and_train(reasoner, model, optimizer, theorems, featurize, **kwargs):
+    results = await collect_batch(reasoner, theorems)
+    return train_step_onpolicy(model, optimizer, results, featurize, **kwargs)
 
 
 def train_step_onpolicy(
@@ -585,10 +487,11 @@ def train_step_onpolicy(
     device: torch.device | None = None,
     critic_weight: float = 0.5,
     entropy_weight: float = 0.01,
-    arg_loss_weight: float = 0.5,
     bc_weight: float = 0.0,
     max_update_nodes: int = 0,
     max_update_edges: int = 0,
+    max_update_candidates: int = 100000,
+    max_update_candidate_bytes: int = 268435456,
 ) -> dict[str, float]:
     """One gradient step over a batch of ``RLSearchResult`` s (rl_reasoner.py).
 
@@ -627,7 +530,7 @@ def train_step_onpolicy(
         if result.edge_actions:
             offset += max(result.edge_actions.keys()) + 1
 
-    model.train()
+    model.eval()
     optimizer.zero_grad(set_to_none=True)
     loss_result = compute_onpolicy_loss(
         model,
@@ -639,11 +542,12 @@ def train_step_onpolicy(
         device=device,
         critic_weight=critic_weight,
         entropy_weight=entropy_weight,
-        arg_loss_weight=arg_loss_weight,
         bc_weight=bc_weight,
         reward_cfg=reward_cfg,
         max_update_nodes=max_update_nodes,
         max_update_edges=max_update_edges,
+        max_update_candidates=max_update_candidates,
+        max_update_candidate_bytes=max_update_candidate_bytes,
     )
     if loss_result is None:
         return {
@@ -660,6 +564,23 @@ def train_step_onpolicy(
         }
     loss, metrics = loss_result
     loss.backward()
+    for name, component in {
+        "encoder": model.encoder,
+        "tactic_actor": model.actor,
+        "critic": model.critic,
+        "count": model.decoder.arg_count_head,
+        "source": model.decoder.source_head,
+        "recurrent_pointer": model.decoder.argument_selector,
+        "lemma_adapter": model.decoder.lemma_adapter,
+    }.items():
+        squares = [
+            parameter.grad.detach().float().square().sum()
+            for parameter in component.parameters()
+            if parameter.grad is not None
+        ]
+        metrics["gradient_norm_" + name] = (
+            float(torch.stack(squares).sum().sqrt()) if squares else 0.0
+        )
     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
     metrics["optimizer_step"] = 1.0

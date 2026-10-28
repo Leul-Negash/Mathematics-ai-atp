@@ -264,6 +264,7 @@ class TacticCandidate(BaseModel):
     tactic_name: str
     arguments: List[str] = Field(default_factory=list)
     probability: float
+    policy_action_key: str = ""
     argument_refs: Optional[List[ArgumentRef]] = None
 
     @model_validator(mode="after")

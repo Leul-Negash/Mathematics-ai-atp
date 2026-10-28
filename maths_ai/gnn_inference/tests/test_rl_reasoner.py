@@ -1,4 +1,6 @@
 from __future__ import annotations
+from maths_ai.gnn_inference.atp_lean_gnn.policy_actions import ArgumentReference
+from maths_ai.gnn_inference.tests.model_helpers import LocalCandidateProvider
 
 import asyncio
 import unittest
@@ -125,16 +127,24 @@ def _make_reasoner(executor, *, top_k=3, seed=0):
 
     node_vocab = build_vocab([model_goal_to_dag(goal)])
     model = actor_critic(len(node_vocab), len(TACTIC_VOCAB))
+    with torch.no_grad():
+        model.decoder.arg_count_head.weight.zero_()
+        model.decoder.arg_count_head.bias.fill_(-100)
+        model.decoder.arg_count_head.bias[0] = 100
     reasoner = RLHybridReasoner(
         model,
         node_vocab,
         TACTIC_VOCAB,
         executor=executor,
+        candidate_provider=LocalCandidateProvider(),
         top_k_tactics=top_k,
         max_depth=3,
         max_nodes=20,
     )
     reasoner.petta_chainer = _StubPLN()  # keep unit tests free of the petta subprocess
+    from maths_ai.gnn_inference.atp_lean_gnn.policy_actions import CandidatePoolSnapshot
+
+    reasoner._candidate_pool = CandidatePoolSnapshot(tuple(range(100)))
     return reasoner, model, node_vocab
 
 
@@ -151,8 +161,10 @@ class DecodeTests(unittest.TestCase):
             tactic_action=torch.tensor([2]),  # "exact"
             tactic_logp=torch.tensor([-0.5]),
             tactic_entropy=torch.tensor([1.0]),
-            arg_actions=[torch.tensor([hyp_idx])],
-            arg_logp=torch.tensor([-0.3]),
+            arguments=((ArgumentReference("local", hyp_idx),),),
+            count_logp=torch.zeros(1),
+            source_logp=torch.zeros(1),
+            identity_logp=torch.tensor([-0.3]),
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
         )
@@ -164,7 +176,7 @@ class DecodeTests(unittest.TestCase):
         self.assertEqual(candidate.tactic_name, "exact")
         self.assertEqual(candidate.arguments, ["p"])
         self.assertEqual(action.tactic_id, 2)
-        self.assertEqual(action.arg_indices, (hyp_idx,))
+        self.assertEqual(action.arguments, (ArgumentReference("local", hyp_idx),))
 
     def test_decode_out_of_range_argument_dropped_from_command(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
@@ -176,8 +188,10 @@ class DecodeTests(unittest.TestCase):
             tactic_action=torch.tensor([1]),  # "intro"
             tactic_logp=torch.tensor([-0.5]),
             tactic_entropy=torch.tensor([1.0]),
-            arg_actions=[torch.tensor([oob])],
-            arg_logp=torch.tensor([0.0]),
+            arguments=((ArgumentReference("local", oob),),),
+            count_logp=torch.zeros(1),
+            source_logp=torch.zeros(1),
+            identity_logp=torch.tensor([0.0]),
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
         )
@@ -187,7 +201,7 @@ class DecodeTests(unittest.TestCase):
             sample, dag, local_declarations(goal), data.graph_fingerprint
         )
         self.assertIsNone(candidate)
-        self.assertEqual(action.arg_indices, (oob,))
+        self.assertEqual(action.arguments, (ArgumentReference("local", oob),))
 
     def test_anonymous_local_is_unplayable_but_sample_is_retained(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
@@ -198,8 +212,10 @@ class DecodeTests(unittest.TestCase):
             tactic_action=torch.tensor([2]),
             tactic_logp=torch.tensor([-0.5]),
             tactic_entropy=torch.tensor([1.0]),
-            arg_actions=[torch.tensor([hyp_idx])],
-            arg_logp=torch.tensor([-0.3]),
+            arguments=((ArgumentReference("local", hyp_idx),),),
+            count_logp=torch.zeros(1),
+            source_logp=torch.zeros(1),
+            identity_logp=torch.tensor([-0.3]),
             value=torch.tensor([0.0]),
             tactic_logits=torch.zeros(1, 3),
         )
@@ -209,7 +225,7 @@ class DecodeTests(unittest.TestCase):
             sample, dag, local_declarations(goal), data.graph_fingerprint
         )
         self.assertIsNone(candidate)
-        self.assertEqual(action.arg_indices, (hyp_idx,))
+        self.assertEqual(action.arguments, (ArgumentReference("local", hyp_idx),))
         self.assertEqual(action.graph_fingerprint, data.graph_fingerprint)
 
 
@@ -234,8 +250,10 @@ class DeclarationResolutionTests(unittest.TestCase):
                 tactic_action=torch.tensor([2]),  # "exact"
                 tactic_logp=torch.tensor([-0.5]),
                 tactic_entropy=torch.tensor([1.0]),
-                arg_actions=[torch.tensor([index])],
-                arg_logp=torch.tensor([-0.3]),
+                arguments=((ArgumentReference("local", index),),),
+                count_logp=torch.zeros(1),
+                source_logp=torch.zeros(1),
+                identity_logp=torch.tensor([-0.3]),
                 value=torch.tensor([0.0]),
                 tactic_logits=torch.zeros(1, 3),
             )
@@ -288,7 +306,9 @@ class DeclarationResolutionTests(unittest.TestCase):
 
 class RolloutTests(unittest.TestCase):
     def _prove(self, reasoner):
-        return asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
+        return asyncio.run(
+            reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS))
+        )
 
     def test_qed_rollout_stash_migrates_to_edge_ids(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
@@ -373,7 +393,9 @@ class RolloutTests(unittest.TestCase):
         reasoner, _model, _vocab = _make_reasoner(executor)
 
         async def cancel_search():
-            task = asyncio.create_task(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
+            task = asyncio.create_task(
+                reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS))
+            )
             await executor.started.wait()
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
@@ -393,18 +415,25 @@ class OnPolicyLossTests(unittest.TestCase):
         hyp_idx = next(i for i, n in enumerate(dag.nodes) if n.label == "Hyp")
 
         model.train()
-        tactic_logp, arg_logp, _entropy, _values, _logits = model.evaluate_actions(
-            batch, torch.tensor([2]), torch.tensor([[hyp_idx]])
+        from maths_ai.gnn_inference.atp_lean_gnn.policy_actions import local_pools
+
+        evaluated = model.evaluate_actions(
+            batch,
+            torch.tensor([2]),
+            ((ArgumentReference("local", hyp_idx),),),
+            candidate_pools=local_pools(batch),
         )
-        loss = -(tactic_logp + arg_logp).sum()
+        loss = -evaluated.logp.sum()
         loss.backward()
-        grad = model.argument_selector.query_proj.weight.grad
+        grad = model.decoder.argument_selector.init_proj.weight.grad
         self.assertIsNotNone(grad)
         self.assertGreater(float(grad.abs().sum()), 0.0)
 
     def test_train_step_onpolicy_updates_params(self):
         reasoner, model, _vocab = _make_reasoner(_QEDExecutor())
-        result = asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
+        result = asyncio.run(
+            reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS))
+        )
 
         optimizer = AdamW(model.parameters(), lr=0.01)
         before = [p.detach().clone() for p in model.parameters()]
@@ -426,7 +455,9 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_failure_only_batch_is_actor_only(self):
         reasoner, model, _vocab = _make_reasoner(_RejectExecutor())
-        result = asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
+        result = asyncio.run(
+            reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS))
+        )
         self.assertGreater(len(result.failure_actions), 0)
 
         loss_result = compute_onpolicy_loss(
@@ -448,7 +479,9 @@ class OnPolicyLossTests(unittest.TestCase):
 
     def test_graph_fingerprint_mismatch_fails_before_policy_recompute(self):
         reasoner, model, _vocab = _make_reasoner(_QEDExecutor())
-        result = asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
+        result = asyncio.run(
+            reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS))
+        )
         transitions = extract_actor_transitions(
             result.graph,
             RewardConfig(step_penalty=0.0),
@@ -456,20 +489,37 @@ class OnPolicyLossTests(unittest.TestCase):
         )
         edge_id = next(iter(result.edge_actions))
         actions = dict(result.edge_actions)
-        actions[edge_id] = replace(actions[edge_id], graph_fingerprint="different")
-        with self.assertRaisesRegex(ValueError, "graph changed"):
+        for fingerprint_value in ("different", ""):
+            actions[edge_id] = replace(
+                actions[edge_id], graph_fingerprint=fingerprint_value
+            )
+            with self.subTest(graph_fingerprint=fingerprint_value):
+                with self.assertRaisesRegex(ValueError, "graph changed"):
+                    compute_onpolicy_loss(
+                        model,
+                        transitions,
+                        extract_critic_samples(result.graph),
+                        actions,
+                        [],
+                        reasoner.dag_featurize_data,
+                    )
+        with self.assertRaisesRegex(
+            ValueError, "missing its complete collection action"
+        ):
             compute_onpolicy_loss(
                 model,
                 transitions,
                 extract_critic_samples(result.graph),
-                actions,
+                {},
                 [],
                 reasoner.dag_featurize_data,
             )
 
     def test_multiplicity_weights_actor_term(self):
         reasoner, model, _vocab = _make_reasoner(_QEDExecutor())
-        result = asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
+        result = asyncio.run(
+            reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS))
+        )
         transitions = extract_actor_transitions(
             result.graph,
             RewardConfig(step_penalty=0.0),
@@ -483,7 +533,19 @@ class OnPolicyLossTests(unittest.TestCase):
         def loss_with(m: int) -> float:
             model.eval()  # deterministic forward so only multiplicity differs
             failures = [
-                FailureRecord(goal=goal, action=EdgeAction(tactic_id=1, multiplicity=m))
+                FailureRecord(
+                    goal=goal,
+                    action=EdgeAction(
+                        tactic_id=1,
+                        multiplicity=m,
+                        graph_fingerprint=reasoner.dag_featurize_data(
+                            goal
+                        ).graph_fingerprint,
+                        candidate_pool=next(
+                            iter(result.edge_actions.values())
+                        ).candidate_pool,
+                    ),
+                )
             ]
             out = compute_onpolicy_loss(
                 model,
@@ -522,6 +584,7 @@ class PLNDisabledTests(unittest.TestCase):
             node_vocab,
             TACTIC_VOCAB,
             executor=executor,
+            candidate_provider=LocalCandidateProvider(),
             top_k_tactics=top_k,
             max_depth=3,
             max_nodes=20,
@@ -530,7 +593,9 @@ class PLNDisabledTests(unittest.TestCase):
         return reasoner, model, node_vocab
 
     def _prove(self, reasoner):
-        return asyncio.run(reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS)))
+        return asyncio.run(
+            reasoner.prove(seed_from_text(goal=GOAL_EXPR, hypotheses=HYPS))
+        )
 
     def test_pln_objects_are_none(self):
         """use_pln=False means neither petta_chainer nor dts_sampler is constructed."""

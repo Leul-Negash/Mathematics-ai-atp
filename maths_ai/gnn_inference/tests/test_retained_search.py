@@ -15,7 +15,7 @@ from maths_ai.gnn_inference.atp_lean_gnn.search_harvest import (
     compute_backups,
     extract_actor_transitions,
 )
-from maths_ai.gnn_inference.tests.model_helpers import actor_critic
+from maths_ai.gnn_inference.tests.model_helpers import LocalCandidateProvider, actor_critic
 from maths_ai.gnn_inference.tests.snapshot_fake import FakeSnapshotScope, Spec, Step
 from maths_ai.hybrid_reasoner import joint_inference
 from maths_ai.hybrid_reasoner.execution_limits import ResidentMemoryMonitor, RetentionLimits
@@ -61,7 +61,7 @@ class _Scripted(HybridReasoner):
     def __init__(self, proposals, **kwargs):
         self.proposals = proposals
         super().__init__(
-            config_path=None, tactic_model_path=None, argument_model_path=None,
+            config_path=None, tactic_model_path=None, retrieval_config_path=None,
             use_pln=False, **kwargs,
         )
 
@@ -249,6 +249,7 @@ class ReplayLearningTests(unittest.TestCase):
             vocab,
             tactics,
             executor=PantographExecutor(client),
+            candidate_provider=LocalCandidateProvider(),
             top_k_tactics=4,
             use_pln=False,
         )

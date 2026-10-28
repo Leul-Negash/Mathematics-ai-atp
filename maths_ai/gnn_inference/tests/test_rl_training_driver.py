@@ -1,4 +1,6 @@
 from __future__ import annotations
+from maths_ai.gnn_inference.atp_lean_gnn.retrieval_artifacts import RetrievalConfig
+from maths_ai.gnn_inference.tests.model_helpers import LocalCandidateProvider
 
 import asyncio
 import json
@@ -176,6 +178,7 @@ def _make_reasoner(model, node_vocab, executor, *, top_k=3):
         node_vocab,
         TACTIC_VOCAB,
         executor=executor,
+        candidate_provider=LocalCandidateProvider(),
         top_k_tactics=top_k,
         max_depth=3,
         max_nodes=20,
@@ -1082,11 +1085,19 @@ class PLNKillSwitchConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
             cfg = _write_config(tmp, use_pln=False, eval_pool_size=1)
+            cfg.retrieval = RetrievalConfig(tmp,tmp,tmp,tmp)
             config_path = tmp / "config.json"
             with open(config_path, "w") as f:
                 json.dump(cfg.to_dict(), f)
 
+            provider = LocalCandidateProvider()
+            provider.library = type("Library", (), {"fingerprint": ""})()
+            async def close_provider():
+                pass
+            provider.aclose = close_provider
+            provider.verify_environment = lambda env: None
             with (
+                patch("maths_ai.gnn_inference.atp_lean_gnn.rl_training_driver.LiveLemmaProvider", return_value=provider),
                 patch(
                     "maths_ai.hybrid_reasoner.joint_inference.PLNInference",
                     side_effect=AssertionError("PLNInference must not be constructed"),

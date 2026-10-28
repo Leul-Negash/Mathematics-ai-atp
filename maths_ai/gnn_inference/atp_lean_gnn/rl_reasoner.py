@@ -5,8 +5,9 @@
   * ``predict_next_tactic`` — instead of the deterministic GNN-engine top-k, draw ``k``
     i.i.d. actions from the actor-critic policy (``model.act``), decode each into a
     ``TacticCandidate`` the Pantograph executor can apply, and stash the integer action
-    record (``EdgeAction``) keyed by the command it renders to. A stash belongs to the
-    one occurrence being expanded and is settled when that expansion ends.
+    record (``EdgeAction``) keyed by the command it renders to and its typed policy
+    action. A stash belongs to the one occurrence being expanded and is settled when
+    that expansion ends.
   * ``_link`` — when the executor accepts a candidate and the base ``_expand`` links it
     into the hypergraph, migrate the stash entry from its command to ``edge.id`` so the
     train phase can join each harvested transition to the action that produced it.
@@ -41,6 +42,7 @@ from maths_ai.hybrid_reasoner.tactic_rendering import render_tactic_command
 from maths_ai.lean_replay import LeanGoalSeed
 from pantograph_async import PantographStateError
 
+from .policy_actions import fingerprint, with_type_signals
 from .actor_critic import ActorCriticWithArgsClassifier
 from .inference import (
     _resolve_local_node_name,
@@ -70,11 +72,15 @@ class RLSearchResult:
 
 def _action_key(candidate: TacticCandidate) -> tuple:
     """Identity of a proposal within one occurrence's expansion: the command Lean
-    runs, or the raw tactic and arguments when it does not render."""
+    runs (or the raw tactic and arguments when it does not render) and the typed
+    policy action, so different actions that render alike stay separate."""
     command = render_tactic_command(candidate)
-    if command is not None:
-        return ("command", command)
-    return ("unrendered", candidate.tactic_name, tuple(candidate.arguments))
+    rendered = (
+        ("command", command)
+        if command is not None
+        else ("unrendered", candidate.tactic_name, tuple(candidate.arguments))
+    )
+    return (rendered, candidate.policy_action_key)
 
 
 class RLHybridReasoner(HybridReasoner):
@@ -87,12 +93,16 @@ class RLHybridReasoner(HybridReasoner):
         tactic_vocab: dict[str, int],
         *,
         executor,
+        candidate_provider,
         device: torch.device | None = None,
         **reasoner_kwargs,
     ) -> None:
         # The base __init__ calls self._build_gnn_engine (overridden below to return
         # None), so these must exist before super().__init__ runs — Python sets them
         # first because the override reads only instance attributes set here.
+        self.candidate_provider = candidate_provider
+        self._candidate_pool = None
+        self._excluded_declarations = ()
         self.model = model
         self.device = device or torch.device("cpu")
         self.node_vocab = node_vocab
@@ -105,7 +115,7 @@ class RLHybridReasoner(HybridReasoner):
         super().__init__(
             config_path=None,
             tactic_model_path=None,
-            argument_model_path=None,
+            retrieval_config_path=None,
             executor=executor,
             **reasoner_kwargs,
         )
@@ -125,6 +135,20 @@ class RLHybridReasoner(HybridReasoner):
     # ------------------------------------------------------------------
     # Proposal: sample k i.i.d. actions and decode them
     # ------------------------------------------------------------------
+
+    async def prepare_goal(self, goal):
+        dag, data = self.dag_featurize(goal)
+        local_ids = tuple(data.premise_mask.nonzero().flatten().tolist())
+        self._candidate_pool = await self.candidate_provider.retrieve(
+            goal,
+            local_ids,
+            str(data.graph_fingerprint),
+            excluded=self._excluded_declarations,
+        )
+        if self.model.decoder.local_type_bonus_strength:
+            self._candidate_pool = with_type_signals(
+                self._candidate_pool, goal, dag, self.tactic_vocab
+            )
 
     def predict_next_tactic(self, sub_goal: Goal) -> List[TacticCandidate]:
         """Draw ``top_k_tactics`` i.i.d. actions from π(·|s) and decode each.
@@ -154,7 +178,7 @@ class RLHybridReasoner(HybridReasoner):
         with torch.no_grad():
             for _ in range(self.top_k_tactics):
                 sample = self.model.act(
-                    batch, id_to_tactic=self.id_to_tactic, greedy=self._greedy
+                    batch, candidate_pools=(self._candidate_pool,), greedy=self._greedy
                 )
                 candidate, action = self._decode(
                     sample,
@@ -171,7 +195,8 @@ class RLHybridReasoner(HybridReasoner):
                 if existing is not None:
                     self._pending[key] = EdgeAction(
                         tactic_id=existing.tactic_id,
-                        arg_indices=existing.arg_indices,
+                        arguments=existing.arguments,
+                        candidate_pool=existing.candidate_pool,
                         multiplicity=existing.multiplicity + 1,
                         graph_fingerprint=existing.graph_fingerprint,
                     )
@@ -193,18 +218,20 @@ class RLHybridReasoner(HybridReasoner):
 
         Tactic: ``tactic_id → name`` via the inverted tactic vocab; an id outside the
         vocab (or the ``<UNK>`` family) is unplayable. Arguments: each
-        sampled index is a padded per-graph position; at batch size 1 that equals the
-        node's offset in ``dag.nodes`` (``dag_to_pyg`` preserves node order), so render
-        it with ``_resolve_local_node_name``. With ``declaration_ids`` each argument
-        also records the live ID of the declaration the pointer chose. Unplayable
-        draws retain their complete integer action and graph fingerprint as
+        reference carries either a per-graph local node identity or a stable
+        library ID. Resolve locals through their declaration identity with
+        ``_resolve_local_node_name`` and library IDs through the bound name table.
+        With ``declaration_ids`` each local argument also records the live ID of the
+        declaration the pointer chose; library lemmas are global references.
+        Unplayable draws retain the complete typed action and collection pool as
         rejected-action training records.
         """
         tactic_id = int(sample.tactic_action[0])
-        arg_indices = tuple(int(a[0]) for a in sample.arg_actions)
+        arguments = sample.arguments[0]
         action = EdgeAction(
             tactic_id=tactic_id,
-            arg_indices=arg_indices,
+            arguments=arguments,
+            candidate_pool=self._candidate_pool,
             multiplicity=1,
             graph_fingerprint=graph_fingerprint,
         )
@@ -214,7 +241,14 @@ class RLHybridReasoner(HybridReasoner):
 
         arguments: List[str] = []
         refs: Optional[List[ArgumentRef]] = [] if declaration_ids is not None else None
-        for idx in arg_indices:
+        for reference in sample.arguments[0]:
+            if reference.source == "library":
+                name = self._candidate_pool.library.name(reference.identity)
+                arguments.append(name)
+                if refs is not None:
+                    refs.append(ArgumentRef(kind="global", text=name))
+                continue
+            idx = reference.identity
             if not 0 <= idx < len(dag.nodes):
                 return None, action
             try:
@@ -229,12 +263,19 @@ class RLHybridReasoner(HybridReasoner):
             else:
                 refs = None
 
-        probability = float(math.exp(float(sample.tactic_logp[0])))
+        probability = float(math.exp(float(sample.logp[0])))
         candidate = TacticCandidate(
             tactic_name=tactic_name,
             arguments=arguments,
             probability=probability,
             argument_refs=refs,
+            policy_action_key=fingerprint(
+                (
+                    tactic_id,
+                    [(a.source, a.identity) for a in sample.arguments[0]],
+                    self._candidate_pool.fingerprint,
+                )
+            ),
         )
         return candidate, action
 
@@ -299,6 +340,11 @@ class RLHybridReasoner(HybridReasoner):
         """
         if self._proving:
             raise PantographStateError("A reasoner supports only one active search.")
+        self._excluded_declarations = tuple(
+            str(value)
+            for key, value in seed.source
+            if key in {"theorem", "theorem_name"}
+        )
         self._pending = {}
         self._unplayable_actions = []
         self._pending_goal = None
