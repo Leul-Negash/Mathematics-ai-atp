@@ -380,3 +380,57 @@ def test_a_cancelled_search_retires_its_session_and_a_new_one_starts_clean(live_
             assert (await fresh.stat()).n_goals == 0
 
     asyncio.run(run())
+
+
+@pytest.mark.pantograph_live
+@pytest.mark.parametrize("split", ["refine ⟨?w, ?h⟩", "constructor"])
+def test_a_reflexive_existential_certifies_through_its_conditional_recipe(live_env, split):
+    from maths_ai.hybrid_reasoner.hypergraph import EdgeStatus
+
+    # rfl proves ?w = ?w only by referring to the witness. With refine the
+    # witness comes first; with constructor the equality does, so the
+    # dependency is later in the pending order.
+    graph = _search(
+        live_env,
+        "∃ n : Nat, n = n",
+        {"∃ n, n = n": [(split,)], "ℕ": [("exact 0",)], "?w = ?w": [("rfl",)]},
+    )
+    rfl = next(edge for edge in graph.edges.values() if edge.command == "rfl")
+    assert rfl.status == EdgeStatus.READY and rfl.dependencies
+    assert graph.execution["replay_attempts"] >= 1
+    assert graph.is_solved(), [(n.goal.expression, n.status) for n in graph.nodes.values()]
+
+
+@pytest.mark.pantograph_live
+def test_conditional_recipes_with_contradictory_witnesses_never_certify(live_env):
+    graph = _search(
+        live_env,
+        "∃ n : Nat, n = n ∧ n = 1 ∧ n = 2",
+        {
+            "∃ n, n = n ∧ n = 1 ∧ n = 2": [("refine ⟨?w, ?a, ?b, ?c⟩",)],
+            "ℕ": [("exact 0",), ("exact 1",), ("exact 2",)],
+            "?w = ?w": [("rfl",)],
+            # rfl cannot assign the opaque witness; these assignments can.
+            "?w = 1": [("exact (rfl : 1 = 1)",)],
+            "?w = 2": [("exact (rfl : 2 = 2)",)],
+        },
+        max_nodes=40,
+    )
+    assert not graph.is_solved()
+    assert graph.execution["replay_attempts"] >= 1
+    assert graph.execution["replay_conflicts"] >= 1
+
+
+@pytest.mark.pantograph_live
+def test_replay_stays_within_a_small_snapshot_bound(live_env):
+    from maths_ai.hybrid_reasoner.execution_limits import RetentionLimits
+
+    graph = _search(
+        live_env,
+        "True ∧ True",
+        {"True ∧ True": [("constructor",)], "True": [("trivial",)]},
+        retention=RetentionLimits(max_retained_snapshots=3),
+    )
+    assert graph.is_solved()
+    assert graph.execution["replay_tactic_calls"] == 3
+    assert graph.execution["peak_snapshots"] <= 3

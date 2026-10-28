@@ -48,6 +48,9 @@ class Step:
     closes: tuple[int, ...] = ()  # sibling positions (in the input's goal order)
     changes: tuple[tuple[int, str], ...] = ()  # (sibling position, new target)
     leave_holes: bool = False  # the selected goal's assignment is not complete
+    # Targets of sibling goals the selected goal's assignment still refers to
+    # while they are open; it is complete once they are assigned.
+    depends: tuple[str, ...] = ()
 
 
 Rule = Callable[[Spec, str], Optional[Step]]
@@ -93,7 +96,14 @@ class _Snapshot:
     root: str
     goals: list[_Goal]
     assigned: frozenset[str]
-    incomplete: frozenset[str] = frozenset()
+    # Selected goal -> the obligations its assignment still refers to.
+    incomplete: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+    def unresolved(self, name: str) -> tuple[str, ...]:
+        for selected, holes in self.incomplete:
+            if selected == name:
+                return tuple(hole for hole in holes if hole not in self.assigned)
+        return ()
 
 
 class FakeSnapshotScope:
@@ -194,7 +204,10 @@ class FakeSnapshotScope:
             if goal not in closed
         ]
         assigned = snapshot.assigned | {selected.name} | {goal.name for goal in closed}
-        incomplete = snapshot.incomplete | ({selected.name} if step.leave_holes else frozenset())
+        holes = (("_hole",) if step.leave_holes else ()) + tuple(
+            goal.name for goal in siblings if goal.spec.target in step.depends
+        )
+        incomplete = snapshot.incomplete + (((selected.name, holes),) if holes else ())
         transition = TransitionProvenance(
             selected.name,
             tuple(goal.name for goal in children),
@@ -223,8 +236,10 @@ class FakeSnapshotScope:
         for name in goals:
             if name in listed:
                 result.append(ObligationInspection(name, "active", listed[name].wire(), (), False))
-            elif name in snapshot.incomplete:
-                result.append(ObligationInspection(name, "assigned", None, ("_hole",), False))
+            elif snapshot.unresolved(name):
+                result.append(
+                    ObligationInspection(name, "assigned", None, snapshot.unresolved(name), False)
+                )
             else:
                 result.append(ObligationInspection(name, "complete", None, (), False))
         return tuple(result)
@@ -234,7 +249,7 @@ class FakeSnapshotScope:
         snapshot = self._snapshot(state)
         if snapshot.goals:
             return CertificationResult("incomplete", f"{len(snapshot.goals)} goals remain", None)
-        if snapshot.incomplete:
+        if any(snapshot.unresolved(name) for name, _ in snapshot.incomplete):
             return CertificationResult("incomplete", "The proof has unresolved holes", None)
         receipt = CertificateReceipt(
             snapshot.root, (), "0" * 16, f"{len(snapshot.assigned):016x}", "1" * 16,

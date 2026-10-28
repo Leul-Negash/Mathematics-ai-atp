@@ -107,7 +107,9 @@ two seams. One search proceeds:
      children keep their tactic slot order; with PLN each gets an STV, which orders
      expansion but never reorders or drops a child. Each open child leases the result
      snapshot. An attempt without children is a READY candidate when the selected goal's
-     assignment is complete, and JOINT when it still depends on other goals.
+     assignment is complete, or when it still refers only to other obligations on its
+     path (a conditional recipe that replay completes in the same state); it is JOINT
+     when it refers to metavariables the search does not know.
 5. **Cycle guard**: a child whose goal has no metavariables and matches an ancestor's
    fingerprint is force-marked DEAD. A goal with metavariables can look identical while
    hidden assignments differ, so it is never treated as a cycle.

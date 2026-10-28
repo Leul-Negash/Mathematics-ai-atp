@@ -16,8 +16,17 @@ Replay is a bounded backtracking search over the candidate recipes:
 - the attempt's child obligations are matched to the recorded slots, and a
   shape mismatch is a conflict;
 - an obligation a shared assignment already discharged needs no tactic;
+- a conditional step, one that closes its goal through obligations it still
+  refers to (``rfl`` on ``?w = ?w``), is accepted when those obligations are
+  still pending in this replay; they are solved later in the same state and
+  the kernel check of the root decides;
 - a rejected step or a conflict tries the next alternative from the retained
-  prefix state; failed prefixes are remembered so they are not retried.
+  prefix state; failed prefixes are remembered so they are not retried. A
+  prefix state is released as soon as no alternative is left to try from it.
+
+Every step reaches Lean through the executor, so it is subject to the same
+snapshot reservation and memory policy as exploration; when no room can be
+made, the replay ends with ``RESOURCE_LIMIT``.
 
 When an obligation whose observation was changed by a shared assignment has
 no working recipe, the state is kept as a continuation: the search can expand
@@ -38,7 +47,7 @@ from maths_ai.data_models.model_identity import carry_model_identity
 from maths_ai.data_models.proof_components import Goal, TacticCandidate
 from maths_ai.lean_replay import GoalReplaySpec
 
-from .execution_registry import Lease, LeaseKind, SnapshotRegistry
+from .execution_registry import Lease, LeaseKind, RetentionExceeded, SnapshotRegistry
 from .execution_types import (
     DeclarationKey,
     ExecutionOccurrence,
@@ -80,6 +89,8 @@ class ReplayStatus(str, Enum):
     CONFLICT = "conflict"
     BUDGET = "budget"
     INCONCLUSIVE = "inconclusive"
+    RESOURCE_LIMIT = "resource_limit"
+
 
 
 @dataclass(frozen=True)
@@ -242,8 +253,10 @@ class ReplayCoordinator:
             if certified is not None:
                 result.status = ReplayStatus.CERTIFIED
                 result.certificate, result.witness = certified
-        except _Stop as stop:
-            result.status = stop.status
+        except (_Stop, RetentionExceeded) as stop:
+            result.status = (
+                stop.status if isinstance(stop, _Stop) else ReplayStatus.RESOURCE_LIMIT
+            )
             for continuation in result.continuations:
                 await self.registry.release(continuation.occurrence.lease)
             result.continuations.clear()
@@ -275,7 +288,16 @@ class ReplayCoordinator:
         if len(self._failed) < self.MEMO_LIMIT:
             self._failed.add(key)
 
-    async def _search(self, lease: Lease, pending, witness, prefix, anchor):
+    async def _search(
+        self, lease: Lease, pending, witness, prefix, anchor,
+        *, own: bool = False,
+    ):
+        """Replay ``pending`` from the state ``lease`` holds.
+
+        ``own`` says the caller will not need ``lease`` again, so it can be
+        released as soon as no alternative here can backtrack to it; the
+        admitted root and continuation anchors are never owned.
+        """
         if not pending:
             return await self._certify(lease, witness)
         head, rest = pending[0], pending[1:]
@@ -285,19 +307,25 @@ class ReplayCoordinator:
             (status,) = await self.registry.scope.inspect(state, [head.goal_name])
             if status.is_complete:
                 # A shared assignment already discharged it; nothing to replay.
-                return await self._search(lease, rest, witness, prefix, anchor)
+                return await self._search(lease, rest, witness, prefix, anchor, own=own)
             self._conflict(head.node, None, "missing", f"{head.goal_name} is {status.status}")
             self._result.combinations += 1
             return None
         explored = self._source.observation(head.node)
         changed = explored.state_fingerprint() != head.goal.state_fingerprint()
         applied = False
-        for step in self._source.alternatives(head.node):
+        steps = [
+            step
+            for step in self._source.alternatives(head.node)
+            if (anchor, (*prefix, (head.node, step.attempt))) not in self._failed
+        ]
+        for position, step in enumerate(steps):
             choice = (*prefix, (head.node, step.attempt))
-            if (anchor, choice) in self._failed:
-                continue
             self._check_budget()
-            certified, ran = await self._attempt(lease, head, rest, step, witness, choice, anchor, explored)
+            certified, ran = await self._attempt(
+                lease, head, rest, step, witness, choice, anchor, explored,
+                release_input=own and position == len(steps) - 1,
+            )
             if certified is not None:
                 return certified
             applied = applied or ran
@@ -320,7 +348,10 @@ class ReplayCoordinator:
         self._result.combinations += 1
         return None
 
-    async def _attempt(self, lease, head, rest, step: RecipeStep, witness, choice, anchor, explored):
+    async def _attempt(
+        self, lease, head, rest, step: RecipeStep, witness, choice, anchor, explored,
+        *, release_input: bool = False,
+    ):
         try:
             arguments = rebind_arguments(
                 step.arguments,
@@ -346,12 +377,22 @@ class ReplayCoordinator:
         try:
             shape = [(child.slot, child.kind, len(child.introduced)) for child in outcome.children]
             recorded = [(child.slot, child.kind, child.introduced) for child in step.children]
-            if shape != recorded or (not outcome.children and outcome.selected_complete is False):
+            if shape != recorded:
                 self._conflict(
                     head.node, step.attempt, "shape",
                     f"replayed children {shape} differ from the recorded {recorded}",
                 )
                 return None, False
+            if not outcome.children and outcome.selected_complete is False:
+                # A conditional step closes its goal only through obligations
+                # this replay still has to solve; certification decides.
+                pending = {item.goal_name for item in rest}
+                if not step.dependencies or not set(outcome.selected_holes) <= pending:
+                    self._conflict(
+                        head.node, step.attempt, "dependency",
+                        f"holes {list(outcome.selected_holes)} are not pending obligations",
+                    )
+                    return None, False
             children = tuple(
                 _Pending(
                     ObligationKey(step.attempt, child.slot),
@@ -396,8 +437,12 @@ class ReplayCoordinator:
                     tuple(recorded),
                 ),
             )
+            if release_input:
+                # No alternative here is left to backtrack to; free the prefix.
+                await self.registry.release(lease)
             certified = await self._search(
-                outcome.lease, (*children, *refreshed), (*witness, record), choice, anchor
+                outcome.lease, (*children, *refreshed), (*witness, record), choice, anchor,
+                own=True,
             )
             return certified, True
         finally:

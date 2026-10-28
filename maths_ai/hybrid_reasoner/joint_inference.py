@@ -38,9 +38,14 @@ from maths_ai.hybrid_reasoner.execution_limits import (
     ResidentMemoryMonitor,
     RetentionLimits,
 )
-from maths_ai.hybrid_reasoner.execution_registry import LeaseKind, SnapshotRegistry
+from maths_ai.hybrid_reasoner.execution_registry import (
+    LeaseKind,
+    RetentionExceeded,
+    SnapshotRegistry,
+)
 from maths_ai.hybrid_reasoner.execution_types import (
     ExecutionOccurrence,
+    ObligationKey,
     child_declarations,
     root_declarations,
 )
@@ -171,6 +176,8 @@ class HybridReasoner:
         # Shared by every worker in one collection process; one baseline for all.
         self.collection_memory = collection_memory
         self._repl_memory: ResidentMemoryMonitor | None = None
+        self._graph: ProofHypergraph | None = None
+        self._expanding: ProofNode | None = None
         self.gnn_engine = self._build_gnn_engine(
             config_path=config_path,
             tactic_model_path=tactic_model_path,
@@ -392,7 +399,9 @@ class HybridReasoner:
             async with self.server.state_scope() as scope:
                 self._scope = scope
                 self._registry = SnapshotRegistry(
-                    scope, max_snapshots=self.retention.max_retained_snapshots
+                    scope,
+                    max_snapshots=self.retention.max_retained_snapshots,
+                    make_room=self._make_room,
                 )
                 self._replay = ReplayCoordinator(
                     self._registry,
@@ -441,6 +450,8 @@ class HybridReasoner:
         root_state, root_goal, _ = await materialize_seed(self._scope, seed)
         anchor = registry.adopt(root_state, LeaseKind.ROOT, "root anchor")
         graph = ProofHypergraph(root_goal)
+        self._graph = graph
+        self._expanding = None
         root = graph.root
         root.declarations = root_declarations(root_goal)
         goal_name = root_state.goals[0].goal_name
@@ -546,6 +557,8 @@ class HybridReasoner:
         }
         for node in graph.nodes.values():
             node.occurrence = None
+        self._graph = None
+        self._expanding = None
         self._root_occurrence = None
         self._continuations = {}
         registry.invalidate()
@@ -587,6 +600,11 @@ class HybridReasoner:
                     continue
                 node = graph.add_continuation(kept.occurrence, kept.node)
                 self._continuations[node.id] = kept
+            if result.status is ReplayStatus.RESOURCE_LIMIT:
+                # Even after pruning, the replay's own anchors did not fit.
+                graph.search_end_reason = SearchEndReason.RESOURCE_LIMIT
+                self._replay_stopped = True
+                return
             if result.status in (ReplayStatus.BUDGET, ReplayStatus.INCONCLUSIVE):
                 # Replay or certification ran out; further evidence stays unknown.
                 self._replay_stopped = True
@@ -620,15 +638,42 @@ class HybridReasoner:
         associate the returned edge id with the sampled action that produced
         ``tactic``.
         """
+        dependencies: list = []
+        if outcome is not None and outcome.selected_complete is False:
+            dependencies = self._dependencies(graph, node, outcome.selected_holes)
         return graph.add_edge(
             node.id,
             tactic,
             ranked_subgoals,
             command=outcome.command if outcome is not None else "",
             selected_complete=outcome.selected_complete if outcome is not None else True,
+            dependencies=dependencies,
             closed=len(outcome.closed) if outcome is not None else 0,
             changed=len(outcome.changed) if outcome is not None else 0,
         )
+
+    def _dependencies(
+        self, graph: ProofHypergraph, node: ProofNode, holes
+    ) -> list[ObligationKey]:
+        """The obligations a closing attempt's remaining holes are, or ``[]``.
+
+        Each hole must be another obligation of an AND edge on ``node``'s path
+        to the root (the same lineage, so the same metavariable name); those are
+        exactly the obligations a replay of this branch also solves. A hole the
+        search does not know leaves the attempt JOINT.
+        """
+        known: dict[str, ObligationKey] = {}
+        current = node
+        while current.incoming_edge_id is not None:
+            edge = graph.edges[current.incoming_edge_id]
+            for child_id in edge.child_ids:
+                child = graph.nodes[child_id]
+                if child.id != node.id and child.occurrence is not None:
+                    known.setdefault(child.occurrence.goal_name, child.key)
+            current = graph.nodes[edge.source_id]
+        if not holes or any(hole not in known for hole in holes):
+            return []
+        return [known[hole] for hole in holes]
 
     def _on_expansion_complete(self, node: ProofNode, result: str) -> None:
         """Hook invoked exactly once for every non-exceptional expansion exit."""
@@ -651,9 +696,11 @@ class HybridReasoner:
             graph.mark_node_pruned(node.id, note="snapshot no longer retained")
             self._on_expansion_complete(node, ExpansionResult.RESOURCE_LIMIT)
             return
+        self._expanding = node
         try:
             await self._expand_occurrence(graph, node, occurrence)
         finally:
+            self._expanding = None
             await self._drop_snapshot(node)
 
     async def _drop_snapshot(self, node: ProofNode) -> None:
@@ -670,11 +717,13 @@ class HybridReasoner:
             for monitor in (self._repl_memory, self.collection_memory)
         )
 
-    async def _prune(self, graph: ProofHypergraph, keep: ProofNode, *, fraction: float) -> int:
+    async def _prune(
+        self, graph: ProofHypergraph, keep: Optional[ProofNode], *, fraction: float
+    ) -> int:
         """Release the snapshots of the lowest-ranked open nodes, ``keep`` aside."""
         candidates = [
             other for other in reversed(graph.frontier())
-            if other.id != keep.id and other.occurrence is not None
+            if (keep is None or other.id != keep.id) and other.occurrence is not None
         ]
         count = max(1, int(len(candidates) * fraction)) if candidates else 0
         for other in candidates[:count]:
@@ -687,17 +736,29 @@ class HybridReasoner:
             self._counters["pruned_nodes"] += 1
         return count
 
-    async def _reserve(self, graph: ProofHypergraph, node: ProofNode) -> bool:
-        """Make room for one more result snapshot, pruning if needed."""
+    async def _make_room(self, count: int) -> None:
+        """The registry's hook before every state-producing request.
+
+        Exploration, replay and continuations all reach Lean through the
+        executor, so one policy covers them: under memory pressure prune half
+        of the open frontier, then prune until ``count`` more snapshots fit.
+        Pinned anchors and leased inputs are never released here; if pruning
+        cannot make room, ``RetentionExceeded`` stops the request unexecuted.
+        """
+        graph = self._graph
+        if graph is None:
+            return
+        keep = self._expanding
         if self._memory_exceeded():
-            if not await self._prune(graph, node, fraction=0.5):
-                graph.search_end_reason = SearchEndReason.RESOURCE_LIMIT
-                return False
-        while not self._registry.has_capacity(1):
-            if not await self._prune(graph, node, fraction=0.0):
-                graph.search_end_reason = SearchEndReason.RESOURCE_LIMIT
-                return False
-        return True
+            if not await self._prune(graph, keep, fraction=0.5):
+                raise RetentionExceeded(
+                    "Resident memory is over its bound and nothing is left to prune."
+                )
+        while not self._registry.has_capacity(count):
+            if not await self._prune(graph, keep, fraction=0.0):
+                raise RetentionExceeded(
+                    "Pinned snapshots fill the retention bound and nothing is left to prune."
+                )
 
     async def _expand_occurrence(
         self, graph: ProofHypergraph, node: ProofNode, occurrence: ExecutionOccurrence
@@ -731,12 +792,13 @@ class HybridReasoner:
                     "requires a bracketed rule list and none of its arguments is a usable name"
                 )
                 continue
-            if not await self._reserve(graph, node):
-                # Retention is exhausted; unexecuted proposals carry no evidence.
-                self._on_expansion_complete(node, ExpansionResult.RESOURCE_LIMIT)
-                return
             try:
                 outcome = await self.executor.apply(self._registry, occurrence, command)
+            except RetentionExceeded:
+                # Retention is exhausted; unexecuted proposals carry no evidence.
+                graph.search_end_reason = SearchEndReason.RESOURCE_LIMIT
+                self._on_expansion_complete(node, ExpansionResult.RESOURCE_LIMIT)
+                return
             except (
                 PantographProtocolError,
                 PantographTransportError,

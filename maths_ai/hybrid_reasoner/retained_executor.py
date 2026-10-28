@@ -43,9 +43,10 @@ class RetainedOutcome:
     the tactic produced for the selected goal (direct goals, then restored
     holes) with their observations. ``siblings`` are the refreshed observations
     of the input's other goals; ``closed`` and ``changed`` name the ones the
-    transition assigned or altered. ``selected_complete`` is only computed when
-    there are no children: whether Lean can instantiate the selected goal's
-    assignment without holes.
+    transition assigned or altered. ``selected_complete`` and
+    ``selected_holes`` are only computed when there are no children: whether
+    Lean can instantiate the selected goal's assignment without holes, and the
+    unassigned metavariables it still depends on.
     """
 
     success: bool
@@ -57,6 +58,7 @@ class RetainedOutcome:
     closed: tuple[str, ...] = ()
     changed: tuple[str, ...] = ()
     selected_complete: Optional[bool] = None
+    selected_holes: tuple[str, ...] = ()
 
 
 def _canonical(parent: Goal, state: TacticState, name: str) -> Goal:
@@ -93,6 +95,9 @@ class RetainedTacticExecutor:
                 f"Goal {occurrence.goal_name} is not open in its snapshot."
             )
         index = names.index(occurrence.goal_name)
+        # Room for the result is made before anything is sent; a refusal
+        # raises RetentionExceeded and the tactic is never executed.
+        await registry.before_request()
         try:
             result = await registry.scope.apply_tactic(state, command, goal_index=index)
         except PantographTacticRejected as exc:
@@ -135,9 +140,11 @@ class RetainedTacticExecutor:
             for name in transition.siblings
         }
         complete = None
+        holes: tuple[str, ...] = ()
         if not children:
             (selected,) = await registry.scope.inspect(result, [transition.selected])
             complete = selected.is_complete
+            holes = selected.holes
         return RetainedOutcome(
             success=True,
             command=command,
@@ -147,6 +154,7 @@ class RetainedTacticExecutor:
             closed=transition.closed,
             changed=transition.changed,
             selected_complete=complete,
+            selected_holes=holes,
         )
 
 

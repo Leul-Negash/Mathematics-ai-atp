@@ -83,10 +83,29 @@ start.
 **Failure categories.** Search end reasons: `ROOT_CERTIFIED`, `ROOT_DEAD`,
 `MAX_NODES`, `FRONTIER_EMPTY`, `EXTERNAL_ABORT`, `RESOURCE_LIMIT`. New closure
 reasons: `RESOURCE_PRUNED`, `UNSUPPORTED_OBSERVATION`. Edge statuses:
-`PENDING`, `READY`, `DEAD`, `JOINT` (no children, but the assignment depends on
-other goals). Replay conflicts: `rejected`, `shape`, `binding`, `missing`,
-`incomplete`, `kernel_rejected`. Replay statuses: `certified`, `conflict`,
-`budget`, `inconclusive`.
+`PENDING`, `READY`, `DEAD`, `JOINT` (no children, and the assignment depends on
+metavariables the search does not know as obligations). Replay conflicts:
+`rejected`, `shape`, `binding`, `dependency`, `missing`, `incomplete`,
+`kernel_rejected`. Replay statuses: `certified`, `conflict`, `budget`,
+`inconclusive`, `resource_limit`.
+
+**Conditional recipes.** A childless attempt whose proof still refers to other
+obligations (`rfl` on `?w = ?w` with the witness unassigned) records them as
+`dependencies` when each one is another obligation of an AND edge on its path
+to the root, and is then a READY candidate. Replay accepts such a step when
+every remaining hole is still pending later in the same replay, in either
+order, and the kernel check of the root decides. Holes the search does not
+know leave the attempt `JOINT`.
+
+**One reservation path.** Exploration, replay and continuations all reach Lean
+through the executor, which calls `SnapshotRegistry.before_request` before every
+state-producing request. The search installs the hook: under memory pressure it
+prunes half of the open frontier, then prunes the lowest-ranked open nodes until
+the result fits; pinned anchors and leased inputs are never released. If no room
+can be made the request is not sent, and the search ends with `RESOURCE_LIMIT`
+and unknown evidence. Replay releases a prefix state as soon as no alternative
+is left to backtrack to it, so the bound holds while recursion runs, not only
+after it unwinds.
 
 ## Caller inventory
 
@@ -138,8 +157,8 @@ measured deployment defaults.
 | Client offline suite | 480 passed, 13 skipped |
 | Client live suite (`Init`, `Lean`) | 19 passed, 2 skipped (packaging-job checks) |
 | Client sdist and wheel | `check_sdist.py` passes; unpacked sdist suite against the wheel: 482 passed |
-| Application offline suite | 447 passed, 23 skipped, 5 failed; the 5 fail identically on `54d7cef` (the `stdbuf` path test, three Thompson-sampler tests, and the `collection_workers` config test) |
-| Application live suite, Mathlib | 21 passed, 1 skipped (prepared-vocabulary checkpoint gate) |
+| Application offline suite | 454 passed, 27 skipped, 5 failed; the 5 fail identically on `54d7cef` (the `stdbuf` path test, three Thompson-sampler tests, and the `collection_workers` config test) |
+| Application live suite, Mathlib | 25 passed, 1 skipped (prepared-vocabulary checkpoint gate) |
 | `rl_smoke`, Mathlib | passes: one admission, zero intermediate reconstructions, one on-policy update |
 
 The live replay tests cover a conjunction from either exploration order,
@@ -200,9 +219,8 @@ trained policy.
 - Statement and proof identities are 64-bit structural digests that ignore
   bound variable names. They are reproducibility metadata, not cryptographic
   proofs.
-- A childless attempt whose assignment still has holes is `JOINT`: it is never
-  ready and never a failure. Joint obligations across siblings are left to
-  replay and continuations rather than modelled as a joint task.
+- A childless attempt whose holes are not obligations on its path is `JOINT`:
+  never ready and never a failure.
 - Supervised-checkpoint search and multi-worker GPU collection were not run:
   there is no checkpoint or GPU here. The prepared-vocabulary checkpoint gate
   was skipped; this is a blocked item, not a pass.

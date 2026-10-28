@@ -83,9 +83,9 @@ class SearchEndReason(str, Enum):
 
 class EdgeStatus:
     PENDING = "pending"  # children still open/expanded; outcome undetermined
-    READY = "ready"  # no children and a complete assignment, or every child READY
+    READY = "ready"  # no children and a complete or conditional assignment, or every child READY
     DEAD = "dead"  # structurally blocked because some required child is DEAD
-    JOINT = "joint"  # no children, but the assignment depends on other obligations
+    JOINT = "joint"  # no children, and the assignment depends on obligations the search does not know
 
 
 def _state_key(goal: Goal) -> str:
@@ -178,6 +178,8 @@ class ProofHyperedge:
     command: str = ""
     child_slots: List[Tuple[int, str, int]] = field(default_factory=list)
     selected_complete: Optional[bool] = None
+    # Obligations a childless attempt's assignment still refers to.
+    dependencies: List[ObligationKey] = field(default_factory=list)
     closed: int = 0
     changed: int = 0
 
@@ -192,6 +194,7 @@ class ProofHyperedge:
             "child_ids": list(self.child_ids),
             "child_slots": [list(slot) for slot in self.child_slots],
             "status": self.status,
+            "dependencies": [[key.attempt, key.slot] for key in self.dependencies],
             "closed_siblings": self.closed,
             "changed_siblings": self.changed,
         }
@@ -257,6 +260,7 @@ class ProofHypergraph:
         *,
         command: str = "",
         selected_complete: Optional[bool] = True,
+        dependencies: Sequence[ObligationKey] = (),
         closed: int = 0,
         changed: int = 0,
     ) -> ProofHyperedge:
@@ -269,8 +273,11 @@ class ProofHypergraph:
         introduced no locals.
 
         An attempt without children is READY when the selected obligation's
-        assignment is complete, and JOINT when it still depends on other
-        obligations; JOINT is neither ready nor dead.
+        assignment is complete. When the assignment still refers to other
+        obligations, it is a conditional candidate: READY if ``dependencies``
+        names them, since replay solves them in the same execution, and JOINT
+        otherwise. JOINT is neither ready nor dead. Readiness is never proof;
+        only the certified replay is.
 
         Edge case — cycles: a child whose goal has no metavariables and matches
         one of ``source_id``'s hole-free ancestors is created but force-marked
@@ -312,6 +319,7 @@ class ProofHypergraph:
             command=command,
             child_slots=slots,
             selected_complete=selected_complete,
+            dependencies=list(dependencies),
             closed=closed,
             changed=changed,
         )
@@ -558,6 +566,7 @@ class ProofHypergraph:
                 ChildRecord(slot, kind, introduced, child_id)
                 for (slot, kind, introduced), child_id in zip(edge.child_slots, edge.child_ids)
             ),
+            dependencies=tuple(edge.dependencies),
         )
 
     def __len__(self) -> int:
@@ -577,7 +586,9 @@ class ProofHypergraph:
 
     def _derive_edge_status(self, edge: ProofHyperedge) -> str:
         if not edge.child_ids:
-            return EdgeStatus.READY if edge.selected_complete is not False else EdgeStatus.JOINT
+            if edge.selected_complete is not False or edge.dependencies:
+                return EdgeStatus.READY
+            return EdgeStatus.JOINT
         statuses = [self.nodes[cid].status for cid in edge.child_ids]
         if any(status == NodeStatus.DEAD for status in statuses):
             return EdgeStatus.DEAD

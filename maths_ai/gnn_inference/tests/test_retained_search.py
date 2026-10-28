@@ -339,3 +339,185 @@ class HoleObservationTests(unittest.TestCase):
         self.assertEqual(reasons["Q"], NodeClosureReason.UNSUPPORTED_OBSERVATION)
         self.assertEqual(graph.execution["unsupported_observations"], 1)
         self.assertFalse(graph.is_solved())
+
+
+EXISTS = Spec("∃ n, n = n")
+
+
+def _reflexive_rules(split: str, *, known_hole: bool = True):
+    children = {
+        "refine": (Spec("ℕ"), Spec("?w = ?w")),
+        "constructor": (Spec("?w = ?w"), Spec("ℕ")),
+    }[split]
+    # rfl proves ?w = ?w only by referring to the witness, still unassigned.
+    closing = Step(depends=("ℕ",)) if known_hole else Step(leave_holes=True)
+    return _commands({
+        ("∃ n, n = n", split): Step(children=children),
+        ("ℕ", "exact 0"): Step(),
+        ("?w = ?w", "rfl"): closing,
+    })
+
+
+REFLEXIVE = {"ℕ": [("exact 0", 0.9)], "?w = ?w": [("rfl", 0.9)]}
+
+
+class ConditionalRecipeTests(unittest.TestCase):
+    """A closing attempt whose proof still refers to a sibling obligation."""
+
+    def setUp(self):
+        self._original = joint_inference.materialize_seed
+        joint_inference.materialize_seed = _admit
+
+    def tearDown(self):
+        joint_inference.materialize_seed = self._original
+
+    def search(self, rules, proposals, **kwargs):
+        client = _Client(rules, EXISTS)
+        reasoner = _Scripted(proposals, executor=PantographExecutor(client), **kwargs)
+        return asyncio.run(reasoner.prove(SEED)), client.scopes[0], reasoner
+
+    def test_the_reflexive_existential_certifies_in_either_order(self):
+        from maths_ai.hybrid_reasoner.execution_types import ObligationKey
+        from maths_ai.hybrid_reasoner.hypergraph import EdgeStatus
+
+        for split in ("refine", "constructor"):
+            with self.subTest(split=split):
+                graph, scope, _ = self.search(
+                    _reflexive_rules(split), {"∃ n, n = n": [(split, 0.9)], **REFLEXIVE}
+                )
+                self.assertTrue(graph.is_solved())
+                rfl = next(e for e in graph.edges.values() if e.command == "rfl")
+                split_edge = next(e for e in graph.edges.values() if e.command == split)
+                witness_slot = 0 if split == "refine" else 1
+                self.assertEqual(rfl.status, EdgeStatus.READY)
+                self.assertEqual(rfl.dependencies, [ObligationKey(split_edge.id, witness_slot)])
+                self.assertGreaterEqual(graph.execution["replay_attempts"], 1)
+                self.assertEqual(scope.live, 0)
+
+    def test_an_unknown_hole_stays_joint_and_never_replays(self):
+        from maths_ai.hybrid_reasoner.hypergraph import EdgeStatus
+
+        graph, _scope, _ = self.search(
+            _reflexive_rules("refine", known_hole=False),
+            {"∃ n, n = n": [("refine", 0.9)], **REFLEXIVE},
+        )
+        rfl = next(e for e in graph.edges.values() if e.command == "rfl")
+        self.assertEqual(rfl.status, EdgeStatus.JOINT)
+        self.assertFalse(graph.is_solved())
+        self.assertEqual(graph.execution["replay_attempts"], 0)
+
+
+CONJUNCTION = _commands({
+    ("P ∧ Q", "constructor"): Step(children=(Spec("P"), Spec("Q"))),
+    ("P ∧ Q", "split"): Step(children=(Spec("R"),)),
+    ("P", "trivial"): Step(),
+    ("Q", "trivial"): Step(),
+})
+
+
+class ReplayRetentionTests(unittest.TestCase):
+    """Replay requests go through the same reservation as exploration."""
+
+    def setUp(self):
+        self._original = joint_inference.materialize_seed
+        joint_inference.materialize_seed = _admit
+
+    def tearDown(self):
+        joint_inference.materialize_seed = self._original
+
+    def reasoner(self, proposals, **kwargs):
+        client = _Client(CONJUNCTION, Spec("P ∧ Q"))
+        return _Scripted(proposals, executor=PantographExecutor(client), **kwargs), client
+
+    def test_a_multi_step_replay_stays_within_a_small_bound(self):
+        reasoner, client = self.reasoner(
+            {"P ∧ Q": [("constructor", 0.9)], "P": [("trivial", 0.9)], "Q": [("trivial", 0.9)]},
+            retention=RetentionLimits(max_retained_snapshots=3),
+        )
+        graph = asyncio.run(reasoner.prove(SEED))
+        self.assertTrue(graph.is_solved())
+        self.assertEqual(graph.execution["replay_tactic_calls"], 3)
+        self.assertLessEqual(graph.execution["peak_snapshots"], 3)
+        self.assertEqual(client.scopes[0].live, 0)
+
+    def test_replay_prunes_retained_open_work_to_stay_within_the_bound(self):
+        reasoner, client = self.reasoner(
+            {
+                "P ∧ Q": [("constructor", 0.9), ("split", 0.1)],
+                "P": [("trivial", 0.9)],
+                "Q": [("trivial", 0.9)],
+            },
+            retention=RetentionLimits(max_retained_snapshots=3),
+        )
+        graph = asyncio.run(reasoner.prove(SEED))
+        self.assertTrue(graph.is_solved())
+        self.assertLessEqual(graph.execution["peak_snapshots"], 3)
+        self.assertEqual(graph.execution["pruned_nodes"], 1)
+        (open_branch,) = [n for n in graph.nodes.values() if n.goal.expression == "R"]
+        self.assertEqual(open_branch.closure_reason, NodeClosureReason.RESOURCE_PRUNED)
+        self.assertEqual(client.scopes[0].live, 0)
+
+    def test_pins_that_fill_the_bound_end_with_a_resource_limit(self):
+        reasoner, client = self.reasoner(
+            {"P ∧ Q": [("constructor", 0.9)], "P": [("trivial", 0.9)], "Q": [("trivial", 0.9)]},
+            retention=RetentionLimits(max_retained_snapshots=2),
+        )
+        graph = asyncio.run(reasoner.prove(SEED))
+        self.assertFalse(graph.is_solved())
+        self.assertEqual(graph.search_end_reason, SearchEndReason.RESOURCE_LIMIT)
+        self.assertLessEqual(graph.execution["peak_snapshots"], 2)
+        self.assertFalse(any(v.is_known and v.value == 1.0 for v in compute_backups(graph).edge_outcomes.values()))
+        self.assertEqual(client.scopes[0].live, 0)
+
+    def test_memory_pressure_during_replay_prunes_then_stops(self):
+        monitor = ResidentMemoryMonitor(1.0)
+        holder = {}
+        # Pressure appears only once replay is running.
+        monitor.exceeded = lambda: getattr(holder["reasoner"], "_counters", {}).get("replay_attempts", 0) > 0
+        reasoner, client = self.reasoner(
+            {
+                "P ∧ Q": [("constructor", 0.9), ("split", 0.1)],
+                "P": [("trivial", 0.9)],
+                "Q": [("trivial", 0.9)],
+            },
+            collection_memory=monitor,
+        )
+        holder["reasoner"] = reasoner
+        graph = asyncio.run(reasoner.prove(SEED))
+        self.assertEqual(graph.execution["pruned_nodes"], 1)
+        self.assertEqual(graph.execution["last_replay"], "resource_limit")
+        self.assertEqual(graph.search_end_reason, SearchEndReason.RESOURCE_LIMIT)
+        self.assertFalse(graph.is_solved())
+        self.assertEqual(client.scopes[0].live, 0)
+
+    def test_a_cancelled_replay_cleans_up_and_the_reasoner_is_reusable(self):
+        reasoner, client = self.reasoner(
+            {"P ∧ Q": [("constructor", 0.9)], "P": [("trivial", 0.9)], "Q": [("trivial", 0.9)]},
+        )
+        blocked = asyncio.Event()
+
+        async def run():
+            original = FakeSnapshotScope.apply_tactic
+
+            async def block_in_replay(scope, state, tactic, *, goal_index=0):
+                if getattr(reasoner, "_counters", {}).get("replay_attempts", 0) > 0:
+                    blocked.set()
+                    await asyncio.Event().wait()
+                return await original(scope, state, tactic, goal_index=goal_index)
+
+            FakeSnapshotScope.apply_tactic = block_in_replay
+            try:
+                task = asyncio.create_task(reasoner.prove(SEED))
+                await blocked.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            finally:
+                FakeSnapshotScope.apply_tactic = original
+            self.assertIsNone(reasoner._registry)
+            self.assertFalse(reasoner._proving)
+            return await reasoner.prove(SEED)
+
+        graph = asyncio.run(run())
+        self.assertTrue(graph.is_solved())
+        self.assertTrue(all(scope.live == 0 for scope in client.scopes))

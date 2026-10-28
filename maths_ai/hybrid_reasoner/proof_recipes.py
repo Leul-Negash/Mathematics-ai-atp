@@ -50,7 +50,9 @@ class RecipeStep:
     """One accepted attempt, as replay needs it.
 
     ``command`` is what ran when the attempt was explored; a replay renders the
-    command again from ``arguments`` in its own context.
+    command again from ``arguments`` in its own context. ``dependencies`` are
+    the obligations a childless attempt's proof still refers to: it closes its
+    goal only once those are solved in the same execution.
     """
 
     attempt: int
@@ -59,6 +61,7 @@ class RecipeStep:
     arguments: tuple[ArgumentRef, ...]
     command: str
     children: tuple[ChildRecord, ...]
+    dependencies: tuple[ObligationKey, ...] = ()
 
 
 class RecipeSource(Protocol):

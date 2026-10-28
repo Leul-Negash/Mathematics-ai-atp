@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from pantograph_async import PantographStateError, PantographStateScope, TacticState
 
@@ -62,11 +62,17 @@ class SnapshotRegistry:
     """Leases over the snapshots of one theorem search, with a retention bound.
 
     ``max_snapshots`` counts distinct allocations, not leases or graph nodes.
-    ``reserve`` checks before a request that its result could be owned.
+    Every state-producing request goes through ``before_request``: an
+    installed ``make_room`` hook may prune speculative work first, and the
+    bound itself is then checked, so it holds throughout execution.
     """
 
     def __init__(
-        self, scope: PantographStateScope, *, max_snapshots: Optional[int] = None
+        self,
+        scope: PantographStateScope,
+        *,
+        max_snapshots: Optional[int] = None,
+        make_room: Optional[Callable[[int], Awaitable[None]]] = None,
     ) -> None:
         if max_snapshots is not None and (
             type(max_snapshots) is not int or max_snapshots < 1
@@ -74,6 +80,9 @@ class SnapshotRegistry:
             raise ValueError("max_snapshots must be a positive integer.")
         self.scope = scope
         self.max_snapshots = max_snapshots
+        # Frees capacity (for example by pruning open search nodes) or raises
+        # RetentionExceeded; called before every state-producing request.
+        self.make_room = make_room
         self._records: dict[int, _Record] = {}
         self._next = 0
         self._invalid = False
@@ -161,6 +170,13 @@ class SnapshotRegistry:
                 f"{len(self._records)} retained snapshots and {count} more would exceed "
                 f"the bound of {self.max_snapshots}."
             )
+
+    async def before_request(self, count: int = 1) -> None:
+        """Make room for ``count`` results of a request about to be sent."""
+        self._check_valid()
+        if self.make_room is not None:
+            await self.make_room(count)
+        self.reserve(count)
 
     def has_capacity(self, count: int = 1) -> bool:
         return self.max_snapshots is None or len(self._records) + count <= self.max_snapshots
