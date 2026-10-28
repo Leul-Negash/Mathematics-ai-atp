@@ -41,7 +41,7 @@ async def admitted(scope, registry):
     start = await scope.start_goal("root")
     state = await scope.apply_tactic(start, "intro p q hp hq")
     await scope.release(start)
-    lease = registry.adopt(state, LeaseKind.ROOT, "root")
+    lease = registry.adopt_root(state, "root")
     goal = execution_goal_to_goal(state.goals[0])
     return ExecutionOccurrence(
         0, ObligationKey.root(), state.goals[0].goal_name, goal,
@@ -94,7 +94,10 @@ class RegistryTests(unittest.TestCase):
             registry = SnapshotRegistry(scope, max_snapshots=2)
             root = await admitted(scope, registry)
             extra = registry.share(root.lease, LeaseKind.REPLAY, "anchor")
-            registry.reserve()
+            reservation = registry.reserve()
+            self.assertFalse(registry.has_capacity())
+            self.assertEqual(registry.reserved_snapshots, 1)
+            reservation.cancel()
             self.assertTrue(registry.has_capacity())
             outcome = await RetainedTacticExecutor().apply(registry, root, "constructor")
             self.assertEqual(registry.live_snapshots, 2)
@@ -102,7 +105,8 @@ class RegistryTests(unittest.TestCase):
             with self.assertRaises(RetentionExceeded):
                 registry.reserve()
             await registry.release(outcome.lease)
-            registry.reserve()
+            reservation = registry.reserve()
+            reservation.cancel()
             await registry.release(extra)
 
         run(body)
@@ -121,7 +125,7 @@ class RegistryTests(unittest.TestCase):
             other.invalidate()
             self.assertTrue(root.lease.released)
             with self.assertRaises(PantographStateError):
-                other.adopt(scope.issued[max(scope.issued)], LeaseKind.ROOT, "late")
+                other.adopt_root(scope.issued[max(scope.issued)], "late")
 
         run(body)
 
@@ -240,3 +244,144 @@ class BindingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_overlapping_requests_cannot_claim_the_same_result_slot():
+    async def body():
+        scope = FakeSnapshotScope(RULES, roots={"root": ROOT})
+        registry = SnapshotRegistry(scope, max_snapshots=2)
+        root = await admitted(scope, registry)
+        entered, proceed = asyncio.Event(), asyncio.Event()
+        original = scope.apply_tactic
+
+        async def blocked(*args, **kwargs):
+            entered.set()
+            await proceed.wait()
+            return await original(*args, **kwargs)
+
+        scope.apply_tactic = blocked
+        executor = RetainedTacticExecutor()
+        first = asyncio.create_task(executor.apply(registry, root, "trivial"))
+        await entered.wait()
+        try:
+            assert registry.reserved_snapshots == 1
+            assert registry.is_pinned(root.lease)
+            try:
+                await executor.apply(registry, root, "trivial")
+            except RetentionExceeded:
+                pass
+            else:
+                raise AssertionError("The second request reused reserved capacity")
+        finally:
+            proceed.set()
+            outcome = await first
+        assert registry.reserved_snapshots == 0
+        assert registry.live_snapshots == registry.peak_snapshots == 2
+        await registry.release(outcome.lease)
+        await registry.close()
+        assert scope.live == 0
+
+    run(body)
+
+
+def test_request_reservations_and_pins_are_refunded_on_cancel_error_and_rejection():
+    async def body():
+        scope = FakeSnapshotScope(RULES, roots={"root": ROOT})
+        registry = SnapshotRegistry(scope, max_snapshots=2)
+        root = await admitted(scope, registry)
+        executor = RetainedTacticExecutor()
+        rejected = await executor.apply(registry, root, "nonsense")
+        assert not rejected.success
+        assert registry.reserved_snapshots == 0
+        assert registry.live_leases == 1
+        original = scope.apply_tactic
+        entered = asyncio.Event()
+
+        async def blocked(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        scope.apply_tactic = blocked
+        task = asyncio.create_task(executor.apply(registry, root, "trivial"))
+        await entered.wait()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert registry.reserved_snapshots == 0
+        assert registry.live_leases == 1
+
+        async def broken(*args, **kwargs):
+            raise RuntimeError("transport failed")
+
+        scope.apply_tactic = broken
+        try:
+            await executor.apply(registry, root, "trivial")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("The transport error was swallowed")
+        assert registry.reserved_snapshots == 0
+        assert registry.live_leases == 1
+        scope.apply_tactic = original
+        outcome = await executor.apply(registry, root, "trivial")
+        await registry.release(outcome.lease)
+        await registry.close()
+        assert scope.live == 0
+
+    run(body)
+
+
+def test_a_snapshot_being_deleted_still_occupies_capacity():
+    async def body():
+        scope = FakeSnapshotScope(RULES, roots={"root": ROOT})
+        registry = SnapshotRegistry(scope, max_snapshots=2)
+        root = await admitted(scope, registry)
+        outcome = await RetainedTacticExecutor().apply(registry, root, "trivial")
+        original = scope.release
+        entered, proceed = asyncio.Event(), asyncio.Event()
+
+        async def blocked(state):
+            entered.set()
+            await proceed.wait()
+            await original(state)
+
+        scope.release = blocked
+        deletion = asyncio.create_task(registry.release(outcome.lease))
+        await entered.wait()
+        try:
+            assert not registry.has_capacity()
+            assert registry.live_snapshots == 2
+        finally:
+            proceed.set()
+            await deletion
+        assert registry.has_capacity()
+        await registry.close()
+
+    run(body)
+
+
+def test_request_pins_a_graph_only_input_before_the_pruning_hook():
+    async def body():
+        scope = FakeSnapshotScope(RULES, roots={"root": ROOT})
+        registry = SnapshotRegistry(scope, max_snapshots=2)
+        root = await admitted(scope, registry)
+        graph = registry.share(root.lease, LeaseKind.GRAPH, "frontier")
+        await registry.release(root.lease)
+        root.lease = graph
+        assert not registry.is_pinned(graph)
+
+        async def make_room(count):
+            assert registry.is_pinned(graph)
+            assert registry.live_leases == 2
+
+        registry.make_room = make_room
+        outcome = await RetainedTacticExecutor().apply(registry, root, "trivial")
+        assert not registry.is_pinned(graph)
+        assert registry.live_leases == 2
+        await registry.release(outcome.lease)
+        await registry.close()
+        assert scope.live == 0
+
+    run(body)

@@ -95,19 +95,17 @@ class RetainedTacticExecutor:
                 f"Goal {occurrence.goal_name} is not open in its snapshot."
             )
         index = names.index(occurrence.goal_name)
-        # Room for the result is made before anything is sent; a refusal
-        # raises RetentionExceeded and the tactic is never executed.
-        await registry.before_request()
-        try:
-            result = await registry.scope.apply_tactic(state, command, goal_index=index)
-        except PantographTacticRejected as exc:
-            return RetainedOutcome(success=False, command=command, error=str(exc))
-        lease = registry.adopt(result, LeaseKind.OPERATION, holder)
-        try:
-            return await self._decode(registry, occurrence, result, lease, command)
-        except BaseException:
-            await registry.release(lease)
-            raise
+        async with registry.request(occurrence.lease) as reservation:
+            try:
+                result = await registry.scope.apply_tactic(state, command, goal_index=index)
+            except PantographTacticRejected as exc:
+                return RetainedOutcome(success=False, command=command, error=str(exc))
+            lease = reservation.adopt(result, LeaseKind.OPERATION, holder)
+            try:
+                return await self._decode(registry, occurrence, result, lease, command)
+            except BaseException:
+                await registry.release(lease)
+                raise
 
     async def _decode(
         self,

@@ -217,7 +217,8 @@ class ScriptedExecutor(RetainedTacticExecutor):
             [replace(pantograph_goal(child.goal), goal_name=child.goal_name) for child in children]
             + siblings
         )
-        lease = registry.adopt(state, LeaseKind.OPERATION, holder)
+        async with registry.request(occurrence.lease) as reservation:
+            lease = reservation.adopt(state, LeaseKind.OPERATION, holder)
         return RetainedOutcome(
             success=True,
             command=command,

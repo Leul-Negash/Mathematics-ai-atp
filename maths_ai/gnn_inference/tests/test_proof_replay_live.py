@@ -434,3 +434,25 @@ def test_replay_stays_within_a_small_snapshot_bound(live_env):
     assert graph.is_solved()
     assert graph.execution["replay_tactic_calls"] == 3
     assert graph.execution["peak_snapshots"] <= 3
+
+
+@pytest.mark.pantograph_live
+def test_an_assigned_sibling_waits_for_its_later_dependency(live_env):
+    graph = _search(
+        live_env,
+        "∃ w v : Nat, w = v",
+        {
+            "∃ w v, w = v": [("refine ⟨?w, ?v, ?h⟩\nrotate_left\nswap",)],
+            "?w = ?v": [("exact Eq.refl ?v",)],
+            "ℕ": [("exact 0",)],
+        },
+    )
+    assert graph.has_candidate()
+    assert graph.execution["replay_attempts"] >= 1
+    assert graph.is_solved(), [(n.goal.expression, n.status) for n in graph.nodes.values()]
+    artifact = ReplayArtifact.from_dict(graph.artifact.as_dict())
+
+    async def again(scope):
+        return await reverify(scope, artifact)
+
+    assert scoped(live_env, again).is_certified

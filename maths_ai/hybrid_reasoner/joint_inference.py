@@ -448,7 +448,7 @@ class HybridReasoner:
         """
         registry = self._registry
         root_state, root_goal, _ = await materialize_seed(self._scope, seed)
-        anchor = registry.adopt(root_state, LeaseKind.ROOT, "root anchor")
+        anchor = registry.adopt_root(root_state, "root anchor")
         graph = ProofHypergraph(root_goal)
         self._graph = graph
         self._expanding = None
@@ -724,6 +724,8 @@ class HybridReasoner:
         candidates = [
             other for other in reversed(graph.frontier())
             if (keep is None or other.id != keep.id) and other.occurrence is not None
+            and other.occurrence.lease is not None
+            and not self._registry.is_pinned(other.occurrence.lease)
         ]
         count = max(1, int(len(candidates) * fraction)) if candidates else 0
         for other in candidates[:count]:
@@ -749,14 +751,14 @@ class HybridReasoner:
         if graph is None:
             return
         keep = self._expanding
-        if self._memory_exceeded():
-            if not await self._prune(graph, keep, fraction=0.5):
+        while True:
+            pressure = self._memory_exceeded()
+            if not pressure and self._registry.has_capacity(count):
+                return
+            if not await self._prune(graph, keep, fraction=0.5 if pressure else 0.0):
                 raise RetentionExceeded(
                     "Resident memory is over its bound and nothing is left to prune."
-                )
-        while not self._registry.has_capacity(count):
-            if not await self._prune(graph, keep, fraction=0.0):
-                raise RetentionExceeded(
+                    if pressure else
                     "Pinned snapshots fill the retention bound and nothing is left to prune."
                 )
 

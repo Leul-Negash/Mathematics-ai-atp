@@ -109,7 +109,7 @@ class _RecordingScope:
 
 def _occurrence(registry, names):
     state = type("State", (), {"goals": [type("G", (), {"goal_name": name})() for name in names]})()
-    lease = registry.adopt(state, LeaseKind.ROOT, "root")
+    lease = registry.adopt_root(state, "root")
     goal = structured_goal("p")
     return ExecutionOccurrence(0, ObligationKey.root(), names[-1], goal, {}, lease)
 

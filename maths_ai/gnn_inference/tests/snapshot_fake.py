@@ -51,6 +51,8 @@ class Step:
     # Targets of sibling goals the selected goal's assignment still refers to
     # while they are open; it is complete once they are assigned.
     depends: tuple[str, ...] = ()
+    # Assigned sibling position -> target names of its remaining dependencies.
+    sibling_depends: tuple[tuple[int, tuple[str, ...]], ...] = ()
 
 
 Rule = Callable[[Spec, str], Optional[Step]]
@@ -207,7 +209,13 @@ class FakeSnapshotScope:
         holes = (("_hole",) if step.leave_holes else ()) + tuple(
             goal.name for goal in siblings if goal.spec.target in step.depends
         )
-        incomplete = snapshot.incomplete + (((selected.name, holes),) if holes else ())
+        sibling_holes = tuple(
+            (siblings[position].name, tuple(
+                goal.name for goal in siblings if goal.spec.target in targets
+            ))
+            for position, targets in step.sibling_depends
+        )
+        incomplete = snapshot.incomplete + (((selected.name, holes),) if holes else ()) + sibling_holes
         transition = TransitionProvenance(
             selected.name,
             tuple(goal.name for goal in children),

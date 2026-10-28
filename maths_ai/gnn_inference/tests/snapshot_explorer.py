@@ -50,7 +50,7 @@ class Explorer:
     async def start(cls, scope, statement: str) -> "Explorer":
         registry = SnapshotRegistry(scope)
         state, goal, _ = await materialize_seed(scope, seed_from_text(goal=statement))
-        lease = registry.adopt(state, LeaseKind.ROOT, "root")
+        lease = registry.adopt_root(state, "root")
         root = ExecutionOccurrence(
             0, ObligationKey.root(), state.goals[0].goal_name, goal,
             root_declarations(goal), lease,

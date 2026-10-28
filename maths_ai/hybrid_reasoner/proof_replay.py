@@ -156,7 +156,8 @@ class ReplayContinuation:
 
     ``occurrence`` is that obligation in the retained state, with its current
     observation; ``node`` is the graph node it stood in for. Replay resumes
-    with ``rest`` after the obligation is solved there.
+    with ``rest`` after the obligation is solved there. ``deferred`` retains
+    assigned obligations whose dependencies must finish before certification.
     """
 
     occurrence: ExecutionOccurrence
@@ -165,6 +166,7 @@ class ReplayContinuation:
     witness: tuple[WitnessStep, ...]
     prefix: tuple[tuple[int, int], ...]
     anchor: int
+    deferred: tuple[_Pending, ...] = ()
 
 
 @dataclass
@@ -241,15 +243,19 @@ class ReplayCoordinator:
         return await self._run(
             source, occurrence.lease, (head, *continuation.rest),
             continuation.witness, continuation.prefix, continuation.anchor, deadline,
+            deferred=continuation.deferred,
         )
 
-    async def _run(self, source, lease, pending, witness, prefix, anchor, deadline):
+    async def _run(self, source, lease, pending, witness, prefix, anchor, deadline, *, deferred=()):
         result = ReplayResult(ReplayStatus.CONFLICT)
         self._source = source
         self._deadline = deadline
         self._result = result
         try:
-            certified = await self._search(lease, tuple(pending), tuple(witness), tuple(prefix), anchor)
+            certified = await self._search(
+                lease, tuple(pending), tuple(witness), tuple(prefix), anchor,
+                deferred=deferred,
+            )
             if certified is not None:
                 result.status = ReplayStatus.CERTIFIED
                 result.certificate, result.witness = certified
@@ -290,7 +296,7 @@ class ReplayCoordinator:
 
     async def _search(
         self, lease: Lease, pending, witness, prefix, anchor,
-        *, own: bool = False,
+        *, own: bool = False, deferred=(),
     ):
         """Replay ``pending`` from the state ``lease`` holds.
 
@@ -299,6 +305,21 @@ class ReplayCoordinator:
         admitted root and continuation anchors are never owned.
         """
         if not pending:
+            # Assigned siblings may only become complete after later steps.
+            # Inspect them once, after progress, rather than rotating pending work.
+            state = self.registry.state(lease)
+            if deferred:
+                statuses = await self.registry.scope.inspect(
+                    state, [item.goal_name for item in deferred]
+                )
+                for item, status in zip(deferred, statuses):
+                    if not status.is_complete:
+                        self._conflict(
+                            item.node, None, "incomplete",
+                            f"{item.goal_name} still depends on {status.holes}",
+                        )
+                        self._result.combinations += 1
+                        return None
             return await self._certify(lease, witness)
         head, rest = pending[0], pending[1:]
         state = self.registry.state(lease)
@@ -307,7 +328,19 @@ class ReplayCoordinator:
             (status,) = await self.registry.scope.inspect(state, [head.goal_name])
             if status.is_complete:
                 # A shared assignment already discharged it; nothing to replay.
-                return await self._search(lease, rest, witness, prefix, anchor, own=own)
+                return await self._search(
+                    lease, rest, witness, prefix, anchor, own=own, deferred=deferred,
+                )
+            known = {item.goal_name for item in (*rest, *deferred)}
+            if (
+                status.status in {"assigned", "delayed"}
+                and status.holes
+                and set(status.holes) <= known
+            ):
+                return await self._search(
+                    lease, rest, witness, prefix, anchor,
+                    own=own, deferred=(*deferred, head),
+                )
             self._conflict(head.node, None, "missing", f"{head.goal_name} is {status.status}")
             self._result.combinations += 1
             return None
@@ -324,7 +357,7 @@ class ReplayCoordinator:
             self._check_budget()
             certified, ran = await self._attempt(
                 lease, head, rest, step, witness, choice, anchor, explored,
-                release_input=own and position == len(steps) - 1,
+                release_input=own and position == len(steps) - 1, deferred=deferred,
             )
             if certified is not None:
                 return certified
@@ -343,14 +376,14 @@ class ReplayCoordinator:
             )
             self._anchors += 1
             self._result.continuations.append(
-                ReplayContinuation(occurrence, head.node, rest, witness, prefix, self._anchors)
+                ReplayContinuation(occurrence, head.node, rest, witness, prefix, self._anchors, deferred)
             )
         self._result.combinations += 1
         return None
 
     async def _attempt(
         self, lease, head, rest, step: RecipeStep, witness, choice, anchor, explored,
-        *, release_input: bool = False,
+        *, release_input: bool = False, deferred=(),
     ):
         try:
             arguments = rebind_arguments(
@@ -386,13 +419,14 @@ class ReplayCoordinator:
             if not outcome.children and outcome.selected_complete is False:
                 # A conditional step closes its goal only through obligations
                 # this replay still has to solve; certification decides.
-                pending = {item.goal_name for item in rest}
+                pending = {item.goal_name for item in (*rest, *deferred)}
                 if not step.dependencies or not set(outcome.selected_holes) <= pending:
                     self._conflict(
                         head.node, step.attempt, "dependency",
                         f"holes {list(outcome.selected_holes)} are not pending obligations",
                     )
                     return None, False
+                deferred = (*deferred, head)
             children = tuple(
                 _Pending(
                     ObligationKey(step.attempt, child.slot),
@@ -442,7 +476,7 @@ class ReplayCoordinator:
                 await self.registry.release(lease)
             certified = await self._search(
                 outcome.lease, (*children, *refreshed), (*witness, record), choice, anchor,
-                own=True,
+                own=True, deferred=deferred,
             )
             return certified, True
         finally:
@@ -512,7 +546,7 @@ async def reverify(scope, artifact, *, max_heartbeats: Optional[int] = None) -> 
     registry = SnapshotRegistry(scope)
     try:
         state = await materialize_replay(scope, spec)
-        lease = registry.adopt(state, LeaseKind.ROOT, "artifact")
+        lease = registry.adopt_root(state, "artifact")
         (root,) = state.goals
         goal = execution_goal_to_goal(root)
         open_obligations = {
