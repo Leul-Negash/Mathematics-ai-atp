@@ -291,8 +291,10 @@ class DeclarationResolutionTests(unittest.TestCase):
                 tactic_action=torch.tensor([2]),
                 tactic_logp=torch.tensor([-0.5]),
                 tactic_entropy=torch.tensor([1.0]),
-                arg_actions=[torch.tensor([fv])],
-                arg_logp=torch.tensor([-0.3]),
+                arguments=((ArgumentReference("local", fv),),),
+                count_logp=torch.zeros(1),
+                source_logp=torch.zeros(1),
+                identity_logp=torch.tensor([-0.3]),
                 value=torch.tensor([0.0]),
                 tactic_logits=torch.zeros(1, 3),
             )
@@ -487,7 +489,8 @@ class OnPolicyLossTests(unittest.TestCase):
             RewardConfig(step_penalty=0.0),
             edge_ids=list(result.edge_actions),
         )
-        edge_id = next(iter(result.edge_actions))
+        # Only the certified witness's edge yields a transition to check.
+        edge_id = next(iter(result.graph.witnessed_edges()))
         actions = dict(result.edge_actions)
         for fingerprint_value in ("different", ""):
             actions[edge_id] = replace(
@@ -527,6 +530,11 @@ class OnPolicyLossTests(unittest.TestCase):
         )
         critic_samples = extract_critic_samples(result.graph)
         goal = structured_goal(GOAL_EXPR, HYPS)
+        # Only the certified witness is a success row; the failure must be a
+        # different action, or the two rows carry the same log-probability and
+        # the weights cancel under advantage normalization.
+        (witnessed,) = [result.edge_actions[e] for e in result.graph.witnessed_edges()]
+        failed_tactic = (witnessed.tactic_id + 1) % len(TACTIC_VOCAB)
 
         # Success rows (return ≈ 1) against a failure row (return ≈ 0) give a nonzero
         # advantage contrast, so re-weighting the failure by m must change the loss.
@@ -536,7 +544,7 @@ class OnPolicyLossTests(unittest.TestCase):
                 FailureRecord(
                     goal=goal,
                     action=EdgeAction(
-                        tactic_id=1,
+                        tactic_id=failed_tactic,
                         multiplicity=m,
                         graph_fingerprint=reasoner.dag_featurize_data(
                             goal
