@@ -12,8 +12,8 @@ was verified.
 | | |
 | --- | --- |
 | Application base | AC-branch `54d7cefe04aed980734798f06528ed80c71b81ac` |
-| Companion REPL | `123nol/Pantograph` `client_centric_repo` at `fe57f98`, plus `f0b6de3` (transition provenance and `goal.inspect`) and `2309b15` (`goal.certify`) |
-| Client | `123nol/Pantograph-Client` `main` at `d1dac7e`, plus `2c4194a` (protocol version 2, version 0.2.0) |
+| Companion REPL | `123nol/Pantograph` `client_centric_repo` at `9ecaaea` (123nol/Pantograph#1: `f0b6de3` transition provenance and `goal.inspect`, `2309b15` `goal.certify`) |
+| Client | `123nol/Pantograph-Client` `main` at `955a492` (123nol/Pantograph-Client#3: protocol version 2, version 0.2.0), pinned in `pyproject.toml` and `uv.lock` |
 | Toolchain | `leanprover/lean4:v4.10.0-rc1` |
 | Mathlib | `29dcec07` |
 | Rebuilt REPL | `repl` SHA-256 `9b549ad2d5e8aa33f5c39eb124c7452ad0dd52fce8df605dd0060f15a6c9e198`, built in a separate checkout; the deployed executable was not replaced |
@@ -134,12 +134,12 @@ MCTS-AC-branch is untouched; its consumers need their own port.
 
 ## Running it
 
-The application needs client 0.2.0 and a REPL built from the fork commits
-above. Until the client commit is published, install it from a checkout and
-point `pantograph_repl` at the rebuilt binary:
+`uv sync --locked` installs the pinned client. Build the REPL from the companion
+commit above and point `pantograph_repl` at it:
 
 ```bash
-cd Pantograph   # 123nol/Pantograph with f0b6de3 and 2309b15
+git clone https://github.com/123nol/Pantograph.git && cd Pantograph
+git checkout --detach 9ecaaea242f427e534aff29314513c358b4d21ad
 lake build repl
 python -m maths_ai.gnn_inference.scripts.rl_smoke \
   --source-root /path/to/mathlib4 --pantograph-repl .lake/build/bin/repl
@@ -209,11 +209,8 @@ trained policy.
 
 ## Deviations and limits
 
-- The app's dependency pin and `uv.lock` still name client `d1dac7e`. They move
-  to the published client commit in one last commit once the client branch is
-  on GitHub; the tests here ran against 0.2.0 installed from the local commit.
-- The pin did not move with the integration commit (plan Stage 7) for the
-  same reason.
+- The client pin moved after the integration commit (plan Stage 7), once the
+  client was published, rather than inside it.
 - `ObligationKey` and `DeclarationKey` use graph edge ids as attempt ids; they
   are valid within one search and its exported artifact.
 - Statement and proof identities are 64-bit structural digests that ignore
