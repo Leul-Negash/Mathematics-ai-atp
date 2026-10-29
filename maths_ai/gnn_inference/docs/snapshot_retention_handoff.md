@@ -157,9 +157,9 @@ measured deployment defaults.
 | Client offline suite | 480 passed, 13 skipped |
 | Client live suite (`Init`, `Lean`) | 19 passed, 2 skipped (packaging-job checks) |
 | Client sdist and wheel | `check_sdist.py` passes; unpacked sdist suite against the wheel: 482 passed |
-| Application offline suite | 454 passed, 27 skipped, 5 failed; the 5 fail identically on `54d7cef` (the `stdbuf` path test, three Thompson-sampler tests, and the `collection_workers` config test) |
-| Application live suite, Mathlib | 25 passed, 1 skipped (prepared-vocabulary checkpoint gate) |
-| `rl_smoke`, Mathlib | passes: one admission, zero intermediate reconstructions, one on-policy update |
+| Application offline suite, merged with AC-branch `96f8bca` | 479 passed, 29 skipped, 5 failed; the 5 fail identically on `96f8bca` (the `stdbuf` path test, `test_source_aware_policy`, three Thompson-sampler tests) |
+| Application live suite, Mathlib | 26 passed, 1 skipped (prepared-vocabulary checkpoint gate) |
+| `rl_smoke`, Mathlib | passes: one admission, zero intermediate reconstructions, root certified through replay, one on-policy update |
 
 The live replay tests cover a conjunction from either exploration order,
 conflicting existential witnesses that never certify, an OR alternative
