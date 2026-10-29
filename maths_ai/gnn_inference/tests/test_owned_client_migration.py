@@ -138,7 +138,7 @@ def test_lazy_exports_preserve_existing_package_api():
 
 
 CLIENT_REPOSITORY = "https://github.com/123nol/Pantograph-Client"
-CLIENT_COMMIT = "d1dac7e8a8ea296192e7a5b2616114b73e0812b7"
+CLIENT_COMMIT = "955a4921b4cacaa49f4b3087f3982d7ca3629566"
 
 
 def test_dependency_is_the_pinned_client_and_not_pypantograph():
@@ -219,6 +219,28 @@ def test_port_sources_match_the_recorded_lineage_and_current_adaptations():
     )
     assert identity["target_base_commit"] == "ab3f91f04df857403db7c9c435f7acae09a70c08"
     for entry in identity["sources"]:
+        if entry["path"] in expected:
+            assert entry["target_base_sha256"] == expected[entry["path"]], entry["path"]
+        expected[entry["path"]] = entry["sha256"]
+    # Retained snapshots, replay and certification follow the identity
+    # repair, ported from the application branch that introduced them.
+    retained = json.loads(
+        (WIDENING_MANIFEST.parent.parent / "retained_snapshots/source_manifest.json").read_text()
+    )
+    assert retained["target_base_commit"] == "026950a882b42d5f5d6a3de759b48433f7434bf6"
+    assert retained["application_source_commit"] == (
+        "a890ec625017d53decfe96f76619aee3f3284dea"
+    )
+    for entry in retained["sources"]:
+        if entry["path"] in expected:
+            assert entry["target_base_sha256"] == expected[entry["path"]], entry["path"]
+        expected[entry["path"]] = entry["sha256"]
+    # Replay recovery extends the source chain without rewriting the port.
+    recovery = json.loads(
+        (WIDENING_MANIFEST.parent.parent / "mcts_replay_recovery/source_manifest.json").read_text()
+    )
+    assert recovery["target_base_commit"] == "c52f74c24a6aa7a74524c6d22d1a904dc5d7851b"
+    for entry in recovery["sources"]:
         if entry["path"] in expected:
             assert entry["target_base_sha256"] == expected[entry["path"]], entry["path"]
         expected[entry["path"]] = entry["sha256"]

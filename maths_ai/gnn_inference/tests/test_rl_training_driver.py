@@ -17,7 +17,7 @@ from maths_ai.lean_replay import (
     render_replay,
     seed_from_text,
 )
-from maths_ai.hybrid_reasoner.hypergraph import TacticOutcome
+from maths_ai.hybrid_reasoner.retained_executor import RetainedTacticExecutor
 from maths_ai.pln_inference.model import PLNResult
 
 from maths_ai.gnn_inference.atp_lean_gnn.checkpointing import checkpoint_payload
@@ -46,6 +46,7 @@ from maths_ai.gnn_inference.atp_lean_gnn import rl_training_driver
 from maths_ai.hybrid_reasoner.proposal import ProposalSpec
 from maths_ai.gnn_inference.atp_lean_gnn.rl_resources import ResourcePlan
 from pantograph_async import (
+    TransitionProvenance,
     ExecutionGoal,
     ExecutionLocal,
     PantographConfigurationError,
@@ -59,6 +60,7 @@ from pantograph_async import (
 )
 from maths_ai.gnn_inference.tests.model_helpers import (
     ScopedFakeClient,
+    ScriptedExecutor,
     actor_critic,
     pantograph_goal,
     structured_goal,
@@ -71,8 +73,9 @@ from maths_ai.gnn_inference.tests.model_helpers import (
 
 
 class _FakeGoalState:
-    def __init__(self, goals=None):
+    def __init__(self, goals=None, transition=None):
         self.goals = list(goals or [])
+        self.transition = transition
 
 
 class _FakeServer(ScopedFakeClient):
@@ -87,18 +90,21 @@ class _FakeServer(ScopedFakeClient):
         return _FakeGoalState()
 
     async def _apply_tactic(self, state, tactic):
+        selected = state.goals[0].goal_name if state.goals else ""
         if tactic.startswith("intro "):
-            return _FakeGoalState([pantograph_goal(structured_goal(GOAL_EXPR, HYPS))])
-        # Any other tactic closes the replayed goal.
-        return _FakeGoalState()
+            goal = pantograph_goal(structured_goal(GOAL_EXPR, HYPS))
+            return _FakeGoalState(
+                [goal],
+                TransitionProvenance(selected, (goal.goal_name,), ((),), (), (), (), (), ()),
+            )
+        # Any other tactic closes the selected goal: no children, nothing else open.
+        return _FakeGoalState(
+            transition=TransitionProvenance(selected, (), (), (), (), (), (), ())
+        )
 
 
-class _QEDExecutor:
-    def __init__(self):
-        self.server = _FakeServer()
-
-    async def apply(self, server, state, tactic):
-        return TacticOutcome(success=True, subgoals=[])
+def _QEDExecutor():
+    return ScriptedExecutor(lambda _occurrence, _command: [], server=_FakeServer())
 
 
 class _InadmissibleServer(_FakeServer):
@@ -108,20 +114,16 @@ class _InadmissibleServer(_FakeServer):
         raise PantographGoalRejected("cannot elaborate reconstructed goal")
 
 
-class _InadmissibleExecutor:
+class _InadmissibleExecutor(RetainedTacticExecutor):
     def __init__(self):
         self.server = _InadmissibleServer()
 
-    async def apply(self, server, state, tactic):
+    async def apply(self, registry, occurrence, command, *, holder="operation"):
         raise AssertionError("tactics must not run when the root cannot be replayed")
 
 
-class _RejectExecutor:
-    def __init__(self):
-        self.server = _FakeServer()
-
-    async def apply(self, server, state, tactic):
-        return TacticOutcome(success=False, subgoals=[], error="rejected")
+def _RejectExecutor():
+    return ScriptedExecutor(lambda _occurrence, _command: None, server=_FakeServer())
 
 
 class _StubPLN:

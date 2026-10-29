@@ -28,10 +28,7 @@ def proposal(name, args, raw):
 
 
 class RecordingExecutor(_ScriptedExecutor):
-    async def apply(self, scope, state, tactic):
-        result = await super().apply(scope, state, tactic)
-        self.calls[-1] = tactic.command
-        return result
+    """Records the rendered command of every Lean call (``calls``)."""
 
 
 @pytest.mark.parametrize("policy", ["legacy", "puct"])

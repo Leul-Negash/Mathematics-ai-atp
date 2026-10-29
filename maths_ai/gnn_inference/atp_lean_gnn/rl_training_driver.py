@@ -29,6 +29,11 @@ import torch
 from torch.optim import AdamW
 
 from maths_ai.data_models.proof_components import Goal
+from maths_ai.hybrid_reasoner.execution_limits import (
+    ResidentMemoryMonitor,
+    RetentionLimits,
+)
+from maths_ai.hybrid_reasoner.joint_inference import SEARCH_EVIDENCE_VERSION
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
 from maths_ai.lean_replay import ReplayInputError
 from pantograph_async import (
@@ -159,6 +164,12 @@ class RLTrainingConfig:
     # ProofNode.local_score and potential() already handle — frontier ranking degrades to
     # GNN probability and reward shaping vanishes, both with zero changes to those modules.
     use_pln: bool = True
+    # Retained-snapshot and replay bounds (see execution_limits.RetentionLimits);
+    # None keeps the conservative development defaults.
+    snapshot_retention: dict[str, Any] | None = None
+    # Kernel heartbeat budget for root certification, in thousands; None uses
+    # the REPL default.
+    certify_heartbeats: int | None = None
 
     # Search mode (see hybrid_reasoner/selection_policy.py, the single
     # authority for this contract). "legacy" runs the best-first loop and
@@ -274,7 +285,8 @@ class RLTrainingConfig:
             payload = json.load(f)
         kwargs: dict[str, Any] = {}
         for key, value in payload.items():
-            if key == "graph_representation":
+            # Recorded with a run's config, not settings of the config itself.
+            if key in ("graph_representation", "search_evidence"):
                 continue
             if key in cls._PATH_FIELDS and value is not None:
                 kwargs[key] = Path(value)
@@ -289,6 +301,9 @@ class RLTrainingConfig:
                 continue
             out[key] = str(value) if isinstance(value, Path) else value
         return out
+
+    def retention_limits(self) -> RetentionLimits:
+        return RetentionLimits.from_config(self.snapshot_retention)
 
     def resource_plan(self) -> ResourcePlan:
         """Resolve and validate the effective live-collection topology."""
@@ -746,6 +761,9 @@ def save_checkpoint(
         "round": round_idx,
         "curriculum_size": curriculum_size,
         "best_proof_rate": best_proof_rate,
+        # Proof rates and solve counts mean kernel-certified roots under this
+        # version; a resume refuses statistics recorded under another meaning.
+        "search_evidence": SEARCH_EVIDENCE_VERSION,
         "evaluation_contract": evaluation_contract,
         "onpolicy_steps": onpolicy_steps,
         "search_settings": saved_search_settings,
@@ -937,6 +955,10 @@ async def _create_live_reasoner_pool(
     async def server_factory(_worker_id: int):
         return await create_model_sexpr_client(env)
 
+    retention = cfg.retention_limits()
+    # Workers are tasks in this one process: one baseline after model setup.
+    collection_memory = ResidentMemoryMonitor(retention.max_collection_rss_growth_mb)
+
     def reasoner_factory(worker_id, device, replica, server):
         del worker_id
         return RLHybridReasoner(
@@ -946,6 +968,9 @@ async def _create_live_reasoner_pool(
             executor=PantographExecutor(server),
             device=device,
             **cfg.search_kwargs(),
+            retention=retention,
+            certify_heartbeats=cfg.certify_heartbeats,
+            collection_memory=collection_memory,
         )
 
     async def search_factory(reasoner, theorem, proposal, deadline):
@@ -1052,6 +1077,12 @@ async def _run_rl_training_impl(
         if not last_path.exists():
             raise FileNotFoundError(f"Resume requested but {last_path} does not exist")
         state = torch.load(last_path, map_location=device, weights_only=False)
+        if state.get("search_evidence") != SEARCH_EVIDENCE_VERSION:
+            raise ValueError(
+                f"{last_path} records success as {state.get('search_evidence') or 'graph-only readiness'}, "
+                f"not {SEARCH_EVIDENCE_VERSION}; its proof rates are not certified results. "
+                "Start a new run; its model weights remain a valid warm start."
+            )
         if state.get("rl_target_schema_version") != RL_TARGET_SCHEMA_VERSION:
             raise ValueError(
                 f"This checkpoint has RL schema {state.get('rl_target_schema_version')!r}, "
@@ -1126,6 +1157,7 @@ async def _run_rl_training_impl(
         with open(run_dir / "config.json", "w") as f:
             run_config = cfg.to_dict()
             run_config["graph_representation"] = metadata.graph_representation.to_dict()
+            run_config["search_evidence"] = SEARCH_EVIDENCE_VERSION
             json.dump(run_config, f, indent=2)
     metrics_path = run_dir / "metrics.jsonl"
     console_print(f"Run dir: {run_dir}")
@@ -1350,6 +1382,7 @@ async def _run_rl_training_impl(
 
         row = {
             "round": round_idx,
+            "search_evidence": SEARCH_EVIDENCE_VERSION,
             "bc_weight": bc_weight,
             "curriculum_size": pool.curriculum_size,
             "wall_clock_s": time.time() - round_start,

@@ -369,8 +369,10 @@ forwards before one supervised backward pass.
 L = L_tactic_imitation + w_critic_soft · L_critic_soft
 ```
 
-`mine_all_solved_nodes=true` mines the full minimal hypertree from every SOLVED node in
-the graph; `false` mines only from the root (ablation).
+Imitation rows come only from the kernel-certified witness: each attempt the certified
+replay ran with the observation and command it was sampled with gives one row. Readiness
+(`READY`) is never imitation evidence, so `mine_all_solved_nodes` (all nodes or the root
+only) mines the same witness either way.
 
 **Per-round budgets (tune first):**
 

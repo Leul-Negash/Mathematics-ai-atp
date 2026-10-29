@@ -42,7 +42,7 @@ TARGET_BRANCH = "MCTS-AC-branch"
 TARGET_BASE_COMMIT = "61f6d384730fca3dd7a56918377af4efb2c912cc"
 APPLICATION_SOURCE_COMMIT = "54d7cefe04aed980734798f06528ed80c71b81ac"
 CLIENT_REPOSITORY = "https://github.com/123nol/Pantograph-Client"
-CLIENT_COMMIT = "d1dac7e8a8ea296192e7a5b2616114b73e0812b7"
+CLIENT_COMMIT = "955a4921b4cacaa49f4b3087f3982d7ca3629566"
 GOLDEN_PATH = (
     Path(__file__).parents[1]
     / "gnn_inference/tests/fixtures/pantograph/canonical_graph_expectations.json"
@@ -52,6 +52,12 @@ SEARCH_SOURCES = (
     "maths_ai/hybrid_reasoner/hypergraph.py",
     "maths_ai/hybrid_reasoner/mcts_diagnostics.py",
     "maths_ai/hybrid_reasoner/selection_policy.py",
+    "maths_ai/hybrid_reasoner/execution_types.py",
+    "maths_ai/hybrid_reasoner/execution_registry.py",
+    "maths_ai/hybrid_reasoner/execution_limits.py",
+    "maths_ai/hybrid_reasoner/retained_executor.py",
+    "maths_ai/hybrid_reasoner/proof_recipes.py",
+    "maths_ai/hybrid_reasoner/proof_replay.py",
     "maths_ai/gnn_inference/atp_lean_gnn/rl_reasoner.py",
     "maths_ai/gnn_inference/atp_lean_gnn/rl_live_collection.py",
     "maths_ai/gnn_inference/atp_lean_gnn/rl_training_driver.py",
@@ -184,11 +190,9 @@ class _CountingExecutor:
         self.server = inner.server
         self.commands: list[str] = []
 
-    async def apply(self, scope, state, tactic):
-        command = tactic.command
-        if command is not None:
-            self.commands.append(command)
-        return await self.inner.apply(scope, state, tactic)
+    async def apply(self, registry, occurrence, command, *, holder="operation"):
+        self.commands.append(command)
+        return await self.inner.apply(registry, occurrence, command, holder=holder)
 
 
 async def verify_widening(client: PantographClient) -> list[str]:
@@ -282,7 +286,7 @@ async def verify_mcts_search(client: PantographClient, *, searches: int = 20) ->
     require(len(root_edges) == 1, "Conjunction split produced extra root edges.")
     for child_id in root_edges[0].child_ids:
         child = graph.nodes[child_id]
-        require(child.status == NodeStatus.SOLVED, "A conjunction leaf stayed open.")
+        require(child.status == NodeStatus.READY, "A conjunction leaf stayed open.")
         tactics = [graph.edges[eid].tactic.tactic_name for eid in child.outgoing_edge_ids]
         # The elaboration failure and the admission were rejected by Lean.
         require(tactics == ["trivial"], f"Rejected alternatives became edges: {tactics}")
@@ -309,7 +313,7 @@ async def verify_mcts_search(client: PantographClient, *, searches: int = 20) ->
     graph = await best_first.prove(IDENTITY)
     require(graph.is_solved(), "Best-first search did not prove the identity.")
     root_edge = graph.edges[graph.nodes[graph.root_id].outgoing_edge_ids[0]]
-    require(root_edge.status == EdgeStatus.SOLVED, "Identity edge stayed unsolved.")
+    require(root_edge.status == EdgeStatus.READY, "Identity edge stayed unsolved.")
     _require_graph_equivalence(
         graph, root_edge, goldens["identity_intro"], "identity_intro"
     )

@@ -4,7 +4,7 @@ import asyncio
 import time
 import unittest
 from dataclasses import replace
-from types import MethodType
+from types import MethodType, SimpleNamespace
 
 import torch
 from torch.optim import AdamW
@@ -12,13 +12,14 @@ from torch_geometric.data import Batch
 
 from maths_ai.data_models.proof_components import STV, TacticCandidate
 from maths_ai.lean_replay import seed_from_text
+from maths_ai.hybrid_reasoner.execution_types import ExecutionOccurrence
+from maths_ai.hybrid_reasoner.execution_registry import LeaseKind, SnapshotRegistry
 from maths_ai.hybrid_reasoner.hypergraph import (
     NodeClosureReason,
     ProofHypergraph,
     SearchEndReason,
-    TacticOutcome,
+    UnsupportedObservation,
 )
-from maths_ai.hybrid_reasoner.joint_inference import MaterializedGoal
 from maths_ai.pln_inference.model import PLNResult
 
 from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import (
@@ -26,7 +27,10 @@ from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import (
     ActorCriticWithArgsClassifier,
 )
 from maths_ai.gnn_inference.tests.model_helpers import (
+    FakeResultState,
+    FakeStateScope,
     ScopedFakeClient,
+    ScriptedExecutor,
     actor_critic,
     pantograph_goal,
     scored,
@@ -96,65 +100,32 @@ class _FakeServer(ScopedFakeClient):
         return state
 
 
-class _QEDExecutor:
-    """Every tactic application succeeds with no subgoals (immediate QED)."""
-
-    def __init__(self):
-        self.server = _FakeServer()
-
-    async def apply(self, server, state, tactic):
-        return TacticOutcome(success=True, subgoals=[])
+def _QEDExecutor():
+    """Every tactic application succeeds with no child obligations."""
+    return ScriptedExecutor(lambda _occurrence, _command: [], server=_FakeServer())
 
 
-class _RejectExecutor:
+def _RejectExecutor():
     """Every tactic application fails (Lean rejects the tactic)."""
-
-    def __init__(self):
-        self.server = _FakeServer()
-
-    async def apply(self, server, state, tactic):
-        return TacticOutcome(success=False, subgoals=[], error="rejected")
+    return ScriptedExecutor(lambda _occurrence, _command: None, server=_FakeServer())
 
 
-class _SubgoalExecutor:
-    """Yield configurable subgoals for the first ``depth`` applications per
-    branch, then QED.
+class _SubgoalExecutor(ScriptedExecutor):
+    """One application on a goal in ``depth_map`` yields its subgoal
+    expressions; an application on any other goal closes it.
 
-    ``depth_map`` maps a goal expression to the subgoal expressions one tactic
-    application on it produces; an expression absent from the map QEDs. The
-    goal state is not consulted (the fakes carry no goals), so the routing key
-    is the tactic's *parent* expression — passed in at ``apply`` time via
-    ``self.current_goal``, set by the reasoner hook below.
+    Each application runs on an occurrence, so the routing key is the
+    occurrence's own goal expression.
     """
 
     def __init__(self, depth_map: dict[str, list[str]]):
-        self.server = _FakeServer()
+        super().__init__(self.produce, server=_FakeServer())
         self.depth_map = depth_map
-        self.current_goal: str | None = None
         self.applications = 0
 
-    async def apply(self, server, state, tactic):
+    def produce(self, occurrence, command):
         self.applications += 1
-        subgoal_exprs = self.depth_map.get(self.current_goal, [])
-        subgoals = [structured_goal(e, HYPS) for e in subgoal_exprs]
-        for subgoal in subgoals:
-            self.server.goals_by_expression[subgoal.replay_spec().expression] = subgoal
-        return TacticOutcome(success=True, subgoals=subgoals)
-
-
-class _GoalTrackingReasoner(RLHybridReasoner):
-    """Route the executor by the expanding node's goal expression.
-
-    ``_SubgoalExecutor`` cannot see which node an application belongs to (the
-    fake goal states carry no goals), so this override records it before the
-    per-node execution stage runs.
-    """
-
-    async def _execute_and_link(self, graph, node, candidates, *, materialized, draws=None):
-        self.executor.current_goal = node.goal.expression
-        return await super()._execute_and_link(
-            graph, node, candidates, materialized=materialized, draws=draws
-        )
+        return [structured_goal(e, HYPS) for e in self.depth_map.get(occurrence.goal.expression, [])]
 
 
 class _StubPLN:
@@ -459,7 +430,11 @@ class RolloutTests(unittest.TestCase):
             result.graph, RewardConfig(step_penalty=0.0),
             edge_ids=list(accepted(result).keys()),
         )
-        self.assertEqual(len(transitions), len(accepted(result)))
+        # Only the certified witness is positive evidence; the other closing
+        # attempts are candidates that no replay certified, so they stay unknown.
+        witnessed = result.graph.witnessed_edges()
+        self.assertEqual(len(witnessed), 1)
+        self.assertEqual({t.edge_id for t in transitions}, witnessed)
         for t in transitions:
             self.assertIn(t.edge_id, accepted(result))
 
@@ -564,7 +539,7 @@ class MCTSSearchTests(unittest.TestCase):
         # guarantee.
         executor = _SubgoalExecutor({self.ROOT: ["A", "B"]})
         reasoner, _model, _vocab = _make_reasoner(
-            executor, reasoner_cls=_GoalTrackingReasoner
+            executor
         )
         result = self._prove(reasoner)
         self.assertTrue(result.graph.is_solved())
@@ -581,7 +556,7 @@ class MCTSSearchTests(unittest.TestCase):
         def run(**kwargs):
             executor = _SubgoalExecutor({self.ROOT: ["A", "B"]})
             reasoner, _model, _vocab = _make_reasoner(
-                executor, reasoner_cls=_GoalTrackingReasoner, **kwargs
+                executor, **kwargs
             )
             return self._prove(reasoner).graph
 
@@ -609,7 +584,7 @@ class MCTSSearchTests(unittest.TestCase):
         executor = _SubgoalExecutor({self.ROOT: ["A", "B"]})
         with self.assertRaises(ValueError):
             _make_reasoner(
-                executor, reasoner_cls=_GoalTrackingReasoner,
+                executor,
                 selection_policy="legacy", num_simulations=6,
             )
 
@@ -624,7 +599,7 @@ class MCTSSearchTests(unittest.TestCase):
         # continues to root resolution.
         executor = _SubgoalExecutor({self.ROOT: ["A", "B"]})
         reasoner, _model, _vocab = _make_reasoner(
-            executor, top_k=1, reasoner_cls=_GoalTrackingReasoner,
+            executor, top_k=1,
             selection_policy="puct", num_simulations=1,
         )
         result = self._prove(reasoner)
@@ -635,10 +610,12 @@ class MCTSSearchTests(unittest.TestCase):
         self.assertEqual([n.id for n in expanded], [result.graph.root_id])
 
     def test_multi_sim_accumulates_stats_and_releases_virtual_loss(self):
+        # Every root command splits into A and B, so the root keeps widening
+        # for its first simulations before they descend to its children.
         executor = _SubgoalExecutor({self.ROOT: ["A", "B"]})
         reasoner, _model, _vocab = _make_reasoner(
-            executor, top_k=1, reasoner_cls=_GoalTrackingReasoner,
-            selection_policy="puct", num_simulations=6, sim_batch_size=2,
+            executor, top_k=1,
+            selection_policy="puct", num_simulations=12, sim_batch_size=2,
         )
         result = self._prove(reasoner)
         self.assertTrue(result.graph.is_solved())
@@ -655,7 +632,7 @@ class MCTSSearchTests(unittest.TestCase):
     def test_expired_deadline_returns_partial_graph(self):
         executor = _SubgoalExecutor({self.ROOT: ["A", "B"]})
         reasoner, _model, _vocab = _make_reasoner(
-            executor, reasoner_cls=_GoalTrackingReasoner,
+            executor,
             selection_policy="puct", num_simulations=6, sim_batch_size=2,
         )
         result = asyncio.run(
@@ -706,20 +683,16 @@ class MCTSSearchTests(unittest.TestCase):
         # succeed (QED) while B's are rejected — every failure record must
         # carry B's goal, never A's or the root's.
         class _SelectiveExecutor(_SubgoalExecutor):
-            async def apply(self, server, state, tactic):
-                self.applications += 1
-                if self.current_goal == "B":
-                    return TacticOutcome(success=False, subgoals=[], error="rejected")
-                subgoal_exprs = self.depth_map.get(self.current_goal, [])
-                subgoals = [structured_goal(e, HYPS) for e in subgoal_exprs]
-                for subgoal in subgoals:
-                    self.server.goals_by_expression[subgoal.replay_spec().expression] = subgoal
-                return TacticOutcome(success=True, subgoals=subgoals)
+            def produce(self, occurrence, command):
+                if occurrence.goal.expression == "B":
+                    self.applications += 1
+                    return None
+                return super().produce(occurrence, command)
 
         executor = _SelectiveExecutor({self.ROOT: ["A", "B"]})
         reasoner, _model, _vocab = _make_reasoner(
-            executor, top_k=2, reasoner_cls=_GoalTrackingReasoner,
-            selection_policy="puct", num_simulations=6, sim_batch_size=2,
+            executor, top_k=2,
+            selection_policy="puct", num_simulations=12, sim_batch_size=2,
         )
         result = self._prove(reasoner)
         self.assertGreater(len(failed(result)), 0)
@@ -744,83 +717,88 @@ class MCTSSearchTests(unittest.TestCase):
         graph.mark_node_exhausted(graph.root_id, reason=NodeClosureReason.CANDIDATES_EXHAUSTED)
         return graph, edge.child_ids
 
-    def test_puct_materializes_leaves_before_policy_forward(self):
+    @staticmethod
+    def _retain(reasoner, graph, node_ids, *, skip=()):
+        """Give each leaf a registry-owned occurrence of its own."""
+        registry = SnapshotRegistry(FakeStateScope(ScopedFakeClient()))
+        reasoner._registry = registry
+        leases = {}
+        for node_id in node_ids:
+            if node_id in skip:
+                continue
+            node = graph.nodes[node_id]
+            state = FakeResultState([
+                replace(pantograph_goal(node.goal), goal_name=f"g{node_id}")
+            ])
+            leases[node_id] = registry.reserve().adopt(
+                state, LeaseKind.GRAPH, f"leaf-{node_id}"
+            )
+            node.occurrence = ExecutionOccurrence(
+                node_id, node.key, f"g{node_id}", node.goal, {}, leases[node_id]
+            )
+        return leases
+
+    def test_leaf_batch_is_proposed_once_and_executed_on_its_own_snapshot(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
         graph, leaf_ids = self._two_leaf_graph()
-        events = []
-
-        async def materialize(self, graph, node):
-            events.append(("materialize", node.id))
-            return MaterializedGoal(
-                goal=node.goal,
-                state=object(),
-                fingerprint=node.goal.state_fingerprint(),
-            )
+        leases = self._retain(reasoner, graph, leaf_ids)
+        policy_rows = []
+        executions = []
 
         def propose(self, nodes, draws=None):
-            events.append(("policy", [node.id for node in nodes]))
-            return [[] for _ in nodes]
+            policy_rows.append([node.id for node in nodes])
+            return [
+                [scored(TacticCandidate(tactic_name="skip", arguments=[], probability=1.0))]
+                for _ in nodes
+            ]
 
-        reasoner._materialize_for_expansion = MethodType(materialize, reasoner)
+        async def execute(self, graph, node, candidates, *, draws=None):
+            executions.append((node.id, node.occurrence.lease))
+
         reasoner.predict_next_tactics_for_nodes = MethodType(propose, reasoner)
+        reasoner._execute_and_link = MethodType(execute, reasoner)
         asyncio.run(reasoner._expand_leaves(graph, leaf_ids))
-        self.assertEqual(events[:2], [("materialize", leaf_ids[0]), ("materialize", leaf_ids[1])])
-        self.assertEqual(events[2], ("policy", leaf_ids))
+        self.assertEqual(policy_rows, [leaf_ids])
+        self.assertEqual(executions, [(node_id, leases[node_id]) for node_id in leaf_ids])
 
-    def test_failed_materialization_does_not_shift_policy_rows(self):
+    def test_an_unretained_leaf_does_not_shift_policy_rows(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
         graph, leaf_ids = self._two_leaf_graph()
+        self._retain(reasoner, graph, leaf_ids, skip={leaf_ids[0]})
         proposed = []
-
-        async def materialize(self, graph, node):
-            if node.id == leaf_ids[0]:
-                return None
-            return MaterializedGoal(
-                goal=node.goal,
-                state=object(),
-                fingerprint=node.goal.state_fingerprint(),
-            )
 
         def propose(self, nodes, draws=None):
             proposed.extend(node.id for node in nodes)
             return [[] for _ in nodes]
 
-        reasoner._materialize_for_expansion = MethodType(materialize, reasoner)
         reasoner.predict_next_tactics_for_nodes = MethodType(propose, reasoner)
         asyncio.run(reasoner._expand_leaves(graph, leaf_ids))
         self.assertEqual(proposed, [leaf_ids[1]])
+        self.assertEqual(
+            graph.nodes[leaf_ids[0]].closure_reason, NodeClosureReason.RESOURCE_PRUNED
+        )
 
-    def test_leaf_batch_is_proposed_once_and_executed_with_its_own_state(self):
+    def test_an_unobservable_leaf_is_closed_without_failing_the_batch(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
         graph, leaf_ids = self._two_leaf_graph()
-        policy_rows = []
-        executions = []
-
-        async def materialize(self, graph, node):
-            return MaterializedGoal(
-                goal=node.goal,
-                state=f"state-{node.id}",
-                fingerprint=node.goal.state_fingerprint(),
-            )
+        self._retain(reasoner, graph, leaf_ids)
+        reasoner._counters = {}
+        proposed = []
 
         def propose(self, nodes, draws=None):
-            policy_rows.append([node.id for node in nodes])
-            return [
-                [TacticCandidate(tactic_name="skip", arguments=[], probability=1.0)]
-                for _ in nodes
-            ]
+            if any(node.id == leaf_ids[0] for node in nodes):
+                raise UnsupportedObservation("missing structural label")
+            proposed.extend(node.id for node in nodes)
+            return [[] for _ in nodes]
 
-        async def execute(self, graph, node, candidates, *, materialized, draws=None):
-            executions.append((node.id, materialized.state))
-
-        reasoner._materialize_for_expansion = MethodType(materialize, reasoner)
         reasoner.predict_next_tactics_for_nodes = MethodType(propose, reasoner)
-        reasoner._execute_and_link = MethodType(execute, reasoner)
         asyncio.run(reasoner._expand_leaves(graph, leaf_ids))
-        self.assertEqual(policy_rows, [leaf_ids])
+        self.assertEqual(proposed, [leaf_ids[1]])
         self.assertEqual(
-            executions, [(node_id, f"state-{node_id}") for node_id in leaf_ids]
+            graph.nodes[leaf_ids[0]].closure_reason,
+            NodeClosureReason.UNSUPPORTED_OBSERVATION,
         )
+        self.assertEqual(reasoner._counters["unsupported_observations"], 1)
 
 
 class PLNDisabledTests(unittest.TestCase):
@@ -857,7 +835,6 @@ class PLNDisabledTests(unittest.TestCase):
         executor = _SubgoalExecutor({root_expr: ["A", "B", "C"]})
         reasoner, _model, _vocab = _make_reasoner(
             executor,
-            reasoner_cls=_GoalTrackingReasoner,
             top_k=1,
             use_pln=False,
         )
@@ -896,7 +873,7 @@ class PLNDisabledTests(unittest.TestCase):
         root_expr = GOAL_EXPR
         executor = _SubgoalExecutor({root_expr: ["A", "B"]})
         reasoner, _model, _vocab = _make_reasoner(
-            executor, reasoner_cls=_GoalTrackingReasoner, top_k=1, use_pln=False
+            executor, top_k=1, use_pln=False
         )
         result = self._prove(reasoner)
         reward_cfg = RewardConfig(
