@@ -299,5 +299,5 @@ class InferencePipeline:
             [(x["tactic_name"], x["probability"]) for x in predictions],
             first["selected_arguments"],
             first["selected_argument_details"],
-            predictions,
+            top_tactic_predictions=predictions,
         )

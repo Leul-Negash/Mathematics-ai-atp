@@ -224,3 +224,45 @@ trained policy.
 - If a deployed vocabulary lacks `:metavar`, goals with holes are closed as
   `UNSUPPORTED_OBSERVATION` instead of failing the search; check the prepared
   vocabulary before a run.
+
+## 2026-10-29 review after merging the source-aware AC model
+
+Reviewed PR #65 at `d8fdc00343bcd4450648dc628129708bb0e94204`, which contains
+AC-branch `96f8bca` and the deferred replay/resource fixes from `a890ec6`.
+GitHub reports its target as `AC-branch` and the merge as conflict-free, with
+no automated check results listed.
+
+The merged inference path passed `top_tactic_predictions` positionally to a
+keyword-only constructor parameter. It raised `TypeError` after computing
+the neural predictions. The local correction passes
+`top_tactic_predictions=predictions`; the constructor contract is preserved.
+The new non-RL regression exercises candidate preparation, real graph
+encoding, argument decoding, result construction, and the `GNNPredictor`
+wrapper with both supervised and actor-critic models. Both cases failed at
+the constructor before the correction and pass afterward.
+
+The source-aware live test also retained the previous executor interface.
+It failed with `AttributeError: 'TacticState' object has no attribute
+'is_retained'`. The test now uses a snapshot registry, an execution occurrence,
+and a rendered command. Each local, library, and mixed-argument case must
+obtain a kernel certificate and release its retained allocations.
+
+Validation of the local changes:
+
+- Application suite (`maths_ai/gnn_inference/tests`): 441 passed, 29 skipped,
+  15 subtests passed, with no failures.
+- Sequential custom-REPL replay and source-aware live tests: 20 passed,
+  including local/library/mixed actions, dependent replay, and fresh-session
+  artifact certification.
+- Live CPU RL smoke: one root admission, zero intermediate reconstructions,
+  a certified root, and one optimizer step completed. Replay used two tactics
+  and the peak retained allocation count was three.
+
+Checks used client `955a492` from `/tmp/snapshot-pr68-client/src` and the rebuilt
+companion at `/tmp/snapshot-pr-review-20261028/repl/.lake/build/bin/repl`, with
+the local Mathlib project. No installed client, dependency pin, deployed REPL,
+or user configuration was changed. Initial concurrent live runs caused heavy
+swapping and a startup timeout; live validation was repeated sequentially.
+These CPU checks do not establish trained-checkpoint proof rates or GPU
+collection behavior. The previously deferred environment-identity and hole
+classification findings remain separate work.
