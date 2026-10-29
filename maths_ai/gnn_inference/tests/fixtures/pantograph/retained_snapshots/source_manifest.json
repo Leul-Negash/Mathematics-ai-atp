@@ -54,6 +54,11 @@
       "sha256": "bc272e99762ccc7a9f09beded81e5f0e6be0b28a426a105f8b1f4bcdf2cafff2"
     },
     {
+      "path": "maths_ai/gnn_inference/docs/rl_training_setup.md",
+      "target_base_sha256": "7237b5522bb8fa606e905529d027923ed8c77c850b12947c9aa2ad83d2bdcc4c",
+      "sha256": "17f6c49a065380fbf4f3f4a09444e3c05cc64aec6921a76b93eb8cacc85aaf10"
+    },
+    {
       "path": "maths_ai/gnn_inference/docs/snapshot_retention_handoff.md",
       "target_base_sha256": null,
       "sha256": "a48de46cbdc0a988bc5de51cc336bd3ea0168609a243cffebbb4f4d7c05490fd"
