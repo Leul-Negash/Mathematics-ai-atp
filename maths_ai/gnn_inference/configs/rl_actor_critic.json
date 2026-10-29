@@ -51,6 +51,15 @@
   "widening_max_actions": 32,
   "widening_max_draws": 128,
   "use_pln": true,
+  "snapshot_retention": {
+    "max_retained_snapshots": 256,
+    "max_replay_tactic_steps": 256,
+    "max_replay_combinations": 32,
+    "max_replay_continuations": 4,
+    "max_repl_rss_growth_mb": 2048,
+    "max_collection_rss_growth_mb": 4096
+  },
+  "certify_heartbeats": null,
 
   "eval_proposal_mode": "sample",
   "eval_seed": 42,

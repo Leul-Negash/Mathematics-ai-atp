@@ -3,6 +3,18 @@
 The actor consumes one outcome per executed tactic edge. The critic consumes one target
 per proof-state node. Unknown evidence is represented by ``BackupValue.unknown()`` and is
 never converted into a numeric training label.
+
+Positive evidence comes only from a kernel-certified replay: an attempt on the
+certified witness whose replayed observation and command matched the ones it was
+sampled with is worth 1, and so is its source state. Candidate readiness is not
+evidence; a READY or JOINT attempt the witness does not contain is unknown.
+
+Failure evidence needs a state the evidence cannot depend on: a goal without
+metavariables. A hole-free child known to fail makes its attempt fail; a state
+whose own search closed with every attempt failing is worth 0. Anything involving
+holes, pruning, an unobservable goal or infrastructure is unknown, and so is a
+visit-mean estimate over a subtree that contains any of these or an uncertified
+candidate.
 """
 
 from __future__ import annotations
@@ -16,6 +28,7 @@ from maths_ai.hybrid_reasoner.hypergraph import (
     BackupValidity,
     BackupValue,
     EdgeStatus,
+    UNOBSERVED_CLOSURES,
     NodeClosureReason,
     NodeStatus,
     ProofHypergraph,
@@ -59,7 +72,7 @@ class CriticSample:
 
 @dataclass(frozen=True)
 class TacticImitationSample:
-    """One policy action on a Lean-confirmed minimal proof hypertree."""
+    """One policy action on the kernel-certified proof hypertree."""
 
     goal: Goal
     graph_fingerprint: str
@@ -124,10 +137,7 @@ def _and_backup(backups: list[BackupValue], cfg: HarvestConfig) -> BackupValue:
 
 
 def _dead_path_value(closure_reason: NodeClosureReason) -> BackupValue:
-    if closure_reason in (
-        NodeClosureReason.ELABORATION_ERROR,
-        NodeClosureReason.EXTERNAL_ABORT,
-    ):
+    if closure_reason in UNOBSERVED_CLOSURES:
         return BackupValue.unknown()
     return BackupValue.valid(0.0, BackupSource.SEARCH_FAILURE)
 
@@ -164,34 +174,47 @@ def compute_backups(
     path_memo: dict[int, BackupValue] = {}
     edge_outcomes: dict[int, BackupValue] = {}
     in_progress: set[int] = set()
+    witnessed = graph.witnessed_edges()
+    witnessed_nodes = {graph.edges[edge_id].source_id for edge_id in witnessed}
 
-    def has_unobserved_failure(node_id: int, seen: set[int] | None = None) -> bool:
+    def soft_target_blocked(node_id: int, seen: set[int] | None = None) -> bool:
+        """Whether the subtree's visit means rest on anything but observed outcomes."""
         seen = set() if seen is None else seen
         if node_id in seen:
             return False
         seen.add(node_id)
         node = graph.nodes[node_id]
-        if node.closure_reason in (
-            NodeClosureReason.ELABORATION_ERROR,
-            NodeClosureReason.EXTERNAL_ABORT,
-        ):
+        if node.closure_reason in UNOBSERVED_CLOSURES or node.has_holes:
             return True
-        return any(
-            has_unobserved_failure(child_id, seen)
-            for edge_id in node.outgoing_edge_ids
-            for child_id in graph.edges[edge_id].child_ids
-        )
+        for edge_id in node.outgoing_edge_ids:
+            edge = graph.edges[edge_id]
+            if edge.status in (EdgeStatus.READY, EdgeStatus.JOINT) and edge_id not in witnessed:
+                return True
+            if any(soft_target_blocked(child_id, seen) for child_id in edge.child_ids):
+                return True
+        return False
+
+    def child_failed(child_id: int) -> bool:
+        if graph.nodes[child_id].has_holes:
+            return False
+        value = path_value(child_id)
+        return value.validity == BackupValidity.VALID and value.value == 0.0
 
     def edge_value(edge_id: int) -> BackupValue:
         if edge_id in edge_outcomes:
             return edge_outcomes[edge_id]
         edge = graph.edges[edge_id]
-        if not edge.child_ids:
+        if edge_id in witnessed:
+            outcome = BackupValue.valid(1.0, BackupSource.LEAN_STATUS)
+        elif not edge.child_ids:
             outcome = (
-                BackupValue.valid(1.0, BackupSource.LEAN_STATUS)
-                if edge.status == EdgeStatus.SOLVED
-                else BackupValue.valid(0.0, BackupSource.SEARCH_FAILURE)
+                BackupValue.valid(0.0, BackupSource.SEARCH_FAILURE)
+                if edge.status == EdgeStatus.DEAD
+                else BackupValue.unknown()
             )
+        elif any(child_failed(child_id) for child_id in edge.child_ids):
+            # A required obligation that cannot depend on other assignments fails.
+            outcome = BackupValue.valid(0.0, BackupSource.SEARCH_FAILURE)
         else:
             outcome = _and_backup([path_value(child_id) for child_id in edge.child_ids], cfg)
         edge_outcomes[edge_id] = outcome
@@ -204,8 +227,13 @@ def compute_backups(
             return BackupValue.valid(0.0, BackupSource.SEARCH_FAILURE)
 
         node = graph.nodes[node_id]
-        if node.status == NodeStatus.SOLVED:
+        # The node's own search closed it; pruning or an unreadable goal did not.
+        searched_out = node.exhausted and node.closure_reason not in UNOBSERVED_CLOSURES
+        if node_id in witnessed_nodes:
             result = BackupValue.valid(1.0, BackupSource.LEAN_STATUS)
+        elif node.has_holes:
+            # Its outcome can depend on assignments made elsewhere.
+            result = BackupValue.unknown()
         elif node.status == NodeStatus.DEAD and not node.outgoing_edge_ids:
             result = _dead_path_value(node.closure_reason)
         elif not node.outgoing_edge_ids:
@@ -215,42 +243,33 @@ def compute_backups(
             outcomes = [edge_value(edge_id) for edge_id in node.outgoing_edge_ids]
             in_progress.discard(node_id)
 
-            hard_success = any(
-                graph.edges[edge_id].status == EdgeStatus.SOLVED
-                and outcome.validity == BackupValidity.VALID
-                and outcome.value == 1.0
-                for edge_id, outcome in zip(node.outgoing_edge_ids, outcomes)
-            )
-            if hard_success:
-                result = BackupValue.valid(1.0, BackupSource.LEAN_STATUS)
+            estimated_successes = [
+                outcome
+                for outcome in outcomes
+                if outcome.validity == BackupValidity.VALID and outcome.value == 1.0
+            ]
+            if estimated_successes:
+                result = estimated_successes[0]
+            elif any(outcome.validity == BackupValidity.UNKNOWN for outcome in outcomes):
+                result = BackupValue.unknown()
+            elif searched_out and all(outcome.value == 0.0 for outcome in outcomes):
+                result = BackupValue.valid(0.0, BackupSource.SEARCH_FAILURE)
             else:
-                estimated_successes = [
-                    outcome
-                    for outcome in outcomes
-                    if outcome.validity == BackupValidity.VALID and outcome.value == 1.0
+                valid = [
+                    outcome for outcome in outcomes
+                    if outcome.validity == BackupValidity.VALID
                 ]
-                if estimated_successes:
-                    result = estimated_successes[0]
-                elif any(outcome.validity == BackupValidity.UNKNOWN for outcome in outcomes):
+                best = max(valid, key=lambda outcome: float(outcome.value)) if valid else None
+                # An open proposal source can still add an alternative, so
+                # its known edges failing is not a complete failure.
+                if best is None or (not searched_out and best.value == 0.0):
                     result = BackupValue.unknown()
-                elif node.exhausted and all(outcome.value == 0.0 for outcome in outcomes):
-                    result = BackupValue.valid(0.0, BackupSource.SEARCH_FAILURE)
                 else:
-                    valid = [
-                        outcome for outcome in outcomes
-                        if outcome.validity == BackupValidity.VALID
-                    ]
-                    best = max(valid, key=lambda outcome: float(outcome.value)) if valid else None
-                    # An open proposal source can still add an alternative, so
-                    # its known edges failing is not a complete failure.
-                    if best is None or (not node.exhausted and best.value == 0.0):
-                        result = BackupValue.unknown()
-                    else:
-                        result = best
+                    result = best
 
             if result.validity == BackupValidity.UNKNOWN and visit_threshold is not None:
                 soft = _soft_target(graph, node_id, visit_threshold)
-                if soft.validity == BackupValidity.VALID and not has_unobserved_failure(node_id):
+                if soft.validity == BackupValidity.VALID and not soft_target_blocked(node_id):
                     result = soft
 
         path_memo[node_id] = result
@@ -263,14 +282,15 @@ def compute_backups(
 
     node_targets = dict(path_memo)
     for node in graph.nodes.values():
+        if node.id in witnessed_nodes:
+            continue
         if node.closure_reason in (
             NodeClosureReason.DEPTH_LIMIT,
             NodeClosureReason.CYCLE,
-            NodeClosureReason.ELABORATION_ERROR,
-            NodeClosureReason.EXTERNAL_ABORT,
-        ):
+        ) or node.closure_reason in UNOBSERVED_CLOSURES:
             node_targets[node.id] = BackupValue.unknown()
 
+    execution = getattr(graph, "execution", {}) or {}
     clean_root_budget_failure = (
         graph.end_reason
         in (
@@ -278,10 +298,13 @@ def compute_backups(
             SearchEndReason.NUM_SIMULATIONS,
             SearchEndReason.DEADLINE,
         )
-        and graph.root.status != NodeStatus.SOLVED
+        and not graph.is_solved()
+        # A ready root whose recipes did not certify is unresolved, not a failure.
+        and not graph.has_candidate()
+        and not graph.root.has_holes
+        and execution.get("last_replay") is None
         and not any(
-            node.closure_reason
-            in (NodeClosureReason.ELABORATION_ERROR, NodeClosureReason.EXTERNAL_ABORT)
+            node.closure_reason in UNOBSERVED_CLOSURES
             for node in graph.nodes.values()
         )
     )
@@ -322,83 +345,41 @@ def extract_minimal_hypertree(
     *,
     mine_all_solved_nodes: bool = True,
 ) -> list[TacticImitationSample]:
-    """Mine policy actions only from Lean-confirmed minimal proof hypertrees.
+    """Mine policy actions only from the kernel-certified proof hypertree.
 
-    Each selected solved edge gives one sample: its first accepted
-    observation (the raw action that executed it), not one per alias or draw.
+    The certified witness is the one Lean-confirmed hypertree a search
+    produces, so root-only and all-node mining (``mine_all_solved_nodes``)
+    mine the same steps. Each witnessed edge gives one sample: its first
+    accepted observation (the raw action that executed it), not one per alias
+    or draw. A step whose replayed observation or command differed from the
+    sampled one gives no sample.
     """
+    del mine_all_solved_nodes
     edge_actions: dict[int, "EdgeAction"] = {}
     for observation in observations:
         if observation.edge_id is not None:
             edge_actions.setdefault(observation.edge_id, observation.action)
 
-    steps_memo: dict[int, float] = {}
-    in_progress: set[int] = set()
-
-    def min_steps(node_id: int) -> float:
-        if node_id in steps_memo:
-            return steps_memo[node_id]
-        if node_id in in_progress:
-            return float("inf")
-        node = graph.nodes[node_id]
-        if node.status != NodeStatus.SOLVED:
-            return float("inf")
-        in_progress.add(node_id)
-        best = float("inf")
-        for edge_id in node.outgoing_edge_ids:
-            edge = graph.edges[edge_id]
-            if edge.status == EdgeStatus.SOLVED:
-                best = min(
-                    best,
-                    1.0 + sum(min_steps(child_id) for child_id in edge.child_ids),
-                )
-        in_progress.discard(node_id)
-        steps_memo[node_id] = best
-        return best
-
-    def best_edge(node_id: int) -> int | None:
-        chosen_id = None
-        chosen_steps = float("inf")
-        for edge_id in graph.nodes[node_id].outgoing_edge_ids:
-            edge = graph.edges[edge_id]
-            if edge.status != EdgeStatus.SOLVED:
-                continue
-            steps = 1.0 + sum(min_steps(child_id) for child_id in edge.child_ids)
-            if steps < chosen_steps:
-                chosen_id = edge_id
-                chosen_steps = steps
-        return chosen_id
-
-    roots = (
-        [node.id for node in graph.nodes.values() if node.status == NodeStatus.SOLVED]
-        if mine_all_solved_nodes
-        else ([graph.root_id] if graph.root.status == NodeStatus.SOLVED else [])
-    )
+    witnessed = graph.witnessed_edges()
     samples: list[TacticImitationSample] = []
     emitted: set[int] = set()
-
-    def walk(node_id: int) -> None:
-        edge_id = best_edge(node_id)
-        if edge_id is None or edge_id in emitted:
-            return
+    for step in graph.witness:
+        edge_id = step.attempt
+        if edge_id not in witnessed or edge_id in emitted:
+            continue
         emitted.add(edge_id)
-        edge = graph.edges[edge_id]
         action = edge_actions.get(edge_id)
-        if action is not None:
-            node = graph.nodes[node_id]
-            samples.append(
-                TacticImitationSample(
-                    goal=node.goal.require_model_state(),
-                    graph_fingerprint=action.graph_fingerprint,
-                    tactic_id=action.tactic_id,
-                    arg_indices=tuple(action.arg_indices),
-                )
+        if action is None:
+            continue
+        node = graph.nodes[graph.edges[edge_id].source_id]
+        samples.append(
+            TacticImitationSample(
+                goal=node.goal.require_model_state(),
+                graph_fingerprint=action.graph_fingerprint,
+                tactic_id=action.tactic_id,
+                arg_indices=tuple(action.arg_indices),
             )
-        for child_id in edge.child_ids:
-            walk(child_id)
-
-    for root_id in roots:
-        walk(root_id)
+        )
     return samples
 
 

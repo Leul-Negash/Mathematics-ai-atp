@@ -21,6 +21,11 @@ draws are discarded, never turned into failures. Rejected and unrenderable draws
 train the actor with ``return = terminal_failure − step_penalty`` (no critic
 target — the state may still be provable, only that action failed).
 
+Replaying a recipe to combine branches samples nothing: it runs recorded attempts,
+so it adds no policy observations and changes no multiplicity. A replay
+continuation is searched like any node, so its proposals are fresh draws for its
+actual observation.
+
 Only integers are stored (no autograd graph): the train phase recomputes log-probs under
 the current parameters via ``model.evaluate_actions``, which is exactly on-policy under the
 one-optimizer-step-per-collect invariant.
@@ -35,7 +40,12 @@ from typing import Dict, List, Optional
 import torch
 from torch_geometric.data import Batch
 
-from maths_ai.data_models.proof_components import Goal, ProposedAction, TacticCandidate
+from maths_ai.data_models.proof_components import (
+    ArgumentRef,
+    Goal,
+    ProposedAction,
+    TacticCandidate,
+)
 from maths_ai.hybrid_reasoner.hypergraph import ProofHypergraph, ProofNode
 from maths_ai.hybrid_reasoner.joint_inference import (
     ExpansionResult,
@@ -46,7 +56,12 @@ from maths_ai.lean_replay import LeanGoalSeed
 from pantograph_async import PantographStateError
 
 from .actor_critic import ActorCriticWithArgsClassifier, action_arity
-from .inference import _resolve_local_node_name, local_declarations
+from .inference import (
+    _resolve_local_node_name,
+    local_declaration_ids,
+    local_declarations,
+    local_node_label,
+)
 from .pln_rl_training import (
     EdgeAction,
     ObservationOutcome,
@@ -74,6 +89,10 @@ class RLSearchResult:
 
     def draws(self) -> int:
         return sum(o.action.multiplicity for o in self.observations)
+
+    @property
+    def certified(self) -> bool:
+        return self.graph.is_solved()
 
 
 @dataclass
@@ -207,6 +226,7 @@ class RLHybridReasoner(HybridReasoner):
         dags = []
         datas = []
         declaration_maps: list[dict[str, str]] = []
+        declaration_ids: list[dict[str, str]] = []
         if node_ids is not None and len(node_ids) != len(sub_goals):
             raise ValueError("node_ids must align with sub_goals")
         counts = [self.top_k_tactics] * len(sub_goals) if draws is None else list(draws)
@@ -232,6 +252,7 @@ class RLHybridReasoner(HybridReasoner):
             datas.append(data)
             # Each row resolves arguments only through its own goal's locals.
             declaration_maps.append(local_declarations(sub_goal))
+            declaration_ids.append(local_declaration_ids(sub_goal))
         if self._proposal is None or self._generator is None:
             raise PantographStateError("Actions are proposed only inside prove().")
         batch = Batch.from_data_list(datas).to(self.device)
@@ -256,6 +277,7 @@ class RLHybridReasoner(HybridReasoner):
                     dag,
                     declarations,
                     pending.graph_fingerprint,
+                    declaration_ids=declaration_ids[row],
                 )
                 raw_id = (action.tactic_id, action.arg_indices)
                 if proposal is None:
@@ -286,6 +308,8 @@ class RLHybridReasoner(HybridReasoner):
         dag,
         declarations: dict[str, str],
         graph_fingerprint: str,
+        *,
+        declaration_ids: Optional[dict[str, str]] = None,
     ) -> tuple[Optional[ProposedAction], EdgeAction]:
         """Turn row ``row`` of a batched ``ActionSample`` into
         ``(ProposedAction, EdgeAction)``.
@@ -303,7 +327,9 @@ class RLHybridReasoner(HybridReasoner):
         when one of its own steps had no legal premise (that index is a
         placeholder). Out-of-range indices (padding) are dropped from the argument
         list but KEPT in ``arg_indices`` — the recompute must evaluate the log-prob of
-        what was actually chosen, and ``forced_step`` zeroes invalid rows.
+        what was actually chosen, and ``forced_step`` zeroes invalid rows. With
+        ``declaration_ids`` each argument also records the live ID of the
+        declaration the pointer chose, so replay can find it in another lineage.
 
         The proposal's prior is ``tactic_logp + arg_logp`` of this row: the tactic and
         exactly its own pointer steps, unrounded. ``candidate.probability`` keeps the
@@ -329,20 +355,29 @@ class RLHybridReasoner(HybridReasoner):
             return None, action
 
         arguments: List[str] = []
+        refs: Optional[List[ArgumentRef]] = [] if declaration_ids is not None else None
         for idx in arg_indices:
             if not 0 <= idx < len(dag.nodes):
                 return None, action
             try:
-                arguments.append(
-                    _resolve_local_node_name(dag.nodes[idx], dag, declarations)
-                )
+                name = _resolve_local_node_name(dag.nodes[idx], dag, declarations)
             except ValueError:
                 return None, action
+            arguments.append(name)
+            # The pointer chose a declaration; keep its live ID, not just its name.
+            internal = (declaration_ids or {}).get(local_node_label(dag.nodes[idx], dag) or "")
+            if refs is not None and internal is not None:
+                refs.append(ArgumentRef(kind="local", text=name, internal_name=internal))
+            else:
+                refs = None
 
         tactic_logp = float(sample.tactic_logp[row].detach())
         log_prior = tactic_logp + float(sample.arg_logp[row].detach())
         candidate = TacticCandidate(
-            tactic_name=tactic_name, arguments=arguments, probability=math.exp(tactic_logp)
+            tactic_name=tactic_name,
+            arguments=arguments,
+            probability=math.exp(tactic_logp),
+            argument_refs=refs,
         )
         if candidate.command is None:
             return None, action
@@ -360,10 +395,14 @@ class RLHybridReasoner(HybridReasoner):
         dag,
         declarations: dict[str, str],
         graph_fingerprint: str,
+        *,
+        declaration_ids: Optional[dict[str, str]] = None,
     ) -> tuple[Optional[ProposedAction], EdgeAction]:
         """Batch-size-1 view of ``_decode_row`` (kept for tests and callers
         holding a single-graph ``ActionSample``)."""
-        return self._decode_row(sample, 0, dag, declarations, graph_fingerprint)
+        return self._decode_row(
+            sample, 0, dag, declarations, graph_fingerprint, declaration_ids=declaration_ids
+        )
 
     def _proposal_source_is_finite(self) -> bool:
         """Sampling can propose new actions every round; step-wise greedy
@@ -468,7 +507,8 @@ class RLHybridReasoner(HybridReasoner):
                 raise AssertionError(
                     f"{result.value} cannot leave executable actions for node {node.id}"
                 )
-        # Replay failure or abort: nothing Lean observed, so nothing is settled.
+        # Abort, retention limit or an unobservable goal: what Lean did not
+        # observe is never settled.
 
     # ------------------------------------------------------------------
     # Leaf evaluation: the critic as v_T(g) (HTPS)

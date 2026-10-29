@@ -8,12 +8,11 @@ import unittest
 
 from maths_ai.data_models.proof_components import ProposedAction, TacticCandidate
 from maths_ai.gnn_inference.tests.test_rl_reasoner import GOAL_EXPR, HYPS, SEED, _FakeServer
-from maths_ai.gnn_inference.tests.model_helpers import structured_goal
+from maths_ai.gnn_inference.tests.model_helpers import ScriptedExecutor, structured_goal
 from maths_ai.hybrid_reasoner.hypergraph import (
     NodeClosureReason,
     NodeStatus,
     SearchEndReason,
-    TacticOutcome,
 )
 from maths_ai.hybrid_reasoner.joint_inference import HybridReasoner
 from maths_ai.hybrid_reasoner.selection_policy import WideningPolicy, resolve_widening
@@ -28,26 +27,19 @@ def proposal(name: str, probability: float = 0.25) -> ProposedAction:
     )
 
 
-class _ScriptedExecutor:
-    """Lean stand-in: commands map to subgoal expressions, or are rejected."""
+class _ScriptedExecutor(ScriptedExecutor):
+    """Lean stand-in: a command's tactic maps to subgoal expressions, or is
+    rejected. ``calls`` records every command sent to Lean."""
 
     def __init__(self, outcomes: dict[str, list[str] | None]):
-        self.server = _FakeServer()
-        # A widening round replays the root from its canonical goal.
-        root = structured_goal(GOAL_EXPR, HYPS)
-        self.server.goals_by_expression[root.replay_spec().expression] = root
+        super().__init__(self.produce, server=_FakeServer())
         self.outcomes = outcomes
-        self.calls: list[str] = []
 
-    async def apply(self, scope, state, tactic):
-        self.calls.append(tactic.tactic_name)
-        outcome = self.outcomes.get(tactic.tactic_name)
+    def produce(self, occurrence, command):
+        outcome = self.outcomes.get(command.split()[0])
         if outcome is None:
-            return TacticOutcome(success=False, error="rejected")
-        subgoals = [structured_goal(expression, HYPS) for expression in outcome]
-        for subgoal in subgoals:
-            self.server.goals_by_expression[subgoal.replay_spec().expression] = subgoal
-        return TacticOutcome(success=True, subgoals=subgoals)
+            return None
+        return [structured_goal(expression, HYPS) for expression in outcome]
 
 
 class _WideningReasoner(HybridReasoner):
@@ -195,7 +187,7 @@ class WideningSearchTests(unittest.TestCase):
             top_k_tactics=2,
         )
         self.assertTrue(graph.is_solved())
-        self.assertEqual(graph.end_reason, SearchEndReason.ROOT_SOLVED)
+        self.assertEqual(graph.end_reason, SearchEndReason.ROOT_CERTIFIED)
         root = graph.root
         self.assertGreaterEqual(root.proposal_rounds, 2)
         # The rejected command ran in Lean once; its later draw reused the outcome.

@@ -12,7 +12,7 @@ from maths_ai.data_models.proof_components import Goal, ProposedAction, TacticCa
 from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import ActionSample
 from maths_ai.gnn_inference.atp_lean_gnn.inference import _ranked_choice_log_prior, local_declarations
 from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import ObservationOutcome
-from maths_ai.gnn_inference.tests.model_helpers import structured_goal
+from maths_ai.gnn_inference.tests.model_helpers import ScriptedExecutor, structured_goal
 from maths_ai.gnn_inference.tests.test_rl_reasoner import (
     GOAL_EXPR,
     HYPS,
@@ -21,7 +21,7 @@ from maths_ai.gnn_inference.tests.test_rl_reasoner import (
     _FakeServer,
     _make_reasoner,
 )
-from maths_ai.hybrid_reasoner.hypergraph import EdgeStatus, ProofHypergraph, TacticOutcome
+from maths_ai.hybrid_reasoner.hypergraph import EdgeStatus, ProofHypergraph
 
 
 def action(name: str, probability: float, *, raw=None, tactic_probability: float = 0.5) -> ProposedAction:
@@ -156,16 +156,9 @@ def _stack(samples: list[ActionSample]) -> ActionSample:
     )
 
 
-class _CountingExecutor:
-    """Accepts every command with QED and counts the Lean calls."""
-
-    def __init__(self):
-        self.server = _FakeServer()
-        self.calls: list[str] = []
-
-    async def apply(self, server, state, tactic):
-        self.calls.append(" ".join([tactic.tactic_name, *tactic.arguments]))
-        return TacticOutcome(success=True, subgoals=[])
+def _CountingExecutor():
+    """Accepts every command with QED and records the Lean calls (``calls``)."""
+    return ScriptedExecutor(lambda _occurrence, _command: [], server=_FakeServer())
 
 
 class ActorPriorTests(unittest.TestCase):

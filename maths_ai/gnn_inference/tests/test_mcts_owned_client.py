@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import unittest
+from dataclasses import replace
 from types import MethodType
 
 import pytest
@@ -31,6 +32,7 @@ from maths_ai.hybrid_reasoner.hypergraph import (
     NodeClosureReason,
     NodeStatus,
     SearchEndReason,
+    UnsupportedObservation,
 )
 from maths_ai.hybrid_reasoner.joint_inference import PantographExecutor
 from maths_ai.hybrid_reasoner.mcts_diagnostics import (
@@ -41,6 +43,10 @@ from maths_ai.hybrid_reasoner.mcts_diagnostics import (
 )
 from maths_ai.hybrid_reasoner.pantograph_model_sexpr import create_model_sexpr_client
 from pantograph_async import (
+    CertificateReceipt,
+    CertificationResult,
+    ObligationInspection,
+    TransitionProvenance,
     PantographGoalRejected,
     PantographProtocolError,
     PantographStateError,
@@ -75,17 +81,23 @@ SEED = seed_from_text(goal=ROOT, hypotheses=HYPS)
 class _State:
     _ids = itertools.count()
 
-    def __init__(self, goals, *, expression=None):
+    def __init__(self, goals, *, expression=None, transition=None, carried=()):
         # A stable identity: id() values are reused once states are freed.
         self.sid = next(self._ids)
-        self.goals = [pantograph_goal(goal) for goal in goals]
+        # Each obligation is its own metavariable, so names are unique.
+        self.goals = [
+            replace(pantograph_goal(goal), goal_name=f"_g{self.sid}.{index}")
+            for index, goal in enumerate(goals)
+        ] + list(carried)
         self.expression = expression
+        self.transition = transition
 
 
 class _RecordingScope:
     def __init__(self, client):
         self.client = client
         self.live: dict[int, _State] = {}
+        self.allocated: dict[int, _State] = {}
         self.is_usable = True
 
     async def __aenter__(self):
@@ -98,6 +110,7 @@ class _RecordingScope:
         self.is_usable = False
 
     def _allocate(self, state):
+        self.allocated[state.sid] = state
         self.live[state.sid] = state
         self.client.events.append(("allocate", state.sid))
         return state
@@ -116,20 +129,57 @@ class _RecordingScope:
         if self.live.get(state.sid) is not state:
             raise PantographStateError("Cannot apply a tactic to a released state.")
         if state.expression is not None:
-            # Replay of a start state: serialize the node's canonical goal.
-            return self._allocate(_State([self.client.goals[state.expression]]))
+            # Admission of the seed: serialize its canonical goal.
+            goal = self.client.goals[state.expression]
+            admitted = _State([goal])
+            admitted.transition = TransitionProvenance(
+                "", (admitted.goals[0].goal_name,), ((),), (), (), (), (), ()
+            )
+            return self._allocate(admitted)
+        selected = state.goals[goal_index]
+        target = selected.target.pp
         node_id = self.client.current_node
-        self.client.events.append(("apply", node_id, state.sid, tactic))
-        await self.client.before_apply(node_id)
-        outcome = self.client.outcome_for(node_id, state.goals[0].target.pp)
+        if node_id is None:
+            # Replay re-runs an explored attempt; Lean answers it the same way.
+            self.client.events.append(("replay", state.sid, tactic))
+            outcome = self.client.played.get((target, tactic), "reject")
+        else:
+            self.client.events.append(("apply", node_id, state.sid, tactic))
+            await self.client.before_apply(node_id)
+            outcome = self.client.outcome_for(node_id, target)
         if isinstance(outcome, BaseException):
             raise outcome
+        if node_id is not None:
+            self.client.played[(target, tactic)] = outcome
         if outcome == "reject":
             raise PantographTacticRejected(f"{tactic} failed")
         subgoals = [structured_goal(expression, HYPS) for expression in outcome]
-        for subgoal in subgoals:
-            self.client.goals[subgoal.replay_spec().expression] = subgoal
-        return self._allocate(_State(subgoals))
+        siblings = [goal for goal in state.goals if goal is not selected]
+        result = _State(subgoals, carried=siblings)
+        children = tuple(goal.goal_name for goal in result.goals[: len(subgoals)])
+        result.transition = TransitionProvenance(
+            selected.goal_name,
+            children,
+            tuple(() for _ in children),
+            tuple(goal.goal_name for goal in siblings),
+            (), (), (), (),
+        )
+        return self._allocate(result)
+
+    async def inspect(self, state, goals):
+        listed = {goal.goal_name: goal for goal in state.goals}
+        return tuple(
+            ObligationInspection(name, "active", listed[name], (), False)
+            if name in listed
+            else ObligationInspection(name, "complete", None, (), False)
+            for name in goals
+        )
+
+    async def certify(self, state, *, max_heartbeats=None):
+        if state.goals:
+            return CertificationResult("incomplete", f"{len(state.goals)} goals remain", None)
+        receipt = CertificateReceipt("root", (), "0" * 16, "1" * 16, "2" * 16, "fake", (), ())
+        return CertificationResult("certified", None, receipt)
 
     async def release(self, state):
         if self.live.pop(state.sid, None) is not None:
@@ -145,6 +195,8 @@ class _RecordingClient:
         # widening round at the root.
         self.goals = {"∀ (p : Prop), p → p": root, root.replay_spec().expression: root}
         self.outcomes = outcomes or {}
+        # (goal text, command) -> what exploration observed, for replay.
+        self.played: dict[tuple[str, str], object] = {}
         self.unelaborated: set[str] = set()
         self.protocol_failures: set[str] = set()
         self.current_node: int | None = None
@@ -173,17 +225,24 @@ class _RecordingClient:
 
 
 class _NodeTrackingReasoner(RLHybridReasoner):
-    """Tell the fake which graph node an application belongs to."""
+    """Tell the fake which graph node an application belongs to; replay
+    applications belong to no node. Goals in ``unobservable`` cannot be read
+    by the model."""
 
-    async def _execute_and_link(self, graph, node, candidates, *, materialized, draws=None):
+    unobservable: frozenset = frozenset()
+
+    async def _execute_and_link(self, graph, node, candidates, *, draws=None):
         self.server.current_node = node.id
         self.executed.append((node.id, len({candidate.command for candidate in candidates})))
-        return await super()._execute_and_link(
-            graph, node, candidates, materialized=materialized, draws=draws
-        )
+        try:
+            return await super()._execute_and_link(graph, node, candidates, draws=draws)
+        finally:
+            self.server.current_node = None
 
     def predict_next_tactics_for_nodes(self, nodes, draws=None):
         self.proposal_batches.append([node.id for node in nodes])
+        if any(node.goal.expression in self.unobservable for node in nodes):
+            raise UnsupportedObservation("the vocabulary lacks a structural label")
         return super().predict_next_tactics_for_nodes(nodes, draws)
 
 
@@ -235,28 +294,38 @@ def _assert_scoped_cleanly(test, client):
 
 
 def _assert_alternatives_released_promptly(test, client):
-    """Each alternative's result is released before the next application."""
+    """A result with no open obligations is released before the next
+    application; results with obligations are retained for their nodes."""
+    states = {state.sid: state for scope in client.scopes for state in _allocated(scope)}
     live_results: set[int] = set()
     applied = False
     for event in client.events:
         if event[0] == "apply":
-            test.assertFalse(live_results, "an alternative result outlived its use")
+            test.assertFalse(live_results, "a closed alternative's result outlived its use")
             applied = True
         elif event[0] == "allocate" and applied:
-            live_results.add(event[1])
+            if not states[event[1]].goals:
+                live_results.add(event[1])
             applied = False
         elif event[0] == "release":
             live_results.discard(event[1])
+
+
+def _allocated(scope):
+    return scope.allocated.values()
 
 
 class SearchModeOwnershipTests(unittest.TestCase):
     def _assert_owned_execution(self, client, reasoner, result):
         _assert_scoped_cleanly(self, client)
         _assert_alternatives_released_promptly(self, client)
-        self.assertEqual(client.left_at_exit, [0])
+        # The seed is admitted once; no node is rebuilt from its printed goal.
+        self.assertEqual(sum(1 for event in client.events if event[0] == "allocate")
+                         - sum(1 for event in client.events if event[0] in ("apply", "replay")), 2)
+        self.assertEqual(result.graph.execution["intermediate_reconstructions"], 0)
         self.assertFalse(reasoner._proving)
         self.assertIsNone(reasoner._scope)
-        self.assertIsNone(reasoner._cached_root_materialization)
+        self.assertIsNone(reasoner._registry)
         self.assertEqual(reasoner._pending, {})
         # Graph nodes keep canonical goals only.
         for node in result.graph.nodes.values():
@@ -296,8 +365,8 @@ class SearchModeOwnershipTests(unittest.TestCase):
         self.assertTrue(leaves)
         self.assertTrue(any(len(applies[node_id]) > 1 for node_id in leaves))
         for node_id in leaves:
-            # Every alternative of a leaf ran against one live leaf state,
-            # which was released only after the last of them finished.
+            # Every alternative of a leaf ran against its one retained
+            # snapshot, which was not released before the last of them.
             self.assertEqual(len(applies[node_id]), dict(reasoner.executed)[node_id])
             self.assertEqual(len(set(applies[node_id])), 1)
             last_apply = max(
@@ -305,7 +374,10 @@ class SearchModeOwnershipTests(unittest.TestCase):
                 for index, event in enumerate(client.events)
                 if event[0] == "apply" and event[1] == node_id
             )
-            released = client.events.index(("release", applies[node_id][0]))
+            release = ("release", applies[node_id][0])
+            released = (
+                client.events.index(release) if release in client.events else len(client.events)
+            )
             self.assertGreater(released, last_apply)
         _assert_scoped_cleanly(self, client)
         _assert_alternatives_released_promptly(self, client)
@@ -334,7 +406,7 @@ class SearchModeOwnershipTests(unittest.TestCase):
         fingerprints = {graph.nodes[node_id].goal.state_fingerprint() for node_id in copies}
         self.assertEqual(len(fingerprints), 1)
         solved, rejected = first_copy[0], [n for n in copies if n != first_copy[0]]
-        self.assertEqual(graph.nodes[solved].status, NodeStatus.SOLVED)
+        self.assertEqual(graph.nodes[solved].status, NodeStatus.READY)
         for node_id in rejected:
             # Every known alternative was rejected, but a sampled source can
             # still widen, so the copy is not a complete failure.
@@ -367,21 +439,23 @@ class _SkippingReasoner(_NodeTrackingReasoner):
 
     def predict_next_tactics_for_nodes(self, nodes, draws=None):
         self.leaf_batches.append([node.id for node in nodes])
+        if any(node.goal.expression in self.unobservable for node in nodes):
+            raise UnsupportedObservation("the vocabulary lacks a structural label")
         kept = [index for index, node in enumerate(nodes) if node.goal.expression != "B"]
         sampled = iter(
             super().predict_next_tactics_for_nodes(
                 [nodes[index] for index in kept],
                 None if draws is None else [draws[index] for index in kept],
             )
+            if kept else ()
         )
         return [[] if node.goal.expression == "B" else next(sampled) for node in nodes]
 
 
 class BatchCompositionTests(unittest.TestCase):
-    def test_mixed_batch_releases_every_input_and_settles_each_node(self):
-        # A cannot be re-elaborated, B receives no candidates, C closes.
+    def test_mixed_batch_settles_each_node(self):
+        # The model cannot read A, B receives no candidates, C closes.
         client = _RecordingClient({0: ["A", "B", "C"]})
-        client.unelaborated.add(structured_goal("A", HYPS).replay_spec().expression)
         torch.manual_seed(0)
         node_vocab = build_vocab([model_goal_to_dag(structured_goal(ROOT, HYPS))])
         reasoner = _SkippingReasoner(
@@ -396,28 +470,28 @@ class BatchCompositionTests(unittest.TestCase):
             **_puct(num_simulations=4, widening_initial_actions=1),
         )
         reasoner.executed, reasoner.proposal_batches, reasoner.leaf_batches = [], [], []
+        reasoner.unobservable = frozenset({"A"})
         result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = result.graph
 
         a, b, c = (graph.nodes[child] for child in graph.edges[0].child_ids)
-        # A failed to materialize, so the batch proposal held B and C only.
-        self.assertIn({b.id, c.id}, [set(batch) for batch in reasoner.leaf_batches])
-        self.assertEqual(a.closure_reason, NodeClosureReason.ELABORATION_ERROR)
+        # A's goal failed the batched forward, so B and C were proposed alone.
+        self.assertIn([b.id], reasoner.leaf_batches)
+        self.assertIn([c.id], reasoner.leaf_batches)
+        self.assertEqual(a.closure_reason, NodeClosureReason.UNSUPPORTED_OBSERVATION)
+        self.assertNotIn(a.id, dict(reasoner.executed))
         # A sampled round that proposed nothing does not prove the source
         # empty: B stays open for a later round, with no failure recorded.
         self.assertEqual(b.closure_reason, NodeClosureReason.NONE)
         self.assertEqual(b.status, NodeStatus.OPEN)
         self.assertGreaterEqual(b.proposal_rounds, 1)
-        self.assertEqual(c.status, NodeStatus.SOLVED)
+        self.assertEqual(c.status, NodeStatus.READY)
         # Only executed alternatives settle as evidence: C's accepted edge.
         self.assertEqual(failed(result), [])
         self.assertTrue(result.accepted_edge_ids() <= {0, *c.outgoing_edge_ids})
-        # Every materialized input, including B's unused one, was released by
-        # the search itself; nothing was left for scope exit.
-        self.assertEqual(client.left_at_exit, [0])
         _assert_scoped_cleanly(self, client)
 
-    def test_depth_limited_leaves_are_closed_without_materialization(self):
+    def test_depth_limited_leaves_are_closed_without_execution(self):
         client = _RecordingClient({0: ["A", "B"]})
         reasoner = _reasoner(client, **_puct(num_simulations=4))
         reasoner.max_depth = 1
@@ -428,7 +502,7 @@ class BatchCompositionTests(unittest.TestCase):
         self.assertTrue(leaves)
         for node in leaves:
             self.assertEqual(node.closure_reason, NodeClosureReason.DEPTH_LIMIT)
-        # Only the root was ever replayed: one start plus its serialization.
+        # Only the seed was admitted: one start plus its serialization.
         self.assertEqual(
             sum(1 for event in client.events if event[0] == "allocate") - sum(
                 1 for event in client.events if event[0] == "apply"
@@ -544,9 +618,10 @@ class FailureInjectionTests(unittest.TestCase):
         )
         self._assert_released(reasoner, client, graph)
 
-    def test_protocol_failure_during_materialization_propagates(self):
-        client = _RecordingClient({0: ["A", "B"]})
-        client.protocol_failures.add(structured_goal("A", HYPS).replay_spec().expression)
+    def test_protocol_failure_during_a_leaf_tactic_propagates(self):
+        client = _RecordingClient(
+            {0: ["A", "B"], 1: PantographProtocolError("malformed goal.tactic response")}
+        )
         reasoner = _reasoner(client, **_puct())
         captured = self._capture_graph(reasoner)
         with self.assertRaises(PantographProtocolError):
@@ -555,23 +630,23 @@ class FailureInjectionTests(unittest.TestCase):
         self.assertEqual(graph.nodes[1].closure_reason, NodeClosureReason.EXTERNAL_ABORT)
         self._assert_released(reasoner, client, graph)
 
-    def test_elaboration_failure_rejection_and_unknown_backup_stay_distinct(self):
-        # A cannot be re-elaborated; every tactic on B is rejected by Lean.
+    def test_unobservable_goal_rejection_and_unknown_backup_stay_distinct(self):
+        # The model cannot read A; every tactic on B is rejected by Lean.
         # One draw per node is its whole widening budget, so B's rejected round
         # closes its source and its failure is genuine for this search.
         client = _RecordingClient({0: ["A", "B"], "B": "reject"})
-        client.unelaborated.add(structured_goal("A", HYPS).replay_spec().expression)
         reasoner = _reasoner(client, top_k=1, **_puct(num_simulations=4, widening_max_draws=1))
+        reasoner.unobservable = frozenset({"A"})
         result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         graph = result.graph
 
         self.assertEqual(len(graph.nodes[0].outgoing_edge_ids), 1)
         root_edge = graph.edges[graph.nodes[0].outgoing_edge_ids[0]]
         elaboration, rejected = (graph.nodes[child] for child in root_edge.child_ids)
-        self.assertEqual(elaboration.closure_reason, NodeClosureReason.ELABORATION_ERROR)
+        self.assertEqual(elaboration.closure_reason, NodeClosureReason.UNSUPPORTED_OBSERVATION)
         self.assertEqual(rejected.closure_reason, NodeClosureReason.WIDENING_BOUND)
         # Ordinary rejection produces actor failure records for B only; the
-        # unelaborated node never sampled or executed anything.
+        # unobservable node never sampled or executed anything.
         self.assertTrue(failed(result))
         for record in failed(result):
             self.assertEqual(record.goal.state_fingerprint(), rejected.goal.state_fingerprint())
@@ -590,8 +665,8 @@ class FailureInjectionTests(unittest.TestCase):
 
     def test_unknown_backup_counts_the_visit_without_numeric_evidence(self):
         client = _RecordingClient({0: ["A"]})
-        client.unelaborated.add(structured_goal("A", HYPS).replay_spec().expression)
         reasoner = _reasoner(client, **_puct(num_simulations=2, sim_batch_size=1))
+        reasoner.unobservable = frozenset({"A"})
         result = asyncio.run(reasoner.prove(SEED, proposal=SAMPLE))
         root_edge = result.graph.edges[result.graph.nodes[0].outgoing_edge_ids[0]]
         self.assertEqual(root_edge.visit_stats.N, 1)

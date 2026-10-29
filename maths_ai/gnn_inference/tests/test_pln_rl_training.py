@@ -13,7 +13,12 @@ from maths_ai.hybrid_reasoner.hypergraph import BackupSource, ProofHypergraph, N
 from maths_ai.gnn_inference.atp_lean_gnn.graph import dag_fingerprint, model_goal_to_dag
 from maths_ai.gnn_inference.atp_lean_gnn.pyg import build_vocab, build_vocab_from_labels
 from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import ActorCriticWithArgsClassifier
-from maths_ai.gnn_inference.tests.model_helpers import actor_critic, scored, structured_goal
+from maths_ai.gnn_inference.tests.model_helpers import (
+    actor_critic,
+    certify_witness,
+    scored,
+    structured_goal,
+)
 from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import (
     _is_structural_label,
     make_dag_featurizer,
@@ -64,8 +69,10 @@ class PLNRLTrainingTests(unittest.TestCase):
             ],
         )
         a_id, b_id = edge.child_ids
-        g.add_edge(a_id, scored(_tac()), ranked_subgoals=[])  # QED
-        g.add_edge(b_id, scored(_tac()), ranked_subgoals=[])  # QED
+        closing_a = g.add_edge(a_id, scored(_tac()), ranked_subgoals=[])  # QED
+        closing_b = g.add_edge(b_id, scored(_tac()), ranked_subgoals=[])  # QED
+        # The replay of all three attempts was kernel-certified.
+        certify_witness(g, edge.id, closing_a.id, closing_b.id)
         return g
 
     def _setup(self):
@@ -89,7 +96,7 @@ class PLNRLTrainingTests(unittest.TestCase):
         loss, metrics = result
         self.assertTrue(torch.isfinite(loss))
         self.assertEqual(metrics["num_transitions"], 3.0)
-        # Root's subgoals both solved ⇒ backup value target 1.0 on that transition.
+        # Every attempt is on the certified witness ⇒ value target 1.0.
         self.assertGreater(metrics["mean_value_target"], 0.0)
 
     def test_train_step_updates_params(self):

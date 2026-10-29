@@ -20,7 +20,7 @@ from maths_ai.gnn_inference.atp_lean_gnn.pln_rl_training import (
     ObservationOutcome,
     PolicyObservation,
 )
-from maths_ai.gnn_inference.tests.model_helpers import scored, structured_goal
+from maths_ai.gnn_inference.tests.model_helpers import certify_witness, scored, structured_goal
 from maths_ai.gnn_inference.atp_lean_gnn.search_harvest import (
     HarvestConfig,
     compute_backups,
@@ -47,21 +47,21 @@ def fingerprint(goal_obj) -> str:
 
 
 class ValidityHarvestTests(unittest.TestCase):
-    def test_solved_and_unknown_and_edge_is_unknown(self):
+    def test_ready_and_unknown_and_edge_is_unknown(self):
         graph = ProofHypergraph(goal("P"))
         edge = graph.add_edge(
             graph.root_id,
             scored(tac()),
             [(goal("A"), stv()), (goal("B"), stv())],
         )
-        graph.add_edge(edge.child_ids[0], scored(tac("qed")), [])
+        closing = graph.add_edge(edge.child_ids[0], scored(tac("qed")), [])
         graph.nodes[edge.child_ids[1]].closure_reason = NodeClosureReason.ELABORATION_ERROR
         graph.nodes[edge.child_ids[1]].status = NodeStatus.DEAD
         tables = compute_backups(graph)
         self.assertEqual(tables.edge_outcomes[edge.id].validity, BackupValidity.UNKNOWN)
-        transitions = extract_transitions(graph)
-        self.assertEqual(len(transitions), 1)
-        self.assertEqual(transitions[0].edge_id, 1)
+        # The closing attempt is a candidate no replay certified.
+        self.assertEqual(tables.edge_outcomes[closing.id].validity, BackupValidity.UNKNOWN)
+        self.assertEqual(extract_transitions(graph), [])
 
     def test_known_zero_dominates_unknown_child_on_and_edge(self):
         graph = ProofHypergraph(goal("P"))
@@ -88,6 +88,7 @@ class ValidityHarvestTests(unittest.TestCase):
         )
         graph.nodes[unknown.child_ids[0]].status = NodeStatus.DEAD
         graph.nodes[unknown.child_ids[0]].closure_reason = NodeClosureReason.ELABORATION_ERROR
+        certify_witness(graph, solved.id)
         target = compute_backups(graph).node_targets[graph.root_id]
         self.assertEqual(target, target.valid(1.0, BackupSource.LEAN_STATUS))
         self.assertEqual(len(extract_transitions(graph)), 1)
@@ -137,7 +138,9 @@ class ValidityHarvestTests(unittest.TestCase):
 
     def test_critic_source_and_unique_nodes(self):
         graph = ProofHypergraph(goal("P"))
-        graph.add_edge(graph.root_id, scored(tac()), [])
+        edge = graph.add_edge(graph.root_id, scored(tac()), [])
+        self.assertEqual(extract_critic_samples(graph), [])
+        certify_witness(graph, edge.id)
         samples = extract_critic_samples(graph)
         self.assertEqual(len(samples), 1)
         self.assertEqual(samples[0].source, BackupSource.LEAN_STATUS)
@@ -168,26 +171,42 @@ class ValidityHarvestTests(unittest.TestCase):
             BackupValue.valid(0.0, BackupSource.SEARCH_FAILURE),
         )
 
-    def test_minimal_tree_requires_structural_solution(self):
+    def test_minimal_tree_requires_the_certified_witness(self):
         graph = ProofHypergraph(goal("P"))
         edge = graph.add_edge(graph.root_id, scored(tac()), [])
-        samples = extract_minimal_hypertree(
-            graph,
-            [
-                PolicyObservation(
-                    node_id=graph.root_id,
-                    goal=graph.root.goal,
-                    action=EdgeAction(tactic_id=1, graph_fingerprint=fingerprint(graph.root.goal)),
-                    outcome=ObservationOutcome.ACCEPTED,
-                    first_round=0,
-                    edge_id=edge.id,
-                    log_prior=0.0,
-                    provider="test",
-                )
-            ],
-            mine_all_solved_nodes=False,
+        observations = [
+            PolicyObservation(
+                node_id=graph.root_id,
+                goal=graph.root.goal,
+                action=EdgeAction(tactic_id=1, graph_fingerprint=fingerprint(graph.root.goal)),
+                outcome=ObservationOutcome.ACCEPTED,
+                first_round=0,
+                edge_id=edge.id,
+                log_prior=0.0,
+                provider="test",
+            )
+        ]
+        # A ready candidate is not a proof hypertree.
+        self.assertEqual(
+            extract_minimal_hypertree(graph, observations, mine_all_solved_nodes=False), []
         )
+        certify_witness(graph, edge.id, matched=False)
+        self.assertEqual(
+            extract_minimal_hypertree(graph, observations, mine_all_solved_nodes=False), []
+        )
+        certify_witness(graph, edge.id)
+        samples = extract_minimal_hypertree(graph, observations, mine_all_solved_nodes=False)
         self.assertEqual(len(samples), 1)
+
+    def test_soft_targets_ignore_subtrees_with_uncertified_candidates(self):
+        graph = ProofHypergraph(goal("P"))
+        edge = graph.add_edge(graph.root_id, scored(tac()), [(goal("A"), stv())])
+        graph.add_edge(edge.child_ids[0], scored(tac("qed")), [])
+        edge.visit_stats.N = edge.visit_stats.N_v = 4
+        edge.visit_stats.W = 4.0
+        # Q = 1 rests on a READY candidate the kernel never checked.
+        target = compute_backups(graph, visit_threshold=1).node_targets[graph.root_id]
+        self.assertEqual(target.validity, BackupValidity.UNKNOWN)
 
 
 if __name__ == "__main__":
