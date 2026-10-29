@@ -67,6 +67,10 @@ class RecipeStep:
 class RecipeSource(Protocol):
     """What replay reads from the search graph."""
 
+    @property
+    def recipe_version(self) -> int:
+        """Revision that changes when new recipe alternatives become usable."""
+
     def alternatives(self, node: int) -> Sequence[RecipeStep]:
         """Candidate-ready attempts of ``node``, best first."""
 

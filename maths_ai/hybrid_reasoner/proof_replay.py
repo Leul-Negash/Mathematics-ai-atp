@@ -210,6 +210,8 @@ class ReplayCoordinator:
         self.limits = limits or ReplayLimits()
         self.executor = executor or RetainedTacticExecutor()
         self._failed: set[tuple] = set()
+        self._memo_source: Optional[RecipeSource] = None
+        self._memo_version: Optional[int] = None
         self._anchors = 0
         self.total_steps = 0
         self.total_combinations = 0
@@ -247,6 +249,12 @@ class ReplayCoordinator:
         )
 
     async def _run(self, source, lease, pending, witness, prefix, anchor, deadline, *, deferred=()):
+        if source is not self._memo_source or source.recipe_version != self._memo_version:
+            # An ancestor that failed before widening may now have a usable
+            # descendant recipe. Do not reuse that failed prefix across revisions.
+            self._failed.clear()
+            self._memo_source = source
+            self._memo_version = source.recipe_version
         result = ReplayResult(ReplayStatus.CONFLICT)
         self._source = source
         self._deadline = deadline

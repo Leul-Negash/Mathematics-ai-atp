@@ -723,6 +723,10 @@ class ProofHypergraph:
 
     # Recipe source for replay
 
+    @property
+    def recipe_version(self) -> int:
+        return self.ready_version
+
     def alternatives(self, node_id: int) -> List[RecipeStep]:
         """READY attempts of ``node_id``, best first."""
         node = self.nodes[node_id]

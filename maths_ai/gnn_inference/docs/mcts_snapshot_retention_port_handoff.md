@@ -18,7 +18,7 @@ what changed in each MCTS consumer, and what was verified.
 | Companion REPL | `123nol/Pantograph` at `9ecaaea` |
 | Source manifest | `tests/fixtures/pantograph/retained_snapshots/source_manifest.json`, the next lineage link after `command_identity` |
 
-The new modules (`execution_types`, `execution_registry`, `execution_limits`,
+At the original port, the new modules (`execution_types`, `execution_registry`, `execution_limits`,
 `retained_executor`, `proof_recipes`, `proof_replay`) are byte-identical to the
 application source except that replay renders commands with MCTS's
 `data_models.tactic_commands.render_tactic_command`, the same function search
@@ -34,12 +34,13 @@ from its printed form (`intermediate_reconstructions` stays 0).
 at once. Under PUCT a node can be widened in later rounds, so it keeps its
 lease while its proposal source is open and releases it when the source closes
 (a widening bound, the depth limit, a finite provider's single round, or the
-node becoming READY or DEAD). The command cache is unchanged: a command runs in
-Lean at most once per node, and later rounds reuse its checked outcome.
+node becoming DEAD). READY alone keeps an open source's input retained. The
+command cache is unchanged: a command runs in Lean at most once per node, and
+later rounds reuse its checked outcome.
 
 **Readiness, not proof, guides selection.** A READY node is a candidate awaiting
-replay. Selection stops at it as it stopped at a SOLVED node, and the search's
-own backup values it at 1.0 so PUCT is drawn toward candidates; a JOINT
+replay. Search eligibility follows remaining proposal work independently of
+readiness, and the search's own backup values it at 1.0 so PUCT is drawn toward candidates; a JOINT
 attempt backs up UNKNOWN. These values only steer search. After every
 simulation batch (and every best-first expansion) the candidate recipes are
 replayed if readiness changed; only a kernel certificate ends the search as
@@ -143,7 +144,56 @@ can time out on a loaded machine.
 - Widened nodes keep their snapshots longer than AC's expanded nodes, so the
   retention bound prunes under PUCT sooner; the bound has not been measured
   against a trained policy.
-- A READY root that does not certify stops selection from the root; the search
-  continues only through continuations, then ends.
+- An uncertified READY root remains searchable while proposal budgets permit;
+  original occurrences and replay continuations both receive simulation turns.
 - The AC limits on digests, attempt ids, JOINT attempts and the prepared
   vocabulary's `:metavar` label apply unchanged.
+
+
+## PR #69 recovery and lifecycle follow-up
+
+The source branch now separates recipe readiness from remaining search work.
+READY nodes can be widened while their sources remain open, and closed
+ancestors can lead to descendants with additional proposals. Fully spent
+candidate leaves are skipped. Simulation start points rotate across the root
+and continuations even with a batch size of one.
+
+Both recipe sources expose a revision. Replay memoizes failed combinations
+only for that revision, so widening an internal occurrence makes its ancestors
+eligible for replay with the new recipe. Ready continuations are resumed before
+retrying their prefixes from the root.
+
+Shared cleanup releases graph leases when proposal sources close, including
+unsupported batched observations before supported requests execute. It keeps
+inputs through their entire active round. Continuation graph ownership and
+replay anchors use distinct registry leases. Anchors retire after attempted
+recipes have no remaining work; pending READY recipes keep their anchor until
+resumption. Open READY sources can be pruned without discarding their accepted
+recipes. Scope exit still cleans up every remaining allocation.
+
+The source lineage continues in
+`tests/fixtures/pantograph/mcts_replay_recovery/source_manifest.json`, based on
+`c52f74c`. Earlier source manifests are preserved. Dependency pins, the installed
+client, the deployed REPL, model features, and user configuration are unchanged.
+
+Validation on 2026-10-29, with the exact pinned client in an isolated import
+location and sequential native Mathlib tests:
+
+- Full application suite: 607 passed, 34 skipped, 35 subtests passed.
+- Focused replay/MCTS run: 32 passed, including 23 native custom-REPL tests.
+  The new live cases recover a later valid alternative after shared-witness
+  conflict, reverify its artifact in a fresh session, and certify a supported
+  alternative within three retained snapshots after closing an unsupported leaf.
+- CPU PUCT RL smoke with eight simulations and PLN disabled: one root admission,
+  zero intermediate reconstructions, collection/harvesting, and one optimizer
+  update completed. This untrained short run did not find a certified proof.
+- Regressions also cover internal-node recovery, stale-prefix invalidation,
+  single-simulation scheduling fairness, separate continuation leases, shared
+  sibling allocations, and inputs retained through multi-candidate rounds.
+
+The two PR #69 merge-blocking findings are resolved in this working tree.
+The recommendation is to merge after these changes are committed and pushed.
+The remote PR was still at `c52f74c` when last checked and reported no merge
+conflicts or automated check results. Multi-worker GPU collection and trained
+checkpoint proof rates were not measured here. Previously deferred imported
+content identity and hole-classification work remain outside this change.

@@ -10,7 +10,7 @@ except ImportError:
     Digraph = None
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Set
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import pantograph_async
 from pantograph_async import (
     PROTOCOL_DESCRIPTION,
@@ -228,6 +228,7 @@ class HybridReasoner:
         # Per-search state, reset by each prove().
         self._root_occurrence: ExecutionOccurrence | None = None
         self._continuations: dict = {}
+        self._continuation_replayed: dict[int, int] = {}
         self._counters: dict = {}
         self.gnn_engine = self._build_gnn_engine(
             config_path=config_path,
@@ -573,6 +574,7 @@ class HybridReasoner:
             "fingerprint": spec.fingerprint,
         }
         self._continuations = {}
+        self._continuation_replayed = {}
         self._replayed_version = -1
         self._replay_stopped = False
         self._counters = {
@@ -670,6 +672,7 @@ class HybridReasoner:
         self._expanding = set()
         self._root_occurrence = None
         self._continuations = {}
+        self._continuation_replayed = {}
         registry.invalidate()
 
     async def _try_certify(self, graph: ProofHypergraph) -> None:
@@ -682,11 +685,12 @@ class HybridReasoner:
             return
         self._replayed_version = graph.ready_version
         attempts = []
-        if graph.has_candidate():
-            attempts.append((graph.root_id, None))
         for node_id, continuation in list(self._continuations.items()):
             if graph.nodes[node_id].status == NodeStatus.READY:
                 attempts.append((node_id, continuation))
+        # Finish a prepared continuation before rebuilding the same prefix.
+        if graph.has_candidate():
+            attempts.append((graph.root_id, None))
         for node_id, continuation in attempts:
             self._counters["replay_attempts"] += 1
             if continuation is None:
@@ -707,8 +711,18 @@ class HybridReasoner:
                 if len(self._continuations) >= self.retention.max_replay_continuations:
                     await self._registry.release(kept.occurrence.lease)
                     continue
-                node = graph.add_continuation(kept.occurrence, kept.node)
+                occurrence = replace(
+                    kept.occurrence,
+                    declarations=dict(kept.occurrence.declarations),
+                    lease=self._registry.share(
+                        kept.occurrence.lease, LeaseKind.GRAPH, "continuation proposals"
+                    ),
+                )
+                node = graph.add_continuation(occurrence, kept.node)
                 self._continuations[node.id] = kept
+            await self._release_closed_sources(
+                graph, attempted_continuation=node_id if continuation is not None else None
+            )
             if result.status is ReplayStatus.RESOURCE_LIMIT:
                 # Even after pruning, the replay's own anchors did not fit.
                 graph.end_reason = SearchEndReason.RESOURCE_LIMIT
@@ -747,13 +761,14 @@ class HybridReasoner:
         increment N_v or W.
 
         After each batch the candidate recipes are replayed if readiness
-        changed (``_try_certify``). A READY node is a candidate awaiting that
-        replay, so selection stops at it like at a resolved node. A replay
+        changed (``_try_certify``). READY records candidate recipes and does
+        not close their proposal sources or searchable descendants. A replay
         continuation is a parentless node for an actual obligation of the
         conflicting replay; simulations start from it as well as from the root,
         in turn, so it is searched like any other node.
         """
         simulations_done = 0
+        start_cursor = 0
         while (
             not graph.is_solved()
             and not graph.is_exhausted()
@@ -765,6 +780,8 @@ class HybridReasoner:
             simulations: List[_Simulation] = []
             budget = min(self.sim_batch_size, self.num_simulations - simulations_done)
             starts = [graph.root_id, *self._continuations]
+            offset = start_cursor % len(starts)
+            starts = starts[offset:] + starts[:offset]
             while starts and len(simulations) < budget:
                 for start in list(starts):
                     if len(simulations) >= budget:
@@ -774,6 +791,7 @@ class HybridReasoner:
                         starts.remove(start)  # nothing selectable below this start
                         continue
                     simulations.append(simulation)
+                    start_cursor += 1
             if not simulations:
                 break
 
@@ -824,6 +842,46 @@ class HybridReasoner:
         else:
             graph.end_reason = SearchEndReason.FRONTIER_EMPTY
 
+    def _source_has_work(self, node: ProofNode) -> bool:
+        """Whether more proposals remain, independently of recipe readiness."""
+        if node.exhausted or node.status == NodeStatus.DEAD:
+            return False
+        if self.widening is None:
+            return node.status == NodeStatus.OPEN
+        return not self.widening.exhausted(
+            attempted=node.attempted_commands, draws=node.proposal_draws
+        )
+
+    def _has_search_work(
+        self, graph: ProofHypergraph, node_id: int,
+        memo: Optional[dict[int, bool]] = None,
+        visiting: Optional[set[int]] = None,
+    ) -> bool:
+        """Find an open proposal source here or below an accepted attempt."""
+        memo = {} if memo is None else memo
+        visiting = set() if visiting is None else visiting
+        if node_id in memo:
+            return memo[node_id]
+        if node_id in visiting:
+            return False
+        node = graph.nodes[node_id]
+        if node.status == NodeStatus.DEAD:
+            memo[node_id] = False
+            return False
+        if self._source_has_work(node):
+            memo[node_id] = True
+            return True
+        visiting.add(node_id)
+        work = any(
+            self._has_search_work(graph, child_id, memo, visiting)
+            for edge_id in node.outgoing_edge_ids
+            if graph.edges[edge_id].status != EdgeStatus.DEAD
+            for child_id in graph.edges[edge_id].child_ids
+        )
+        visiting.remove(node_id)
+        memo[node_id] = work
+        return work
+
     def _select_partial_hypertree(
         self, graph: ProofHypergraph, start: Optional[int] = None
     ) -> Optional["_Simulation"]:
@@ -840,15 +898,17 @@ class HybridReasoner:
         away from this in-flight path; with no such edge, the node is
         deferred — the simulation still visits it, so its capacity can grow.
 
-        Returns ``None`` when nothing is selectable (``start`` is resolved).
+        READY recipes do not stop selection while a source here or below can
+        still add alternatives. Returns ``None`` when no search work remains.
         """
         simulation = _Simulation()
+        work: dict[int, bool] = {}
         stack: List[int] = [graph.root_id if start is None else start]
         while stack:
             node_id = stack.pop()
             node = graph.nodes[node_id]
-            if node.status in (NodeStatus.READY, NodeStatus.DEAD):
-                continue  # terminal for this simulation; backup reads the status
+            if not self._has_search_work(graph, node_id, work):
+                continue  # no proposal source here or below can change the recipes
             simulation.selected.append(node_id)
             if self._round_draws(node) > 0:
                 simulation.leaves.append(node_id)
@@ -857,6 +917,10 @@ class HybridReasoner:
                 graph.edges[eid]
                 for eid in node.outgoing_edge_ids
                 if graph.edges[eid].status != EdgeStatus.DEAD
+                and any(
+                    self._has_search_work(graph, child, work)
+                    for child in graph.edges[eid].child_ids
+                )
             ]
             if not viable:
                 # Open source, nothing known to select, no capacity yet.
@@ -889,7 +953,7 @@ class HybridReasoner:
         its existing edges. Without widening (best-first), an OPEN node gets
         one round of ``top_k_tactics``.
         """
-        if node.exhausted or node.status in (NodeStatus.READY, NodeStatus.DEAD):
+        if not self._source_has_work(node):
             return 0
         if self.widening is None:
             return self.top_k_tactics if node.status == NodeStatus.OPEN else 0
@@ -961,7 +1025,7 @@ class HybridReasoner:
                     reason=NodeClosureReason.DEPTH_LIMIT,
                     note=f"depth limit ({self.max_depth}) reached",
                 )
-                await self._drop_snapshot(node)
+                await self._release_closed_sources(graph)
                 self._on_expansion_complete(node, ExpansionResult.DEPTH_LIMIT)
                 continue
             if not self._is_retained(graph, node):
@@ -973,9 +1037,11 @@ class HybridReasoner:
                     visits=node.visits, rounds=node.proposal_rounds + 1
                 )
         if not requests:
+            await self._release_closed_sources(graph)
             return
 
         proposals = self._propose_observable(graph, requests, draws)
+        await self._release_closed_sources(graph)
         if len(proposals) != len(requests):
             raise RuntimeError("Batched proposals do not align with the leaf batch.")
 
@@ -991,6 +1057,7 @@ class HybridReasoner:
                 await self._run_round(graph, node, candidates, count)
         finally:
             self._expanding = set()
+            await self._release_closed_sources(graph)
 
     def _is_retained(self, graph: ProofHypergraph, node: ProofNode) -> bool:
         """Whether ``node`` still has its snapshot; close it as pruned otherwise."""
@@ -1058,8 +1125,8 @@ class HybridReasoner:
             else:
                 await self._execute_and_link(graph, node, candidates, draws=draws)
         finally:
-            if node.exhausted or node.status in (NodeStatus.READY, NodeStatus.DEAD):
-                await self._drop_snapshot(node)
+            self._expanding.discard(node.id)
+            await self._release_closed_sources(graph)
 
     def _settle_round(
         self,
@@ -1283,7 +1350,7 @@ class HybridReasoner:
                 reason=NodeClosureReason.DEPTH_LIMIT,
                 note=f"depth limit ({self.max_depth}) reached",
             )
-            await self._drop_snapshot(node)
+            await self._release_closed_sources(graph)
             self._on_expansion_complete(node, ExpansionResult.DEPTH_LIMIT)
             return
         if not self._is_retained(graph, node):
@@ -1293,21 +1360,45 @@ class HybridReasoner:
             candidates = self.predict_next_tactics_for_nodes([node])[0]
         except UnsupportedObservation as exc:
             self._close_unsupported(graph, node, exc)
-            await self._drop_snapshot(node)
+            await self._release_closed_sources(graph)
             return
         self._expanding = {node.id}
         try:
             await self._run_round(graph, node, candidates, self.top_k_tactics)
         finally:
             self._expanding = set()
+            await self._release_closed_sources(graph)
 
     async def _drop_snapshot(self, node: ProofNode) -> None:
-        """A node whose source closed no longer needs its snapshot; continuations keep theirs."""
+        """Release only this graph occurrence's proposal ownership."""
         occurrence = node.occurrence
-        if occurrence is None or node.continuation_of is not None:
-            return
-        if occurrence.lease is not None and self._registry is not None:
+        if occurrence is not None and occurrence.lease is not None:
             await self._registry.release(occurrence.lease)
+
+    async def _release_closed_sources(
+        self, graph: ProofHypergraph, *, attempted_continuation: Optional[int] = None
+    ) -> None:
+        """Release spent proposal inputs and anchors with no resumable work."""
+        if attempted_continuation is not None:
+            self._continuation_replayed[attempted_continuation] = graph.recipe_version
+        for node in graph.nodes.values():
+            if node.id not in self._expanding and not self._source_has_work(node):
+                await self._drop_snapshot(node)
+        work: dict[int, bool] = {}
+        for node_id, continuation in list(self._continuations.items()):
+            if node_id in self._expanding:
+                continue
+            node = graph.nodes[node_id]
+            # A READY continuation still needs its first resume even when its
+            # proposal source is closed. After resume, only new work needs it.
+            pending_resume = (
+                node.status == NodeStatus.READY
+                and self._continuation_replayed.get(node_id) != graph.recipe_version
+            )
+            if not pending_resume and not self._has_search_work(graph, node_id, work):
+                await self._registry.release(continuation.occurrence.lease)
+                self._continuations.pop(node_id, None)
+                self._continuation_replayed.pop(node_id, None)
 
     def _memory_exceeded(self) -> bool:
         return any(
@@ -1325,8 +1416,7 @@ class HybridReasoner:
         expandable = [
             other for other in graph.nodes.values()
             if other.id not in self._expanding
-            and not other.exhausted
-            and other.status not in (NodeStatus.READY, NodeStatus.DEAD)
+            and self._source_has_work(other)
             and other.occurrence is not None
             and other.occurrence.is_retained
             and not self._registry.is_pinned(other.occurrence.lease)
@@ -1337,7 +1427,6 @@ class HybridReasoner:
         count = max(1, int(len(candidates) * fraction)) if candidates else 0
         for other in candidates[:count]:
             lease = other.occurrence.lease
-            self._continuations.pop(other.id, None)
             other.occurrence = None
             if lease is not None:
                 await self._registry.release(lease)
@@ -1347,6 +1436,7 @@ class HybridReasoner:
                 note="pruned under snapshot retention pressure",
             )
             self._counters["pruned_nodes"] += 1
+        await self._release_closed_sources(graph)
         return count
 
     async def _make_room(self, count: int) -> None:
@@ -1361,6 +1451,7 @@ class HybridReasoner:
         graph = self._graph
         if graph is None:
             return
+        await self._release_closed_sources(graph)
         while True:
             pressure = self._memory_exceeded()
             if not pressure and self._registry.has_capacity(count):

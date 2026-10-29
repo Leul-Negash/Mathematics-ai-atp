@@ -13,6 +13,7 @@ from torch_geometric.data import Batch
 from maths_ai.data_models.proof_components import STV, TacticCandidate
 from maths_ai.lean_replay import seed_from_text
 from maths_ai.hybrid_reasoner.execution_types import ExecutionOccurrence
+from maths_ai.hybrid_reasoner.execution_registry import LeaseKind, SnapshotRegistry
 from maths_ai.hybrid_reasoner.hypergraph import (
     NodeClosureReason,
     ProofHypergraph,
@@ -26,6 +27,8 @@ from maths_ai.gnn_inference.atp_lean_gnn.actor_critic import (
     ActorCriticWithArgsClassifier,
 )
 from maths_ai.gnn_inference.tests.model_helpers import (
+    FakeResultState,
+    FakeStateScope,
     ScopedFakeClient,
     ScriptedExecutor,
     actor_critic,
@@ -715,14 +718,21 @@ class MCTSSearchTests(unittest.TestCase):
         return graph, edge.child_ids
 
     @staticmethod
-    def _retain(graph, node_ids, *, skip=()):
-        """Give each leaf a stand-in retained occurrence of its own."""
+    def _retain(reasoner, graph, node_ids, *, skip=()):
+        """Give each leaf a registry-owned occurrence of its own."""
+        registry = SnapshotRegistry(FakeStateScope(ScopedFakeClient()))
+        reasoner._registry = registry
         leases = {}
         for node_id in node_ids:
             if node_id in skip:
                 continue
             node = graph.nodes[node_id]
-            leases[node_id] = SimpleNamespace(released=False)
+            state = FakeResultState([
+                replace(pantograph_goal(node.goal), goal_name=f"g{node_id}")
+            ])
+            leases[node_id] = registry.reserve().adopt(
+                state, LeaseKind.GRAPH, f"leaf-{node_id}"
+            )
             node.occurrence = ExecutionOccurrence(
                 node_id, node.key, f"g{node_id}", node.goal, {}, leases[node_id]
             )
@@ -731,7 +741,7 @@ class MCTSSearchTests(unittest.TestCase):
     def test_leaf_batch_is_proposed_once_and_executed_on_its_own_snapshot(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
         graph, leaf_ids = self._two_leaf_graph()
-        leases = self._retain(graph, leaf_ids)
+        leases = self._retain(reasoner, graph, leaf_ids)
         policy_rows = []
         executions = []
 
@@ -754,7 +764,7 @@ class MCTSSearchTests(unittest.TestCase):
     def test_an_unretained_leaf_does_not_shift_policy_rows(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
         graph, leaf_ids = self._two_leaf_graph()
-        self._retain(graph, leaf_ids, skip={leaf_ids[0]})
+        self._retain(reasoner, graph, leaf_ids, skip={leaf_ids[0]})
         proposed = []
 
         def propose(self, nodes, draws=None):
@@ -771,7 +781,7 @@ class MCTSSearchTests(unittest.TestCase):
     def test_an_unobservable_leaf_is_closed_without_failing_the_batch(self):
         reasoner, _model, _vocab = _make_reasoner(_QEDExecutor())
         graph, leaf_ids = self._two_leaf_graph()
-        self._retain(graph, leaf_ids)
+        self._retain(reasoner, graph, leaf_ids)
         reasoner._counters = {}
         proposed = []
 

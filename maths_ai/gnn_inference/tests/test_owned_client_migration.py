@@ -235,5 +235,14 @@ def test_port_sources_match_the_recorded_lineage_and_current_adaptations():
         if entry["path"] in expected:
             assert entry["target_base_sha256"] == expected[entry["path"]], entry["path"]
         expected[entry["path"]] = entry["sha256"]
+    # Replay recovery extends the source chain without rewriting the port.
+    recovery = json.loads(
+        (WIDENING_MANIFEST.parent.parent / "mcts_replay_recovery/source_manifest.json").read_text()
+    )
+    assert recovery["target_base_commit"] == "c52f74c24a6aa7a74524c6d22d1a904dc5d7851b"
+    for entry in recovery["sources"]:
+        if entry["path"] in expected:
+            assert entry["target_base_sha256"] == expected[entry["path"]], entry["path"]
+        expected[entry["path"]] = entry["sha256"]
     for path, digest in expected.items():
         assert hashlib.sha256((root / path).read_bytes()).hexdigest() == digest, path

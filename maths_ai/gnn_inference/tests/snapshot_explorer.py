@@ -101,6 +101,10 @@ class Explorer:
 
     # RecipeSource
 
+    @property
+    def recipe_version(self) -> int:
+        return self._attempts
+
     def _ready(self, node: int, seen=frozenset()) -> bool:
         return any(self._edge_ready(edge, seen | {node}) for edge in self.nodes[node].edges)
 
